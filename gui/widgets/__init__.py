@@ -1,0 +1,11 @@
+# HAWK — Hostile Assessment WorKit
+# Copyright 2026 Lorenzo Serafini
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# A copy of the License is provided in the LICENSE file at the root
+# of this distribution, or at http://www.apache.org/licenses/LICENSE-2.0
+#
+# Attribution "Created by Lorenzo Serafini" must be preserved in all
+# redistributed and Derivative Works — see NOTICE for details.
+

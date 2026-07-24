@@ -1,0 +1,33 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/mongodb.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: mongodb
+title: MongoDB
+aliases:
+- mongo
+intro: 'Client: mongosh (modern) or legacy mongo shell.  Vanilla MongoDB < 4.0 ships
+  with NO authentication — try `show dbs` first.'
+commands:
+- cmd: show dbs
+  desc: List databases
+- cmd: use <db>
+  desc: Switch to a database (creates implicitly)
+- cmd: show collections
+  desc: List collections in current db
+- cmd: db.<coll>.find().limit(10)
+  desc: Sample 10 documents
+- cmd: db.<coll>.findOne()
+  desc: Show first document (schema discovery)
+- cmd: db.<coll>.countDocuments()
+  desc: Count documents
+- cmd: db.system.users.find()
+  desc: List user accounts (auth-enabled instances)
+- cmd: 'db.adminCommand({ getCmdLineOpts: 1 })'
+  desc: Server launch parameters (config disclosure)
+- cmd: db.serverStatus()
+  desc: Server health / version dump
+- cmd: db.version()
+  desc: Just the version string
+- cmd: exit
+  desc: Exit mongosh / mongo

@@ -1,0 +1,40 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/postgresql.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: postgresql
+title: PostgreSQL
+aliases:
+- postgres
+intro: Backslash meta-commands (\l, \dt, ...) work on PostgreSQL 9.1+.  On PG 8.x
+  (e.g. Metasploitable2's 8.3) the modern psql client raises 'column ... does not
+  exist' — use the raw-SQL fallbacks at the bottom of this list.
+commands:
+- cmd: \l
+  desc: List databases (PG 9.1+)
+- cmd: \c <db>
+  desc: Connect to a database (works on all PG versions)
+- cmd: \dt
+  desc: List tables in current database (PG 9.1+)
+- cmd: \d <table>
+  desc: Show table schema (PG 9.1+)
+- cmd: \du
+  desc: List roles / users with attributes
+- cmd: SELECT * FROM <table> LIMIT 10;
+  desc: Sample 10 rows from a table
+- cmd: SELECT usename, passwd FROM pg_shadow;
+  desc: Dump password hashes (superuser only)
+- cmd: SELECT version();
+  desc: Server version
+- cmd: SELECT current_user, current_database();
+  desc: Current user + current DB
+- cmd: \q
+  desc: Exit psql
+- cmd: '-- PostgreSQL 8.x fallback (works on all versions):'
+  desc: ''
+- cmd: SELECT datname FROM pg_database;
+  desc: List databases (PG 7.x → 17.x)
+- cmd: SELECT schemaname, tablename FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema');
+  desc: List user tables (all PG versions)
+- cmd: SELECT usename FROM pg_user;
+  desc: List users (all PG versions)

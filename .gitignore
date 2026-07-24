@@ -1,0 +1,52 @@
+# ── Python runtime ──────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ── Virtual environments ────────────────────────────────────
+.venv/
+venv/
+env/
+
+# ── HAWK runtime data (engagement data — NEVER commit) ──────
+sessions/*
+outputs/*
+reports/*
+dicts/*
+tmp/*
+cache/*
+logs/*
+configs/*
+
+# Keep empty runtime dirs in the tree
+!sessions/.gitkeep
+!outputs/.gitkeep
+!reports/.gitkeep
+!dicts/.gitkeep
+!tmp/.gitkeep
+!cache/.gitkeep
+!logs/.gitkeep
+!configs/.gitkeep
+
+# ── Secrets & local environment ─────────────────────────────
+.env
+.env-paths.sh
+.apikeys.json
+*.bak
+*.tmp
+*.log
+
+# ── Local tooling / agent config (never push) ───────────────
+.claude/
+
+# ── OS / editor noise ───────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# NOTE: report PDFs are covered by reports/* above.
+# HAWK-Presentation-*.pdf is intentionally versioned (placeholder-only content).

@@ -1,0 +1,38 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/elasticsearch.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: elasticsearch
+title: Elasticsearch
+aliases:
+- elastic
+- elastic-search
+intro: HTTP REST API on port 9200 (data) and 9300 (transport).  Vanilla ES < 8.x has
+  NO auth by default — try the URLs below first.  Add `-u user:pass` to curl if auth
+  enabled.
+commands:
+- cmd: curl http://<host>:9200/
+  desc: Server welcome + version + cluster name
+- cmd: curl http://<host>:9200/_cat/indices?v
+  desc: List indices (table)
+- cmd: curl http://<host>:9200/_cat/health?v
+  desc: Cluster health (green/yellow/red)
+- cmd: curl http://<host>:9200/_cat/nodes?v
+  desc: List nodes (host names, roles)
+- cmd: curl http://<host>:9200/<index>/_search?pretty&size=10
+  desc: Sample 10 docs from an index
+- cmd: curl 'http://<host>:9200/<index>/_search?pretty&q=*'
+  desc: Search across an index (query string)
+- cmd: curl http://<host>:9200/_cluster/state?pretty
+  desc: Full cluster state JSON
+- cmd: curl http://<host>:9200/_cluster/settings?pretty
+  desc: Cluster settings (transient + persistent)
+- cmd: curl http://<host>:9200/_security/user
+  desc: List users (auth-enabled instance, 7.x+)
+- cmd: curl http://<host>:9200/_nodes/_all/_all?pretty
+  desc: All node info (paths, plugins, settings)
+- cmd: '# CVE-2014-3120 / CVE-2015-1427 RCE via groovy/MVEL scripting (ES < 1.4.3)
+    — search ''searchsploit elasticsearch'''
+  desc: ''
+- cmd: '# Older ES 1.x had _shutdown endpoint — try `curl -XPOST http://host:9200/_shutdown`'
+  desc: ''

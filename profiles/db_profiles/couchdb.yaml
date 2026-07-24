@@ -1,0 +1,35 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/couchdb.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: couchdb
+title: CouchDB
+aliases:
+- couch
+intro: HTTP REST + JSON.  Port 5984.  Admin Party (no auth) was the default until
+  3.x.  CVE-2017-12635 / CVE-2017-12636 / CVE-2022-24706 are all RCE chains on un-patched
+  1.x/2.x.
+commands:
+- cmd: curl http://<host>:5984/
+  desc: 'Welcome + version (1.x: ''couchdb welcome'', 2.x+: JSON with version field)'
+- cmd: curl http://<host>:5984/_all_dbs
+  desc: List all databases (JSON array)
+- cmd: curl http://<host>:5984/<db>/_all_docs?limit=10
+  desc: List 10 doc IDs from a database
+- cmd: curl 'http://<host>:5984/<db>/_all_docs?include_docs=true&limit=10'
+  desc: Same + full doc bodies
+- cmd: curl http://<host>:5984/<db>/<doc_id>
+  desc: Fetch a single document by ID
+- cmd: curl http://<host>:5984/_users/_all_docs
+  desc: List user accounts (may require admin auth)
+- cmd: 'curl http://<host>:5984/_config  # CouchDB 1.x'
+  desc: Full server config (1.x only — JSON)
+- cmd: curl http://<host>:5984/_node/_local/_config
+  desc: Server config (CouchDB 2.x+)
+- cmd: curl http://<host>:5984/_membership
+  desc: Cluster membership (2.x+)
+- cmd: '# CVE-2017-12635: privilege escalation via duplicate JSON keys in PUT /_users/...'
+  desc: ''
+- cmd: '# CVE-2022-24706: pre-auth RCE in clustered setup via Erlang cookie — searchsploit
+    couchdb'
+  desc: ''

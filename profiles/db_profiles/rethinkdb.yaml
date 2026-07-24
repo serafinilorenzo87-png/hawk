@@ -1,0 +1,35 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/rethinkdb.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: rethinkdb
+title: RethinkDB
+aliases:
+- rethink
+intro: Driver protocol on port 28015 (binary).  Web Admin UI usually on 8080.  No
+  CLI on Kali by default — use Python driver `pip install rethinkdb` then python3
+  -i.  No-auth by default until 2.3.
+commands:
+- cmd: 'pip install rethinkdb  # one-time setup'
+  desc: Install Python driver
+- cmd: python3
+  desc: Start Python REPL
+- cmd: import rethinkdb; r=rethinkdb.RethinkDB()
+  desc: Import driver
+- cmd: c = r.connect(host='<host>', port=28015)
+  desc: Open connection (add user=, password= if auth)
+- cmd: list(r.db_list().run(c))
+  desc: List databases
+- cmd: list(r.db('<db>').table_list().run(c))
+  desc: List tables in a database
+- cmd: list(r.db('<db>').table('<table>').limit(10).run(c))
+  desc: Sample 10 rows
+- cmd: r.db('rethinkdb').table('users').run(c)
+  desc: List user accounts (auth-enabled)
+- cmd: r.db('rethinkdb').table('server_status').run(c)
+  desc: Server status info
+- cmd: c.close()
+  desc: Close connection
+- cmd: '# Admin web UI: http://<host>:8080/ — no auth in old versions, full DB management
+    UI'
+  desc: ''

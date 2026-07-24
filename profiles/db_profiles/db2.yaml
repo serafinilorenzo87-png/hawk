@@ -1,0 +1,33 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/db2.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: db2
+title: IBM DB2
+aliases:
+- ibm-db2
+- db2as
+intro: 'IBM enterprise RDBMS.  Default port 50000 (non-SSL), 50001 (SSL).  Default
+  DBA: db2inst1 with same name as password on many installs.  Client: db2 CLP (db2cli)
+  — install IBM Data Server Client.'
+commands:
+- cmd: db2 CONNECT TO <db> USER db2inst1 USING db2inst1
+  desc: Connect (default DBA creds attempt)
+- cmd: db2 "SELECT * FROM SYSCAT.TABLES FETCH FIRST 10 ROWS ONLY"
+  desc: List tables (DB2 uses FETCH FIRST, not LIMIT)
+- cmd: db2 LIST DATABASE DIRECTORY
+  desc: List databases on this server
+- cmd: db2 LIST TABLES FOR ALL
+  desc: List all tables (current connection)
+- cmd: db2 LIST TABLESPACES
+  desc: List tablespaces
+- cmd: db2 LIST APPLICATIONS
+  desc: Active connections
+- cmd: db2 "SELECT NAME, CREATETIME FROM SYSCAT.SCHEMATA"
+  desc: List schemas
+- cmd: db2 "SELECT AUTHID FROM SYSCAT.DBAUTH"
+  desc: List authorized users
+- cmd: db2 GET DBM CFG
+  desc: Database manager config
+- cmd: db2 quit
+  desc: Exit db2 CLP

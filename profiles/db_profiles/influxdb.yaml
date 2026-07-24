@@ -1,0 +1,34 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/influxdb.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: influxdb
+title: InfluxDB
+aliases:
+- influx
+intro: Time-series DB.  HTTP API on port 8086.  v1.x uses InfluxQL (SQL-like); v2.x
+  uses Flux. v1 had no auth by default until 1.3; v2 always requires token.  CVE-2019-20933
+  (1.7.6-) is an auth bypass via empty username.
+commands:
+- cmd: curl http://<host>:8086/ping
+  desc: Health check (returns 204 on OK)
+- cmd: '# === InfluxDB 1.x ==='
+  desc: ''
+- cmd: curl 'http://<host>:8086/query?q=SHOW DATABASES'
+  desc: List databases (v1)
+- cmd: curl 'http://<host>:8086/query?q=SHOW USERS'
+  desc: List users (v1, admin auth)
+- cmd: curl 'http://<host>:8086/query?db=<db>&q=SHOW MEASUREMENTS'
+  desc: List measurements (= tables) in a database
+- cmd: curl 'http://<host>:8086/query?db=<db>&q=SHOW SERIES'
+  desc: List all time-series in a db
+- cmd: curl --data-urlencode 'q=SELECT * FROM <m> LIMIT 10' 'http://<host>:8086/query?db=<db>'
+  desc: Sample data from a measurement
+- cmd: '# === InfluxDB 2.x ==='
+  desc: ''
+- cmd: curl http://<host>:8086/health
+  desc: Health endpoint (JSON)
+- cmd: 'curl -H ''Authorization: Token <token>'' http://<host>:8086/api/v2/buckets'
+  desc: List buckets (= databases)
+- cmd: 'curl -H ''Authorization: Token <token>'' http://<host>:8086/api/v2/orgs'
+  desc: List organizations

@@ -1,0 +1,32 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/clickhouse.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: clickhouse
+title: ClickHouse
+aliases: []
+intro: Columnar OLAP DB.  HTTP interface on 8123, native protocol on 9000.  Default
+  user is 'default' with empty password.  HTTP is the simplest entry point (curl).
+commands:
+- cmd: curl 'http://<host>:8123/?query=SELECT version()'
+  desc: Server version
+- cmd: curl 'http://<host>:8123/?query=SHOW DATABASES'
+  desc: List databases
+- cmd: curl 'http://<host>:8123/?query=SHOW TABLES FROM <db>'
+  desc: List tables in a database
+- cmd: curl 'http://<host>:8123/?query=DESCRIBE TABLE <db>.<t>'
+  desc: Show table schema
+- cmd: curl 'http://<host>:8123/?query=SELECT * FROM <db>.<t> LIMIT 10 FORMAT Pretty'
+  desc: Sample rows (Pretty format = human-readable)
+- cmd: curl 'http://<host>:8123/?query=SELECT name, password_sha256_hex FROM system.users'
+  desc: Dump user hashes (default/admin only)
+- cmd: curl 'http://<host>:8123/?query=SELECT * FROM system.processes'
+  desc: Active queries (process list)
+- cmd: curl 'http://<host>:8123/?query=SELECT * FROM system.settings WHERE changed
+    = 1'
+  desc: Server settings (changed from default)
+- cmd: curl -u <user>:<pass> 'http://<host>:8123/?query=SELECT 1'
+  desc: Test credentials (auth via Basic)
+- cmd: '# Native CLI: clickhouse-client --host <host> --port 9000 -u <user> --password
+    <pass>'
+  desc: ''

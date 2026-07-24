@@ -1,0 +1,35 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/hive.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: hive
+title: Apache Hive
+aliases:
+- hiveserver2
+- hive2
+intro: 'Hadoop SQL layer.  HiveServer2 on port 10000 (Thrift JDBC).  Default no auth
+  (anonymous user ''anonymous''); some deployments use Kerberos.  Client: beeline
+  (apt install hive — comes with Hadoop).'
+commands:
+- cmd: beeline -u 'jdbc:hive2://<host>:10000/default'
+  desc: Connect anonymously
+- cmd: beeline -u 'jdbc:hive2://<host>:10000/default' -n <user> -p <pass>
+  desc: Connect with credentials
+- cmd: SHOW DATABASES;
+  desc: List databases (Hive metastore)
+- cmd: USE <db>;
+  desc: Switch database
+- cmd: SHOW TABLES;
+  desc: List tables in current db
+- cmd: DESCRIBE <table>;
+  desc: Show table schema
+- cmd: DESCRIBE EXTENDED <table>;
+  desc: Show schema + storage location (HDFS path leak)
+- cmd: SELECT * FROM <table> LIMIT 10;
+  desc: Sample rows
+- cmd: SHOW FUNCTIONS;
+  desc: List built-in + custom UDFs
+- cmd: CREATE TEMPORARY FUNCTION pwn AS '<package>.<UDFclass>';
+  desc: Load custom Java UDF (RCE chain if HDFS-writable)
+- cmd: '!quit'
+  desc: Exit beeline

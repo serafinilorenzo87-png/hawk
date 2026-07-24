@@ -1,0 +1,31 @@
+{
+  "source": "MITRE ATT&CK Enterprise",
+  "version": "curated offline snapshot",
+  "techniques": [
+    {"id": "T1595.002", "name": "Active Scanning: Vulnerability Scanning", "tactics": ["Reconnaissance"], "url": "https://attack.mitre.org/techniques/T1595/002/"},
+    {"id": "T1595.003", "name": "Active Scanning: Wordlist Scanning", "tactics": ["Reconnaissance"], "url": "https://attack.mitre.org/techniques/T1595/003/"},
+    {"id": "T1190", "name": "Exploit Public-Facing Application", "tactics": ["Initial Access"], "url": "https://attack.mitre.org/techniques/T1190/"},
+    {"id": "T1078", "name": "Valid Accounts", "tactics": ["Initial Access", "Persistence", "Privilege Escalation", "Defense Evasion"], "url": "https://attack.mitre.org/techniques/T1078/"},
+    {"id": "T1068", "name": "Exploitation for Privilege Escalation", "tactics": ["Privilege Escalation"], "url": "https://attack.mitre.org/techniques/T1068/"},
+    {"id": "T1210", "name": "Exploitation of Remote Services", "tactics": ["Lateral Movement"], "url": "https://attack.mitre.org/techniques/T1210/"},
+    {"id": "T1110", "name": "Brute Force", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1110/"},
+    {"id": "T1110.001", "name": "Brute Force: Password Guessing", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1110/001/"},
+    {"id": "T1110.003", "name": "Brute Force: Password Spraying", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1110/003/"},
+    {"id": "T1557.001", "name": "Adversary-in-the-Middle: LLMNR/NBT-NS Poisoning and SMB Relay", "tactics": ["Credential Access", "Collection"], "url": "https://attack.mitre.org/techniques/T1557/001/"},
+    {"id": "T1558", "name": "Steal or Forge Kerberos Tickets", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1558/"},
+    {"id": "T1558.001", "name": "Steal or Forge Kerberos Tickets: Golden Ticket", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1558/001/"},
+    {"id": "T1558.002", "name": "Steal or Forge Kerberos Tickets: Silver Ticket", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1558/002/"},
+    {"id": "T1558.003", "name": "Steal or Forge Kerberos Tickets: Kerberoasting", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1558/003/"},
+    {"id": "T1558.004", "name": "Steal or Forge Kerberos Tickets: AS-REP Roasting", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1558/004/"},
+    {"id": "T1649", "name": "Steal or Forge Authentication Certificates", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1649/"},
+    {"id": "T1606", "name": "Forge Web Credentials", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1606/"},
+    {"id": "T1003", "name": "OS Credential Dumping", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1003/"},
+    {"id": "T1003.001", "name": "OS Credential Dumping: LSASS Memory", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1003/001/"},
+    {"id": "T1003.006", "name": "OS Credential Dumping: DCSync", "tactics": ["Credential Access"], "url": "https://attack.mitre.org/techniques/T1003/006/"},
+    {"id": "T1046", "name": "Network Service Discovery", "tactics": ["Discovery"], "url": "https://attack.mitre.org/techniques/T1046/"},
+    {"id": "T1087.002", "name": "Account Discovery: Domain Account", "tactics": ["Discovery"], "url": "https://attack.mitre.org/techniques/T1087/002/"},
+    {"id": "T1069.002", "name": "Permission Groups Discovery: Domain Groups", "tactics": ["Discovery"], "url": "https://attack.mitre.org/techniques/T1069/002/"},
+    {"id": "T1135", "name": "Network Share Discovery", "tactics": ["Discovery"], "url": "https://attack.mitre.org/techniques/T1135/"},
+    {"id": "T1201", "name": "Password Policy Discovery", "tactics": ["Discovery"], "url": "https://attack.mitre.org/techniques/T1201/"}
+  ]
+}

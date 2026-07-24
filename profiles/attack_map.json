@@ -1,0 +1,40 @@
+{
+  "_comment": "Curated HAWK finding -> ATT&CK technique map. Keys are DETERMINISTIC, code-emitted strings (the source= passed to add_auto_finding, or the title prefix a parser emits) — NOT heuristic text inference. Sub-technique where HAWK has the signal, technique where generic. Findings with no match stay unmapped. Resolution order: by_title_prefix (most specific) -> by_source (exact) -> by_source_prefix. Manual Finding.technique_ids overrides all of this.",
+
+  "by_title_prefix": {
+    "kerberoastable accounts": ["T1558.003"],
+    "kerberoast": ["T1558.003"],
+    "as-rep roastable accounts": ["T1558.004"],
+    "certipy": ["T1649"],
+    "secretsdump": ["T1003.006"],
+    "cve-2017-0143": ["T1210"],
+    "cve-2017-0144": ["T1210"]
+  },
+
+  "by_source": {
+    "responder": ["T1557.001"],
+    "kerbrute passwordspray": ["T1110.003"],
+    "netexec brute/spray": ["T1110.003"],
+    "hydra brute force": ["T1110"],
+    "hydra-verify": ["T1110"],
+    "patator brute": ["T1110"],
+    "netexec --pass-pol": ["T1201"],
+    "ldapsearch": ["T1087.002"],
+    "injection tester": ["T1190"],
+    "jwt analyzer": ["T1606"],
+    "cert-advisory-wildcard": ["T1649"],
+    "cert-advisory-san": ["T1649"],
+    "nmap": ["T1046"],
+    "nmap banner": ["T1046"],
+    "nmap scripts": ["T1046"],
+    "nmap vuln scripts": ["T1595.002"],
+    "nmap vuln scripts (diagnostic)": ["T1595.002"],
+    "web oracle / nuclei": ["T1595.002"],
+    "ffuf-vhost": ["T1595.003"],
+    "gobuster-dns": ["T1595.003"]
+  },
+
+  "by_source_prefix": {
+    "connect /": ["T1078"]
+  }
+}

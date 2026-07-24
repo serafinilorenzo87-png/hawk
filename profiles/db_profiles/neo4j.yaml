@@ -1,0 +1,40 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/neo4j.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: neo4j
+title: Neo4j
+aliases:
+- bolt
+intro: 'Graph database.  Bolt binary protocol on 7687, HTTP on 7474.  Default neo4j:neo4j
+  (forced password change on first login).  Client: cypher-shell (bundled with Neo4j);
+  HTTP via curl as fallback.'
+commands:
+- cmd: cypher-shell -a bolt://<host>:7687 -u neo4j -p neo4j
+  desc: Connect via Bolt
+- cmd: CALL dbms.components();
+  desc: Server version + edition
+- cmd: CALL db.labels();
+  desc: List node labels (= entity types)
+- cmd: CALL db.relationshipTypes();
+  desc: List relationship types
+- cmd: MATCH (n) RETURN count(n);
+  desc: Total node count
+- cmd: MATCH (n) RETURN n LIMIT 10;
+  desc: Sample 10 nodes
+- cmd: MATCH (n:<Label>) RETURN n LIMIT 10;
+  desc: Sample nodes of a specific label
+- cmd: CALL dbms.security.listUsers();
+  desc: List users (admin only)
+- cmd: CALL dbms.security.listRoles();
+  desc: List roles + permissions
+- cmd: '# HTTP fallback (no cypher-shell available):'
+  desc: ''
+- cmd: curl -u neo4j:neo4j http://<host>:7474/db/data/
+  desc: REST API root (Neo4j 3.x; deprecated in 4.x)
+- cmd: 'curl -u neo4j:neo4j -X POST http://<host>:7474/db/neo4j/tx/commit -H ''Content-Type:
+    application/json'' -d ''{"statements":[{"statement":"MATCH (n) RETURN n LIMIT
+    5"}]}'''
+  desc: Run a Cypher query via HTTP (Neo4j 4.x+)
+- cmd: :exit
+  desc: Exit cypher-shell

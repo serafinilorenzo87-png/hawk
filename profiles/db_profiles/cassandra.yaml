@@ -1,0 +1,36 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/cassandra.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: cassandra
+title: Cassandra (CQL)
+aliases:
+- cassandra-cql
+intro: 'Wide-column NoSQL.  CQL native protocol on 9042, Thrift legacy on 9160.  Default
+  user cassandra:cassandra (often unchanged in lab boxes).  Client: cqlsh (apt-get
+  install cassandra-tools on Debian/Kali).'
+commands:
+- cmd: cqlsh <host> 9042 -u cassandra -p cassandra
+  desc: Connect with default creds
+- cmd: DESC KEYSPACES;
+  desc: List keyspaces (= databases)
+- cmd: USE <keyspace>;
+  desc: Switch to a keyspace
+- cmd: DESC TABLES;
+  desc: List tables in current keyspace
+- cmd: DESC TABLE <table>;
+  desc: Show table schema
+- cmd: SELECT * FROM <table> LIMIT 10;
+  desc: Sample 10 rows
+- cmd: LIST USERS;
+  desc: List user accounts (legacy syntax)
+- cmd: SELECT * FROM system_auth.roles;
+  desc: Roles + auth hashes (modern Cassandra 3.x+)
+- cmd: SELECT * FROM system.peers;
+  desc: Other nodes in the cluster
+- cmd: SELECT release_version FROM system.local;
+  desc: Server version
+- cmd: EXPAND ON;
+  desc: Toggle vertical row output (readable)
+- cmd: exit
+  desc: Exit cqlsh

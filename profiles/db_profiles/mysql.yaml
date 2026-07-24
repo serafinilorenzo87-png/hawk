@@ -1,0 +1,37 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/mysql.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: mysql
+title: MySQL / MariaDB
+aliases:
+- mariadb
+intro: Paste these at the mysql> prompt.  All statements end with ; (semicolon).  Some
+  commands require the FILE or PROCESS privilege — typically only the root account.
+commands:
+- cmd: SHOW DATABASES;
+  desc: List all databases
+- cmd: USE <db>;
+  desc: Switch to a database (replace <db>)
+- cmd: SHOW TABLES;
+  desc: List tables in current database
+- cmd: DESCRIBE <table>;
+  desc: Show table schema (replace <table>)
+- cmd: SELECT * FROM <table> LIMIT 10;
+  desc: Sample 10 rows
+- cmd: SELECT user, host, password FROM mysql.user;
+  desc: Dump password hashes (MySQL 5.6 and earlier)
+- cmd: SELECT user, host, authentication_string FROM mysql.user;
+  desc: Dump auth hashes (MySQL 5.7+ / MariaDB 10+)
+- cmd: SELECT @@version;
+  desc: Server version
+- cmd: SELECT CURRENT_USER();
+  desc: Current logged-in user
+- cmd: SELECT @@datadir, @@version_compile_os;
+  desc: Data directory + server OS
+- cmd: SHOW VARIABLES LIKE 'secure_file_priv';
+  desc: Where MySQL is allowed to read/write files
+- cmd: SELECT LOAD_FILE('/etc/passwd');
+  desc: Read file (requires FILE privilege)
+- cmd: \q
+  desc: Exit MySQL client

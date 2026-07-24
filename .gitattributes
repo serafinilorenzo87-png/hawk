@@ -1,0 +1,9 @@
+# Normalize line endings to LF in the repo. This tree is shared between a
+# Windows host and a Kali VM; CRLF would break shell scripts and shebangs on Kali.
+* text=auto eol=lf
+
+# Binary — never touch
+*.pdf binary
+*.png binary
+*.jpg binary
+*.ico binary

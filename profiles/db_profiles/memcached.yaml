@@ -1,0 +1,33 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/memcached.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: memcached
+title: Memcached
+aliases:
+- memcache
+intro: Text-mode protocol on port 11211 (TCP/UDP).  NO auth by default.  UDP variant
+  is amplifier-abusable (CVE-2018-1000115).  Pipe commands via nc — the server replies
+  one line at a time.
+commands:
+- cmd: echo 'version' | nc <host> 11211
+  desc: Server version
+- cmd: echo 'stats' | nc <host> 11211
+  desc: Full server statistics (uptime, items, bytes)
+- cmd: echo 'stats settings' | nc <host> 11211
+  desc: Server settings (max conns, max item size)
+- cmd: echo 'stats items' | nc <host> 11211
+  desc: Per-slab item statistics
+- cmd: echo 'stats slabs' | nc <host> 11211
+  desc: Memory slabs allocation
+- cmd: echo 'stats cachedump <slab_id> 0' | nc <host> 11211
+  desc: List all keys in a slab (slab_id from stats items)
+- cmd: echo 'get <key>' | nc <host> 11211
+  desc: Retrieve value of a specific key
+- cmd: echo 'flush_all' | nc <host> 11211
+  desc: WIPE the entire cache (DESTRUCTIVE — lab only)
+- cmd: echo 'set hello 0 60 5\r\nworld' | nc <host> 11211
+  desc: Write a key (TTL=60s, length=5, value=world)
+- cmd: '# UDP amplifier abuse: ban''/etc/memcached.conf'' ''-l 127.0.0.1'' + restart
+    to mitigate'
+  desc: ''

@@ -1,0 +1,40 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/oracle.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: oracle
+title: Oracle Database (TNS)
+aliases:
+- oracle-tns
+- tns
+- oracle-tnslsnr
+intro: 'Enterprise RDBMS.  TNS listener on port 1521 (also 1522, 1526, 2483, 2484).  Default
+  SIDs: ORCL, XE, ORACLE.  Default DBA creds: sys/change_on_install, system/manager,
+  scott/tiger.  Client: sqlplus (Oracle Instant Client install) or impacket-ssrf scripts.'
+commands:
+- cmd: '# Recon: SID enumeration first (no creds needed)'
+  desc: ''
+- cmd: nmap -p 1521 --script oracle-sid-brute <host>
+  desc: Brute-force SIDs (CVE-2012-1675 TNS Poison)
+- cmd: sqlplus system/manager@<host>:1521/XE
+  desc: Connect with default DBA creds
+- cmd: SELECT BANNER FROM v$version;
+  desc: Server version + edition
+- cmd: SELECT username FROM all_users;
+  desc: List user accounts
+- cmd: SELECT username, account_status FROM dba_users;
+  desc: Users + lock/expire status (DBA)
+- cmd: SELECT username, password FROM sys.user$;
+  desc: Old-style password hashes (10g and earlier)
+- cmd: SELECT name, password, spare4 FROM sys.user$;
+  desc: 11g+ hashes (spare4 = SHA-1)
+- cmd: SELECT * FROM session_privs;
+  desc: Privileges of current session
+- cmd: SELECT table_name FROM all_tables WHERE owner='<USER>';
+  desc: List tables owned by a user
+- cmd: SELECT * FROM <owner>.<table> WHERE rownum <= 10;
+  desc: Sample 10 rows (Oracle uses ROWNUM, not LIMIT)
+- cmd: SELECT * FROM v$pwfile_users;
+  desc: Users with SYSDBA / SYSOPER
+- cmd: exit;
+  desc: Exit sqlplus

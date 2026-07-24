@@ -1,0 +1,34 @@
+# HAWK DB cheatsheet — bundled default.
+# Override or extend at ~/.config/hawk/db_profiles/arangodb.yaml
+# Schema doc: hawkC/profiles/db_profiles/README.md
+---
+name: arangodb
+title: ArangoDB
+aliases:
+- arango
+intro: Multi-model DB (docs + graph + key-value).  HTTP API on port 8529.  Default
+  root with empty password before 3.0.  AQL is the query language.  Web UI also on
+  8529 (browser).
+commands:
+- cmd: curl http://<host>:8529/_api/version
+  desc: Server version
+- cmd: curl http://<host>:8529/_api/database/current
+  desc: Current default DB info
+- cmd: curl http://<host>:8529/_api/database
+  desc: List databases (root auth required)
+- cmd: curl http://<host>:8529/_db/<db>/_api/collection
+  desc: List collections in a database
+- cmd: curl http://<host>:8529/_db/<db>/_api/collection/<coll>/properties
+  desc: Collection properties (count, type, indexes)
+- cmd: curl -X POST http://<host>:8529/_db/<db>/_api/cursor -d '{"query":"FOR doc
+    IN <coll> LIMIT 10 RETURN doc"}'
+  desc: Sample 10 docs via AQL
+- cmd: curl http://<host>:8529/_api/user
+  desc: List users (root auth)
+- cmd: 'curl -u root: http://<host>:8529/_api/user'
+  desc: Same — with empty password as root
+- cmd: curl http://<host>:8529/_admin/server/availability
+  desc: Server availability check
+- cmd: '# arangosh CLI:  arangosh --server.endpoint tcp://<host>:8529 --server.username
+    root'
+  desc: ''
