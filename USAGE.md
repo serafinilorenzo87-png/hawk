@@ -1,4 +1,4 @@
-# HAWK — Hostile Assessment WorKit
+# HAWK — Hostile Assessment War-Kit
 ## User Guide v1.0
 
 ---

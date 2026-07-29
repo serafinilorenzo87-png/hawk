@@ -1,6 +1,6 @@
 # HAWK
 
-HAWK (Hostile Assessment WorKit) is a portable Kali-oriented pentest GUI.
+HAWK (Hostile Assessment War-Kit) is a portable Kali-oriented pentest GUI.
 
 ## Run
 

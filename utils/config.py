@@ -1,4 +1,4 @@
-# HAWK — Hostile Assessment WorKit
+# HAWK — Hostile Assessment War-Kit
 # Copyright 2026 Lorenzo Serafini
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -17,7 +17,7 @@ terminal banner, report generator, status bar.
 """
 
 APP_NAME       = "HAWK"
-APP_FULL_NAME  = "Hostile Assessment WorKit"
+APP_FULL_NAME  = "Hostile Assessment War-Kit"
 APP_VERSION    = "1.5.0"
 APP_AUTHOR     = "HAWK Project — Open Source"
 APP_GITHUB     = "https://github.com/yourusername/hawk"
@@ -128,7 +128,7 @@ BANNER = r"""
   ██║  ██║██║  ██║╚███╔███╔╝██║  ██╗
   ╚═╝  ╚═╝╚═╝  ╚═╝ ╚══╝╚══╝ ╚═╝  ╚═╝"""
 
-BANNER_SUBTITLE = "  Hostile Assessment WorKit  —  Open Source Pentest Suite"
+BANNER_SUBTITLE = "  Hostile Assessment War-Kit  —  Open Source Pentest Suite"
 BANNER_LINE     = "  " + "─" * 56
 
 SPLASH_MESSAGES = [

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# HAWK — Hostile Assessment WorKit
+# HAWK — Hostile Assessment War-Kit
 # Copyright 2026 Lorenzo Serafini
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

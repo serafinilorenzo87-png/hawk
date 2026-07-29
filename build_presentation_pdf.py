@@ -526,7 +526,7 @@ def page_roadmap(c):
 
 def build():
     c = canvas.Canvas(OUT_PATH, pagesize=A4)
-    c.setTitle("HAWK v1.0.0 — Hostile Assessment WorKit")
+    c.setTitle("HAWK v1.0.0 — Hostile Assessment War-Kit")
     c.setAuthor("Lorenzo Serafini")
     c.setSubject("HAWK v1.0.0 presentation")
     c.setKeywords(("HAWK", "pentest", "Kali", "open-source", "Lorenzo Serafini"))

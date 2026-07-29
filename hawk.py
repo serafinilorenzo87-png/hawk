@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# HAWK — Hostile Assessment WorKit
+# HAWK — Hostile Assessment War-Kit
 # Copyright 2026 Lorenzo Serafini
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -10,7 +10,7 @@
 # Attribution "Created by Lorenzo Serafini" must be preserved in all
 # redistributed and Derivative Works — see NOTICE for details.
 
-"""HAWK - Hostile Assessment WorKit"""
+"""HAWK - Hostile Assessment War-Kit"""
 import sys, os, argparse
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils.config import APP_VERSION
