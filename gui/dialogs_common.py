@@ -163,6 +163,7 @@ def _note_box(win, text, color=None, selectable=False, text_color=None):
         box.pack(fill="x", padx=8, pady=6)
         box.insert("1.0", text)
         box.configure(state="disabled")
+        add_context_menu(box)
     else:
         ctk.CTkLabel(fr, text=text, font=_f("md"),
                      text_color=txt_c,

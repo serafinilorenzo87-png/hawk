@@ -157,6 +157,52 @@ DNS_LOOKUP_TOOLS = {
 }
 
 
+# ─── CIDR helpers (network sweep) ────────────────────────────────────────────
+
+def parse_cidr(base_ip: str, prefix: str) -> Tuple[bool, str, int]:
+    """Validate a base IP + prefix and return the normalised network.
+
+    Returns (ok, network_str, host_count).
+    On failure: (False, reason, 0).
+    """
+    base_ip = (base_ip or "").strip()
+    prefix = (prefix or "").strip()
+    if not base_ip or not prefix:
+        return (False, "", 0)
+    try:
+        pfx = int(prefix)
+    except ValueError:
+        return (False, "prefix must be a number (e.g. 24)", 0)
+    if pfx < 1 or pfx > 32:
+        return (False, "prefix must be 1-32", 0)
+    try:
+        net = ipaddress.ip_network(f"{base_ip}/{pfx}", strict=False)
+    except ValueError as e:
+        return (False, str(e), 0)
+    count = max(0, net.num_addresses - 2) if pfx < 31 else net.num_addresses
+    return (True, str(net), count)
+
+
+def is_local_subnet(cidr: str) -> bool:
+    """True if the CIDR range sits entirely inside RFC1918 / link-local."""
+    try:
+        net = ipaddress.ip_network(cidr, strict=False)
+    except ValueError:
+        return False
+    private_blocks = (
+        ipaddress.ip_network("10.0.0.0/8"),
+        ipaddress.ip_network("172.16.0.0/12"),
+        ipaddress.ip_network("192.168.0.0/16"),
+        ipaddress.ip_network("169.254.0.0/16"),
+    )
+    return any(
+        net.network_address in blk and net.broadcast_address in blk
+        for blk in private_blocks
+    )
+
+
+# ─── Tool-level validation ────────────────────────────────────────────────────
+
 def validate_for_tool(target: str, binary: str) -> Tuple[bool, str, str]:
     """
     Check whether `target` is appropriate for tool `binary`.

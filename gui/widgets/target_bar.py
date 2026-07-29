@@ -198,7 +198,10 @@ class TargetBar(ctk.CTkFrame):
         self._vhost_btn.pack(side="left", padx=(4, 0))
 
         # ── Spacer (pushes action buttons to the right) ──
-        ctk.CTkFrame(self, fg_color="transparent", width=1).grid(row=0, column=4, sticky="ew")
+        # height=1 is required: CTkFrame defaults to 200 px tall, which would
+        # inflate row 0 and push the sweep/domain rows far below it.
+        ctk.CTkFrame(self, fg_color="transparent", width=1, height=1).grid(
+            row=0, column=4, sticky="ew")
 
         # ── Action Buttons ──
         btn_cfg = [
@@ -230,14 +233,17 @@ class TargetBar(ctk.CTkFrame):
             if "AUTOSAVE" in label:
                 self._autosave_btn = btn
 
-        # ── Row 1: TARGET DOMAIN (optional) ──
+        # ── Row 1: NETWORK SWEEP ──
+        self._build_sweep_row()
+
+        # ── Row 2: TARGET DOMAIN (optional) ──
         ctk.CTkLabel(
             self,
             text="  TARGET DOMAIN:",
             font=ctk.CTkFont(family="Courier New", size=14, weight="bold"),
             text_color=COLORS["text_dim"],
             width=110,
-        ).grid(row=1, column=0, padx=(10, 4), pady=(0, 3), sticky="w")
+        ).grid(row=2, column=0, padx=(10, 4), pady=3, sticky="w")
 
         self._domain_entry = ctk.CTkEntry(
             self,
@@ -251,13 +257,13 @@ class TargetBar(ctk.CTkFrame):
             placeholder_text_color = COLORS["text_muted"],
             corner_radius = 3,
         )
-        self._domain_entry.grid(row=1, column=1, columnspan=2, padx=4, pady=(0, 3), sticky="w")
+        self._domain_entry.grid(row=2, column=1, columnspan=2, padx=4, pady=3, sticky="w")
         self._domain_entry.bind("<Return>", lambda e: self._save_domain())
 
         # SAVE/CHANGE + DELETE buttons live in a shared sub-frame so they
         # stay glued together regardless of column 3's weight=1 stretching.
         domain_btns = ctk.CTkFrame(self, fg_color="transparent")
-        domain_btns.grid(row=1, column=3, padx=4, pady=(0, 3), sticky="w")
+        domain_btns.grid(row=2, column=3, padx=4, pady=(0, 3), sticky="w")
 
         # SAVE/CHANGE button — label switches to "CHANGE" once a domain has
         # been persisted on the current session.
@@ -313,13 +319,13 @@ class TargetBar(ctk.CTkFrame):
             font=ctk.CTkFont(family="Courier New", size=13),
             text_color=COLORS["text_muted"],
         )
-        self._session_label.grid(row=2, column=0, columnspan=10, sticky="w", padx=10, pady=(0, 2))
+        self._session_label.grid(row=3, column=0, columnspan=10, sticky="w", padx=10, pady=(0, 2))
 
         # ── Row 3: Network health + PROXYCHAINS button + "Coming Soon" ──
         # NetHealth on the left, PROXYCHAINS config button in the middle,
         # ARGUS plugin teaser button on the right.
         row3 = ctk.CTkFrame(self, fg_color="transparent")
-        row3.grid(row=3, column=0, columnspan=10,
+        row3.grid(row=4, column=0, columnspan=10,
                   sticky="ew", padx=(4, 4), pady=(2, 4))
 
         from gui.widgets.net_health import NetHealthIndicator
@@ -349,48 +355,530 @@ class TargetBar(ctk.CTkFrame):
         # Reflect initial button state (no domain saved yet).
         self._refresh_domain_button_state(saved=False)
 
+    # ─── Network Sweep row ──────────────────────────────────────────────────────
+
+    def _build_sweep_row(self):
+        """Row 1: NETWORK SWEEP — base IP, prefix, helper, RUN, OPEN GRAPH."""
+        ctk.CTkLabel(
+            self,
+            text="  NETWORK SWEEP:",
+            font=ctk.CTkFont(family="Courier New", size=14, weight="bold"),
+            text_color=COLORS["text_dim"],
+            width=110,
+        ).grid(row=1, column=0, padx=(10, 4), pady=3, sticky="w")
+
+        sweep_frame = ctk.CTkFrame(self, fg_color="transparent")
+        sweep_frame.grid(row=1, column=1, columnspan=8,
+                         padx=4, pady=3, sticky="w")
+
+        self._sweep_base_entry = ctk.CTkEntry(
+            sweep_frame,
+            width=170, height=28,
+            placeholder_text="e.g. 192.168.1.0",
+            font=ctk.CTkFont(family="Courier New", size=14),
+            fg_color="#050505",
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_dim"],
+            border_width=1,
+            placeholder_text_color=COLORS["text_muted"],
+            corner_radius=3,
+        )
+        self._sweep_base_entry.pack(side="left")
+        self._sweep_base_entry.bind("<KeyRelease>", self._on_sweep_base_key)
+
+        ctk.CTkLabel(
+            sweep_frame, text=" / ",
+            font=ctk.CTkFont(family="Courier New", size=15, weight="bold"),
+            text_color=COLORS["text_dim"],
+        ).pack(side="left")
+
+        self._sweep_prefix_entry = ctk.CTkEntry(
+            sweep_frame,
+            width=50, height=28,
+            placeholder_text="24",
+            font=ctk.CTkFont(family="Courier New", size=14),
+            fg_color="#050505",
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_dim"],
+            border_width=1,
+            placeholder_text_color=COLORS["text_muted"],
+            corner_radius=3,
+        )
+        self._sweep_prefix_entry.pack(side="left")
+        self._sweep_prefix_entry.bind("<KeyRelease>", lambda e: self._update_sweep_helper())
+
+        self._sweep_helper_lbl = ctk.CTkLabel(
+            sweep_frame, text="",
+            font=ctk.CTkFont(family="Courier New", size=12),
+            text_color=COLORS["text_muted"],
+        )
+        self._sweep_helper_lbl.pack(side="left", padx=(10, 0))
+
+        self._sweep_phase2_var = ctk.BooleanVar(value=False)
+        self._sweep_phase2_chk = ctk.CTkCheckBox(
+            sweep_frame,
+            text="Port peek",
+            variable=self._sweep_phase2_var,
+            width=20, height=20,
+            font=ctk.CTkFont(family="Courier New", size=12),
+            text_color=COLORS["text_dim"],
+            fg_color=COLORS["bg_card"],
+            hover_color=COLORS["bg_card_hover"],
+            border_color=COLORS["border_dim"],
+            checkmark_color=COLORS["text_green"],
+            corner_radius=3,
+        )
+        self._sweep_phase2_chk.pack(side="left", padx=(10, 0))
+
+        self._sweep_run_btn = ctk.CTkButton(
+            sweep_frame,
+            text="RUN SWEEP",
+            width=130, height=28,
+            font=ctk.CTkFont(family="Courier New", size=13, weight="bold"),
+            fg_color="#001500",
+            hover_color="#003000",
+            border_color=COLORS["border_green"],
+            border_width=1,
+            text_color=COLORS["text_green"],
+            corner_radius=3,
+            command=self._run_sweep,
+        )
+        self._sweep_run_btn.pack(side="left", padx=(10, 0))
+
+        self._sweep_graph_btn = ctk.CTkButton(
+            sweep_frame,
+            text="OPEN GRAPH",
+            width=130, height=28,
+            font=ctk.CTkFont(family="Courier New", size=13),
+            fg_color=COLORS["bg_card"],
+            hover_color=COLORS["bg_card_hover"],
+            border_color=COLORS["border_dim"],
+            border_width=1,
+            text_color=COLORS["text_dim"],
+            corner_radius=3,
+            command=self._open_sweep_graph,
+        )
+        # Hidden until a sweep produces results.
+        self._sweep_graph_btn.pack_forget()
+
+        self._sweep_inventory = None
+        self._sweep_inventory_path = None
+        self._sweep_running = False
+        self._sweep_aborted = False
+        self._sweep_runner = None
+        self._sweep_arp_lines = []
+
+    def _on_sweep_base_key(self, event):
+        self._auto_dot_sweep_ip(event)
+        self._update_sweep_helper()
+
+    def _update_sweep_helper(self):
+        """Live helper text from base IP + prefix."""
+        from utils.target_validator import parse_cidr
+        base = self._sweep_base_entry.get().strip()
+        prefix = self._sweep_prefix_entry.get().strip()
+        if not base or not prefix:
+            self._sweep_helper_lbl.configure(text="", text_color=COLORS["text_muted"])
+            return
+        ok, net_str, count = parse_cidr(base, prefix)
+        if ok:
+            self._sweep_helper_lbl.configure(
+                text=f"{net_str} → {count:,} hosts",
+                text_color=COLORS["text_dim"])
+        else:
+            self._sweep_helper_lbl.configure(
+                text=net_str if net_str else "invalid",
+                text_color=COLORS["text_red"])
+
+    def _abort_sweep(self):
+        if not self._sweep_running or not self._sweep_runner:
+            return
+        self._sweep_aborted = True
+        self._sweep_runner.kill()
+        self.app.terminal.write("[!] Sweep aborted by user.", "warn")
+
+    def _run_sweep(self):
+        if self._sweep_running:
+            self.app.terminal.write("[!] Sweep already running.", "error")
+            return
+
+        from utils.target_validator import parse_cidr
+        from modules.discovery import (
+            choose_method, build_phase1_cmd, gnmap_path_for,
+            masscan_list_path_for,
+        )
+
+        base = self._sweep_base_entry.get().strip()
+        prefix = self._sweep_prefix_entry.get().strip()
+        ok, cidr, count = parse_cidr(base, prefix)
+        if not ok:
+            self.app.terminal.write(
+                f"[!] Invalid CIDR: {cidr if cidr else 'check base IP and prefix'}",
+                "error")
+            return
+
+        # Scale warning above /16
+        if count > 65534:
+            from gui.dialogs import _make_win, _title, _sub, _btn_row, _btn, _safe_destroy
+            win = _make_win(self, "Large range warning", 480, 220)
+            _title(win, "LARGE RANGE")
+            _sub(win, (
+                f"{cidr} contains {count:,} hosts.\n"
+                "This will take a long time and generate significant traffic.\n"
+                "Masscan will be used automatically for speed."
+            ))
+            confirmed = {"ok": False}
+            def _confirm():
+                confirmed["ok"] = True
+                _safe_destroy(win)
+            def _cancel():
+                _safe_destroy(win)
+            row = _btn_row(win)
+            _btn(row, "PROCEED", _confirm, accent=True)
+            _btn(row, "CANCEL", _cancel)
+            win.wait_window()
+            if not confirmed["ok"]:
+                return
+
+        # Tor warning
+        _, proxy_label = self._read_proxychains_state()
+        if "TOR" in proxy_label.upper():
+            self.app.terminal.write(
+                "[!] Network sweep bypasses the active proxy — "
+                "raw probes go out on the local interface.",
+                "error")
+
+        # Authorized-use reminder
+        self.app.terminal.write(
+            "[*] Reminder: network sweeping is noisier and more "
+            "intrusive than single-host probes. Ensure you have "
+            "authorization for this range.", "dim")
+
+        force_masscan = count > 65534
+        method = choose_method(cidr, count, force_masscan=force_masscan)
+        if method == "arp-scan":
+            out_path = None
+        elif method == "masscan":
+            out_path = masscan_list_path_for(cidr)
+        else:
+            out_path = gnmap_path_for(cidr, phase=1)
+
+        cmd = build_phase1_cmd(cidr, method, out_path or "")
+
+        from datetime import datetime, timezone
+        started = datetime.now(timezone.utc).isoformat()
+
+        self._sweep_running = True
+        self._sweep_aborted = False
+        self._sweep_arp_lines = []
+        self._sweep_run_btn.configure(
+            text="ABORT",
+            fg_color="#1A0000",
+            hover_color="#2A0505",
+            text_color=COLORS["text_red"],
+            border_color=COLORS["text_red"],
+            state="normal",
+            command=self._abort_sweep,
+        )
+
+        self.app.terminal.section(f"NETWORK SWEEP — {cidr} ({method})")
+
+        from utils.runner import ToolRunner
+
+        def _on_output(line, tool_name, level="info"):
+            if method == "arp-scan":
+                self._sweep_arp_lines.append(line)
+            self.app.terminal.output_callback(line, tool_name, level)
+
+        def _on_done(tool_name, rc, log):
+            self._sweep_running = False
+            self._sweep_runner = None
+            self._sweep_run_btn.configure(
+                text="RUN SWEEP",
+                fg_color="#001500",
+                hover_color="#003000",
+                text_color=COLORS["text_green"],
+                border_color=COLORS["border_green"],
+                state="normal",
+                command=self._run_sweep,
+            )
+            self._finish_sweep(
+                cidr, method, out_path, started, rc)
+
+        runner = ToolRunner(
+            output_callback=_on_output,
+            done_callback=_on_done,
+            ui_dispatcher=getattr(self.app, "ui_call", None),
+        )
+        self._sweep_runner = runner
+        runner.run(cmd, tool_name=f"sweep-{method}")
+
+    def _finish_sweep(self, cidr, method, out_path, started, exit_code):
+        from datetime import datetime, timezone
+        from modules.discovery import (
+            parse_nmap_gnmap, parse_masscan_list, parse_arp_scan,
+            build_inventory, save_inventory, load_latest_inventory,
+            merge_inventory, build_phase2_cmd, gnmap_path_for,
+        )
+
+        finished = datetime.now(timezone.utc).isoformat()
+
+        aborted = self._sweep_aborted
+        self._sweep_aborted = False
+
+        if exit_code != 0 and not aborted:
+            self.app.terminal.write(
+                f"[!] Sweep exited with code {exit_code}.", "error")
+
+        if method == "arp-scan":
+            hosts = parse_arp_scan(self._sweep_arp_lines)
+        elif method == "masscan":
+            hosts = parse_masscan_list(out_path)
+        else:
+            hosts = parse_nmap_gnmap(out_path)
+
+        if not hosts:
+            msg = "[*] No alive hosts found." if not aborted else \
+                  "[*] Sweep aborted — no hosts discovered before abort."
+            self.app.terminal.write(msg, "dim")
+            return
+
+        suffix = " (partial — aborted)" if aborted else ""
+        self.app.terminal.write(
+            f"[+] Phase 1 complete: {len(hosts)} alive host(s).{suffix}",
+            "success")
+
+        if self._sweep_phase2_var.get() and hosts and not aborted:
+            self._run_phase2(cidr, hosts, method, started, finished)
+            return
+
+        # Build and save inventory
+        existing = load_latest_inventory(cidr)
+        inventory = build_inventory(cidr, method, hosts, started, finished)
+        if existing:
+            inventory = merge_inventory(existing, hosts)
+            inventory["finished"] = finished
+            inventory["method"] = method
+
+        path = save_inventory(inventory)
+        self._sweep_inventory = inventory
+        self._sweep_inventory_path = path
+
+        alive = [h for h in inventory.get("hosts", []) if h.get("alive")]
+        self.app.terminal.write(
+            f"[+] Inventory saved: {path}  ({len(alive)} hosts)", "success")
+
+        self._sweep_graph_btn.pack(side="left", padx=(10, 0))
+
+    def _run_phase2(self, cidr, phase1_hosts, method, started, finished):
+        from modules.discovery import build_phase2_cmd, gnmap_path_for
+        from utils.runner import ToolRunner
+
+        alive_ips = [h["ip"] for h in phase1_hosts]
+        p2_path = gnmap_path_for(cidr, phase=2)
+        cmd = build_phase2_cmd(alive_ips, p2_path)
+
+        self.app.terminal.section(f"PHASE 2 — port peek on {len(alive_ips)} hosts")
+        self._sweep_running = True
+        self._sweep_run_btn.configure(
+            text="ABORT",
+            fg_color="#1A0000",
+            hover_color="#2A0505",
+            text_color=COLORS["text_red"],
+            border_color=COLORS["text_red"],
+            state="normal",
+            command=self._abort_sweep,
+        )
+
+        def _on_output_p2(line, tool_name, level="info"):
+            self.app.terminal.output_callback(line, tool_name, level)
+
+        def _on_done_p2(tool_name, rc, log):
+            self._sweep_running = False
+            self._sweep_runner = None
+            self._sweep_run_btn.configure(
+                text="RUN SWEEP",
+                fg_color="#001500",
+                hover_color="#003000",
+                text_color=COLORS["text_green"],
+                border_color=COLORS["border_green"],
+                state="normal",
+                command=self._run_sweep,
+            )
+            self._finish_phase2(
+                cidr, method, phase1_hosts, p2_path,
+                started, finished, rc)
+
+        runner = ToolRunner(
+            output_callback=_on_output_p2,
+            done_callback=_on_done_p2,
+            ui_dispatcher=getattr(self.app, "ui_call", None),
+        )
+        self._sweep_runner = runner
+        runner.run(cmd, tool_name="sweep-phase2")
+
+    def _finish_phase2(self, cidr, method, phase1_hosts, p2_path,
+                       started, p1_finished, exit_code):
+        from datetime import datetime, timezone
+        from modules.discovery import (
+            parse_nmap_gnmap, build_inventory, save_inventory,
+            load_latest_inventory, merge_inventory,
+        )
+
+        finished = datetime.now(timezone.utc).isoformat()
+        p2_hosts = parse_nmap_gnmap(p2_path)
+
+        # Merge phase 2 port data into phase 1 hosts
+        p2_by_ip = {h["ip"]: h for h in p2_hosts}
+        for h in phase1_hosts:
+            enriched = p2_by_ip.get(h["ip"])
+            if enriched:
+                h["port_hints"] = enriched["port_hints"]
+                h["responded_via"] = list(
+                    set(h["responded_via"]) | set(enriched["responded_via"]))
+                h["os_hint"] = enriched["os_hint"]
+
+        existing = load_latest_inventory(cidr)
+        inventory = build_inventory(cidr, method, phase1_hosts,
+                                    started, finished)
+        if existing:
+            inventory = merge_inventory(existing, phase1_hosts)
+            inventory["finished"] = finished
+
+        path = save_inventory(inventory)
+        self._sweep_inventory = inventory
+        self._sweep_inventory_path = path
+
+        alive = [h for h in inventory["hosts"] if h.get("alive")]
+        self.app.terminal.write(
+            f"[+] Phase 2 complete — {len(alive)} hosts with port hints.",
+            "success")
+        self.app.terminal.write(f"[+] Inventory: {path}", "success")
+
+        self._sweep_graph_btn.pack(side="left", padx=(10, 0))
+
+    def _open_sweep_graph(self):
+        if not self._sweep_inventory:
+            self.app.terminal.write(
+                "[!] No sweep results — run a sweep first.", "error")
+            return
+
+        from utils.sweep_graph import build_graph_data
+        graph_data = build_graph_data(self._sweep_inventory)
+        if not graph_data:
+            self.app.terminal.write(
+                "[!] Could not build graph — no alive hosts.", "error")
+            return
+
+        from gui.dialogs_sweep import show_sweep_graph_window
+        show_sweep_graph_window(
+            self, self._sweep_inventory.get("range", ""),
+            graph_data,
+            on_select_host=self._promote_sweep_host,
+        )
+
+    def _promote_sweep_host(self, ip):
+        """Click on a graph node → set as active target, lazy session."""
+        from modules.discovery import set_session_ref, update_inventory
+        from utils.session import Session
+
+        inv = self._sweep_inventory
+        if not inv:
+            return
+
+        # Check if this host already has a session
+        for h in inv.get("hosts", []):
+            if h["ip"] == ip and h.get("session_ref"):
+                ref = h["session_ref"]
+                sid = ref.get("session_id", "")
+                fpath = ref.get("file", "")
+                self.app.terminal.write(
+                    f"[*] Loading existing session for {ip} ({sid[:8]})",
+                    "info")
+                self._ip_entry.delete(0, "end")
+                self._ip_entry.insert(0, ip)
+                try:
+                    sess = Session(ip, sid)
+                    if fpath and sess.load(fpath):
+                        self.app.session_manager.current = sess
+                        self._update_session_label(sess)
+                        self.app.status_bar.set_session(
+                            sess.target_ip, sess.platform)
+                        self.app.title(
+                            f"HAWK — {sess.target_ip} [{sess.platform}]")
+                    else:
+                        self.app.terminal.write(
+                            f"[!] Session file not found: {fpath}", "error")
+                except Exception as e:
+                    self.app.terminal.write(
+                        f"[!] Could not load session: {e}", "error")
+                return
+
+        # Create new session for this host
+        self._ip_entry.delete(0, "end")
+        self._ip_entry.insert(0, ip)
+        platform = self._platform_var.get()
+
+        os_hint = "unknown"
+        for h in inv.get("hosts", []):
+            if h["ip"] == ip:
+                os_hint = h.get("os_hint", "unknown")
+                break
+        if os_hint == "windows" and platform not in ("HTB", "THM"):
+            self._platform_var.set("Custom")
+
+        session = self.app.session_manager.new_session(ip, platform)
+        self._update_session_label(session)
+        self.app.status_bar.set_session(ip, platform)
+        self.app.title(f"HAWK — {ip} [{platform}]")
+
+        set_session_ref(inv, ip, session.session_id,
+                        getattr(session, "file_path", ""))
+        if self._sweep_inventory_path:
+            update_inventory(inv, self._sweep_inventory_path)
+
+        self.app.terminal.write(
+            f"[+] Target promoted: {ip} (session {session.session_id[:8]})",
+            "success")
+
     # ─── Actions ───────────────────────────────────────────────────────────────
 
     # ─── IP input auto-formatting ──────────────────────────────────────────────
 
     def _auto_dot_ip(self, event):
+        self._auto_dot_entry(event, self._ip_entry)
+
+    def _auto_dot_sweep_ip(self, event):
+        self._auto_dot_entry(event, self._sweep_base_entry)
+
+    def _auto_dot_entry(self, event, entry):
         """Insert dots automatically while typing an IPv4 address.
 
         Triggers ONLY when the buffer is purely numeric (so hostnames like
         'target.htb' are untouched). When a dot is missing between octets
         that are already 3 digits long, one is inserted.
         """
-        # Ignore navigation / modifier keys
         if event.keysym in ("Left", "Right", "Up", "Down", "Home", "End",
                              "Tab", "Shift_L", "Shift_R", "Control_L",
                              "Control_R", "Alt_L", "Alt_R", "BackSpace",
                              "Delete", "Return"):
             return
-        raw = self._ip_entry.get()
-        # If there's ANY letter, the user is typing a hostname → bail out
+        raw = entry.get()
         if re.search(r"[A-Za-z]", raw):
             return
-        # Strip anything that isn't digit or dot
         cleaned = re.sub(r"[^0-9.]", "", raw)
-        # Collapse repeated dots
         cleaned = re.sub(r"\.{2,}", ".", cleaned)
-        # Split into octets
         parts = cleaned.split(".")
-        # Enforce max 3 digits per octet
         parts = [p[:3] for p in parts]
-        # Auto-insert a dot after a full 3-digit octet if we're below 4 octets
-        # and the user just typed a digit (not a dot).
         if (event.keysym not in ("period",) and
                 len(parts) < 4 and
                 len(parts[-1]) == 3):
             parts.append("")
-        # Cap at 4 octets
         parts = parts[:4]
         new_val = ".".join(parts)
         if new_val != raw:
-            # Preserve caret at the end (natural for typing)
-            self._ip_entry.delete(0, "end")
-            self._ip_entry.insert(0, new_val)
+            entry.delete(0, "end")
+            entry.insert(0, new_val)
 
     def _new_session(self):
         target = self._ip_entry.get().strip()
@@ -621,57 +1109,10 @@ class TargetBar(ctk.CTkFrame):
     #   * Click → _show_coming_soon_dialog with tagline + description
 
     def _build_coming_soon_buttons(self, parent):
-        """Build the teaser button(s) inside `parent` (a frame).
-        Called once from __init__ during row3 layout.
-
-        CTAs auto-size their title label to the natural text width,
-        then we normalise across all of them so the longest one
-        dictates the width of every other (user requirement: "stessa
-        dimensione, larghezza data in base a lunghezza testo").
-        Height matches NEW SESSION (28 px) via the Courier-13-bold
-        font + 3 px vertical padding."""
+        """Build the ARGUS teaser/active button inside `parent`.
+        Called once from __init__ during row layout."""
         self._teaser_title_labels: list = []
-
-        # ARGUS — state-aware button (M1.5).  The plugin loader
-        # resolves one of six PluginState values at HAWK boot; the
-        # button visual + click handler are picked from that state.
-        # See argus/docs/plugin-contract.md and hawkC/utils/plugin_loader.py.
         self._make_argus_button(parent)
-
-        # ── Width normaliser ─────────────────────────────────────
-        # After both buttons render once, measure their title labels
-        # and resize the shorter one UP to the longest's width so the
-        # two CTAs end up visually identical.  We queue the
-        # normalisation twice (50 ms + 250 ms) because CTk's own
-        # asynchronous layout sometimes reports a stale width on the
-        # first pass.
-        def _normalise_teaser_widths():
-            try:
-                labels = self._teaser_title_labels
-                if not labels:
-                    return
-                widths = []
-                for lbl in labels:
-                    try:
-                        lbl.update_idletasks()
-                        widths.append(lbl.winfo_reqwidth())
-                    except Exception:
-                        continue
-                if not widths:
-                    return
-                max_w = max(widths)
-                for lbl in labels:
-                    try:
-                        lbl.configure(width=max_w)
-                    except Exception:
-                        pass
-            except Exception as e:
-                print(f"[HAWK] teaser width normalise failed: {e}")
-        try:
-            parent.after(50,  _normalise_teaser_widths)
-            parent.after(250, _normalise_teaser_widths)
-        except Exception:
-            pass
 
     def _make_coming_soon_button(self, parent, *,
                                    title: str,
@@ -728,10 +1169,7 @@ class TargetBar(ctk.CTkFrame):
         # Outer shell — same style family as NEW SESSION (Courier 13
         # bold, 3 px corner radius, 1 px border).  Height is driven
         # by the single-line content: 13 pt font + 3 px padding on
-        # top/bottom lands at ~28 px, matching NEW SESSION.  Width is
-        # NOT fixed — the frame auto-sizes to its children, then
-        # `_normalise_teaser_widths` (called from the caller) widens
-        # the shorter button's title label so both end up identical.
+        # top/bottom lands at ~28 px, matching NEW SESSION.
         shell = ctk.CTkFrame(
             parent,
             fg_color=COLORS["bg_card"],
@@ -774,17 +1212,7 @@ class TargetBar(ctk.CTkFrame):
             text_color=dim_col,
             anchor="center",
         )
-        # NOTE: NO fill="x", NO expand=True.  Those pack options force
-        # the label to grow to fill any leftover horizontal space,
-        # which overrides the width= attribute and breaks the width
-        # normaliser across multiple teaser buttons.  By packing with
-        # plain side="left" the label honours its `width` attribute,
-        # so the normaliser can resize every title label to the same
-        # pixel width after initial render.  The `anchor="center"`
-        # still centres the text inside that allocated width.
         title_lbl.pack(side="left")
-        # Track this label so the width normaliser can resize it
-        # later (both CTAs end up matching the longer title).
         try:
             self._teaser_title_labels.append(title_lbl)
         except Exception:

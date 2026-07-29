@@ -355,12 +355,12 @@ class NetHealthIndicator(ctk.CTkFrame):
         from gui.dialogs import (_make_win, _note_box, _btn_row, _btn,
                                   _safe_destroy)
         d = self._net_details
-        win = _make_win(self, "Network Health", 620, 540)
+        win = _make_win(self, "Network Health", 620, 600)
         ctk.CTkLabel(
             win, text="⟐  HAWK Network Health",
-            font=ctk.CTkFont(family="Courier New", size=14, weight="bold"),
+            font=ctk.CTkFont(family="Courier New", size=16, weight="bold"),
             text_color=COLORS.get("text_cyan", COLORS["text_green"]),
-        ).pack(pady=(14, 6))
+        ).pack(pady=(14, 8))
 
         def _line(label, ok, extra=""):
             if ok is True:
@@ -370,18 +370,32 @@ class NetHealthIndicator(ctk.CTkFrame):
             else:
                 glyph, color = "·", COLORS["text_dim"]
             rf = ctk.CTkFrame(win, fg_color="transparent")
-            rf.pack(fill="x", padx=14, pady=1)
+            rf.pack(fill="x", padx=14, pady=2)
             ctk.CTkLabel(
                 rf, text=f"  {glyph}  {label}",
-                font=ctk.CTkFont(family="Courier New", size=11,
+                font=ctk.CTkFont(family="Courier New", size=14,
                                   weight="bold"),
                 text_color=color, width=230, anchor="w",
             ).pack(side="left")
-            ctk.CTkLabel(
-                rf, text=extra,
-                font=ctk.CTkFont(family="Courier New", size=11),
-                text_color=COLORS["text_dim"], anchor="w",
-            ).pack(side="left")
+            _selectable_line(rf, extra)
+
+        def _selectable_line(parent, text):
+            """Right-hand value rendered as a read-only Entry so the
+            operator can select and copy IPs/interfaces from the dialog."""
+            from utils.clipboard import add_context_menu
+            e = ctk.CTkEntry(
+                parent,
+                font=ctk.CTkFont(family="Courier New", size=14),
+                fg_color="transparent",
+                text_color=COLORS["text_dim"],
+                border_width=0,
+                height=22,
+            )
+            e.pack(side="left", fill="x", expand=True)
+            e.insert(0, text)
+            e.configure(state="readonly")
+            add_context_menu(e)
+            return e
 
         _line("Default gateway",
               d.get("gateway_ok"),
@@ -457,12 +471,13 @@ class NetHealthIndicator(ctk.CTkFrame):
                 "Status not yet determined — the first probe may still\n"
                 "be in flight. Hit RE-CHECK NOW to force one.",
                 COLORS["text_dim"])
-        _note_box(win, diag, color)
+        _note_box(win, diag, color, selectable=True, text_color=color)
 
         # ── Single Kali-side fix box for any down/stuck state ──
         if no_route or gw_silent:
             iface = d.get("iface") or "eth0"
-            _note_box(win, self._kali_fixes(iface), COLORS["text_yellow"])
+            _note_box(win, self._kali_fixes(iface), COLORS["text_yellow"],
+                      selectable=True, text_color=COLORS["text_yellow"])
 
         row = _btn_row(win)
 
