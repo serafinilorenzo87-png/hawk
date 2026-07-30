@@ -828,7 +828,8 @@ class TerminalWidget(ctk.CTkFrame):
             self._pending[tool_name] = []
         self._pending[tool_name].append(line)
 
-    def flush_tool_output(self, tool_name: str, binary: str = ""):
+    def flush_tool_output(self, tool_name: str, binary: str = "",
+                          suggest_deeper: bool = True):
         # Finish this scan's progress bar (show 100% or clear)
         if tool_name in self._progress_labels:
             if binary.lower() in ("nmap", "masscan", "rustscan"):
@@ -860,8 +861,10 @@ class TerminalWidget(ctk.CTkFrame):
             self.after(0, lambda: self._append(
                 f"  — No notable findings from {tool_name}.", "dim"))
 
-        # Check for 0 open ports (quick scan)
-        if binary.lower() == "nmap":
+        # Check for 0 open ports (quick scan).  Host-discovery runs
+        # (nmap -sn) never touch a port, so "no open ports found — run
+        # NMAP Full" would be nonsense advice: those callers opt out.
+        if binary.lower() == "nmap" and suggest_deeper:
             if not any("finding" == lv for lv, _ in parsed):
                 self.after(200, lambda: self._suggest_deeper_scan(tool_name))
 

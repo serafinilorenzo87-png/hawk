@@ -463,6 +463,7 @@ class TargetBar(ctk.CTkFrame):
 
         self._sweep_inventory = None
         self._sweep_inventory_path = None
+        self._sweep_graph_win = None
         self._sweep_running = False
         self._sweep_aborted = False
         self._sweep_runner = None
@@ -489,6 +490,23 @@ class TargetBar(ctk.CTkFrame):
             self._sweep_helper_lbl.configure(
                 text=net_str if net_str else "invalid",
                 text_color=COLORS["text_red"])
+
+    def _drop_stale_output(self, path):
+        """Delete a previous run's scan output before launching a new one.
+
+        gnmap / masscan-list paths are derived from the CIDR alone, so a
+        file left behind by an earlier sweep of the same range would be
+        parsed as fresh results — phantom hosts that are no longer up.
+        """
+        if not path:
+            return
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            self.app.terminal.write(
+                f"[!] Could not remove stale scan output {path}: {e}", "warn")
 
     def _abort_sweep(self):
         if not self._sweep_running or not self._sweep_runner:
@@ -534,7 +552,7 @@ class TargetBar(ctk.CTkFrame):
             def _cancel():
                 _safe_destroy(win)
             row = _btn_row(win)
-            _btn(row, "PROCEED", _confirm, accent=True)
+            _btn(row, "PROCEED", _confirm, warn=True)
             _btn(row, "CANCEL", _cancel)
             win.wait_window()
             if not confirmed["ok"]:
@@ -564,6 +582,7 @@ class TargetBar(ctk.CTkFrame):
             out_path = gnmap_path_for(cidr, phase=1)
 
         cmd = build_phase1_cmd(cidr, method, out_path or "")
+        self._drop_stale_output(out_path)
 
         from datetime import datetime, timezone
         started = datetime.now(timezone.utc).isoformat()
@@ -602,6 +621,15 @@ class TargetBar(ctk.CTkFrame):
                 state="normal",
                 command=self._run_sweep,
             )
+            # In smart mode (the default) every line is buffered under
+            # tool_name until this call: without it the terminal stays
+            # empty, the progress bar never completes, the buffer leaks
+            # and tool errors ("masscan: command not found") vanish.
+            # The binary name is what drives the progress bar and the
+            # parser selection, so map the method back onto it.
+            self.app.terminal.flush_tool_output(
+                tool_name, "nmap" if method == "nmap-sn" else method,
+                suggest_deeper=False)
             self._finish_sweep(
                 cidr, method, out_path, started, rc)
 
@@ -626,9 +654,14 @@ class TargetBar(ctk.CTkFrame):
         aborted = self._sweep_aborted
         self._sweep_aborted = False
 
+        # A failed run leaves the output file empty or half-written; the
+        # aborted case is different — the operator asked to stop and the
+        # partial results collected so far are legitimate.
         if exit_code != 0 and not aborted:
             self.app.terminal.write(
-                f"[!] Sweep exited with code {exit_code}.", "error")
+                f"[!] Sweep exited with code {exit_code} — "
+                f"results discarded (see the output above).", "error")
+            return
 
         if method == "arp-scan":
             hosts = parse_arp_scan(self._sweep_arp_lines)
@@ -677,6 +710,7 @@ class TargetBar(ctk.CTkFrame):
         alive_ips = [h["ip"] for h in phase1_hosts]
         p2_path = gnmap_path_for(cidr, phase=2)
         cmd = build_phase2_cmd(alive_ips, p2_path)
+        self._drop_stale_output(p2_path)
 
         self.app.terminal.section(f"PHASE 2 — port peek on {len(alive_ips)} hosts")
         self._sweep_running = True
@@ -705,6 +739,10 @@ class TargetBar(ctk.CTkFrame):
                 state="normal",
                 command=self._run_sweep,
             )
+            # See _on_done in _run_sweep — smart mode holds every line
+            # until the tool is flushed.
+            self.app.terminal.flush_tool_output(
+                tool_name, "nmap", suggest_deeper=False)
             self._finish_phase2(
                 cidr, method, phase1_hosts, p2_path,
                 started, finished, rc)
@@ -726,17 +764,26 @@ class TargetBar(ctk.CTkFrame):
         )
 
         finished = datetime.now(timezone.utc).isoformat()
-        p2_hosts = parse_nmap_gnmap(p2_path)
 
-        # Merge phase 2 port data into phase 1 hosts
-        p2_by_ip = {h["ip"]: h for h in p2_hosts}
-        for h in phase1_hosts:
-            enriched = p2_by_ip.get(h["ip"])
-            if enriched:
-                h["port_hints"] = enriched["port_hints"]
-                h["responded_via"] = list(
-                    set(h["responded_via"]) | set(enriched["responded_via"]))
-                h["os_hint"] = enriched["os_hint"]
+        # Phase 2 is enrichment only: on failure we skip the (possibly
+        # stale or truncated) gnmap file but still persist the phase-1
+        # hosts — losing a completed discovery over a failed port peek
+        # would be the worse outcome.
+        if exit_code != 0:
+            self.app.terminal.write(
+                f"[!] Phase 2 exited with code {exit_code} — "
+                f"keeping phase 1 results without port hints.", "warn")
+        else:
+            # Merge phase 2 port data into phase 1 hosts
+            p2_by_ip = {h["ip"]: h for h in parse_nmap_gnmap(p2_path)}
+            for h in phase1_hosts:
+                enriched = p2_by_ip.get(h["ip"])
+                if enriched:
+                    h["port_hints"] = enriched["port_hints"]
+                    h["responded_via"] = list(
+                        set(h["responded_via"])
+                        | set(enriched["responded_via"]))
+                    h["os_hint"] = enriched["os_hint"]
 
         existing = load_latest_inventory(cidr)
         inventory = build_inventory(cidr, method, phase1_hosts,
@@ -770,12 +817,31 @@ class TargetBar(ctk.CTkFrame):
                 "[!] Could not build graph — no alive hosts.", "error")
             return
 
+        # Only one graph at a time — a second OPEN GRAPH would otherwise
+        # leave the first (now stale) window floating around.
+        self._close_sweep_graph()
+
         from gui.dialogs_sweep import show_sweep_graph_window
-        show_sweep_graph_window(
+        self._sweep_graph_win = show_sweep_graph_window(
             self, self._sweep_inventory.get("range", ""),
             graph_data,
             on_select_host=self._promote_sweep_host,
         )
+
+    def _close_sweep_graph(self):
+        """Close the graph window after a promotion.
+
+        The figure is a snapshot of the inventory taken when the window
+        opened: it does not repaint itself, so leaving it up after the
+        active target changed shows stale state (and invites a second
+        promotion on top of the first).
+        """
+        win = getattr(self, "_sweep_graph_win", None)
+        self._sweep_graph_win = None
+        if win is None:
+            return
+        from gui.dialogs import _safe_destroy
+        _safe_destroy(win)
 
     def _promote_sweep_host(self, ip):
         """Click on a graph node → set as active target, lazy session."""
@@ -786,51 +852,50 @@ class TargetBar(ctk.CTkFrame):
         if not inv:
             return
 
-        # Check if this host already has a session
-        for h in inv.get("hosts", []):
-            if h["ip"] == ip and h.get("session_ref"):
-                ref = h["session_ref"]
-                sid = ref.get("session_id", "")
-                fpath = ref.get("file", "")
-                self.app.terminal.write(
-                    f"[*] Loading existing session for {ip} ({sid[:8]})",
-                    "info")
-                self._ip_entry.delete(0, "end")
-                self._ip_entry.insert(0, ip)
-                try:
-                    sess = Session(ip, sid)
-                    if fpath and sess.load(fpath):
-                        self.app.session_manager.current = sess
-                        self._update_session_label(sess)
-                        self.app.status_bar.set_session(
-                            sess.target_ip, sess.platform)
-                        self.app.title(
-                            f"HAWK — {sess.target_ip} [{sess.platform}]")
-                    else:
-                        self.app.terminal.write(
-                            f"[!] Session file not found: {fpath}", "error")
-                except Exception as e:
-                    self.app.terminal.write(
-                        f"[!] Could not load session: {e}", "error")
-                return
+        host = next((h for h in inv.get("hosts", [])
+                     if h.get("ip") == ip), None)
+        ref = (host or {}).get("session_ref")
 
-        # Create new session for this host
+        # Host already worked on → hand the session to the same restore
+        # path the LOAD dialog uses.  Repointing session_manager.current
+        # on its own is what corrupted data: the panels still held the
+        # PREVIOUS host's state and the next autosave tick wrote it over
+        # this host's file.
+        if ref:
+            sid = ref.get("session_id", "")
+            fpath = ref.get("file", "")
+            self.app.terminal.write(
+                f"[*] Loading existing session for {ip} ({sid[:8]})", "info")
+            try:
+                sess = Session(ip, sid)
+                if not (fpath and sess.load(fpath)):
+                    self.app.terminal.write(
+                        f"[!] Session file not found: {fpath}", "error")
+                    return
+                self.apply_session(sess)
+            except Exception as e:
+                self.app.terminal.write(
+                    f"[!] Could not load session: {e}", "error")
+                return
+            self._close_sweep_graph()
+            return
+
+        # First selection → brand-new session.  _new_session() owns the
+        # full reset (panels, domain field, kill-chain statuses, vhost
+        # button); duplicating a subset of it here is what left the
+        # previous host's findings on screen under the new target.
         self._ip_entry.delete(0, "end")
         self._ip_entry.insert(0, ip)
-        platform = self._platform_var.get()
 
-        os_hint = "unknown"
-        for h in inv.get("hosts", []):
-            if h["ip"] == ip:
-                os_hint = h.get("os_hint", "unknown")
-                break
-        if os_hint == "windows" and platform not in ("HTB", "THM"):
+        os_hint = (host or {}).get("os_hint", "unknown")
+        if os_hint == "windows" and self._platform_var.get() not in ("HTB", "THM"):
             self._platform_var.set("Custom")
 
-        session = self.app.session_manager.new_session(ip, platform)
-        self._update_session_label(session)
-        self.app.status_bar.set_session(ip, platform)
-        self.app.title(f"HAWK — {ip} [{platform}]")
+        previous = self.app.session_manager.current
+        self._new_session()
+        session = self.app.session_manager.current
+        if session is None or session is previous:
+            return          # IP rejected by _new_session — nothing created
 
         set_session_ref(inv, ip, session.session_id,
                         getattr(session, "file_path", ""))
@@ -840,6 +905,7 @@ class TargetBar(ctk.CTkFrame):
         self.app.terminal.write(
             f"[+] Target promoted: {ip} (session {session.session_id[:8]})",
             "success")
+        self._close_sweep_graph()
 
     # ─── Actions ───────────────────────────────────────────────────────────────
 
@@ -2365,6 +2431,202 @@ class TargetBar(ctk.CTkFrame):
             return
         _SessionPickerDialog(self, self.app, sessions)
 
+    def apply_session(self, session):
+        """Make `session` the active one and repopulate the whole UI from it.
+
+        Shared by the LOAD dialog and by network-sweep host promotion.
+        Both need the FULL restore — target/domain/platform, terminal
+        replay, kill-chain statuses, Target Intel rehydration, /etc/hosts
+        — and, above all, the autosave pause: a switch that repoints
+        `session_manager.current` without repopulating the panels leaves
+        the previous host's state in the widgets, and the next autosave
+        tick writes it straight over the newly loaded host's file.
+        """
+        import os as _os
+        # Pause AUTOSAVE for the duration of the restore so a
+        # half-restored state can't be written over the source file
+        # (user-reported hypothesis: "new session + autosave + load =
+        # saved data disappears").  We disable the timer before any
+        # UI repopulation and re-enable it at the end ONLY if it was
+        # on when we started.
+        autosave_was_on = getattr(self, "_autosave_on", False)
+        if autosave_was_on:
+            try:
+                self._autosave_disable()
+                self.app.terminal.write(
+                    "  [*] AUTOSAVE paused for LOAD — will re-enable "
+                    "after restore completes.", "dim")
+            except Exception as e:
+                print(f"[HAWK] load: autosave pause failed: {e}")
+
+        self.app.session_manager.set_current(session)
+
+        # Target + domain
+        self._ip_entry.delete(0, "end")
+        self._ip_entry.insert(0, session.target_ip)
+        self.set_target_domain(getattr(session, "target_domain", "") or "")
+
+        # Platform dropdown — suppress the trace so setting the value
+        # programmatically doesn't mark the session dirty / re-fire
+        # the "Platform changed to X" terminal line.
+        try:
+            plat = (getattr(session, "platform", "") or "HTB").strip()
+            if plat not in ("HTB", "THM", "Custom"):
+                plat = "Custom"
+            self._platform_suppress_trace = True
+            self._platform_var.set(plat)
+            self._platform_suppress_trace = False
+        except Exception as e:
+            print(f"[HAWK] platform restore failed: {e}")
+
+        # Restore terminal history BEFORE writing any new lines — so the
+        # new "session loaded" banner appears at the end of the replay.
+        try:
+            self.app.terminal.restore_lines(session.terminal_lines)
+        except Exception as e:
+            print(f"[HAWK] terminal restore failed: {e}")
+
+        # Restore tool status icons across all kill-chain cards
+        try:
+            status_by_tool = session.last_status_per_tool()
+            kc = getattr(self.app, "kill_chain_panel", None)
+            cards = list(getattr(kc, "_cards", {}).values()) if kc else []
+            for card in cards:
+                for tid in list(getattr(card, "_tool_widgets", {}).keys()):
+                    if tid in status_by_tool:
+                        card._set_tool_status(tid, status_by_tool[tid])
+        except Exception as e:
+            print(f"[HAWK] tool-status restore failed: {e}")
+
+        # Restore Target Intel snapshot.
+        # The snapshot stores fingerprint/exploits as plain dicts (JSON
+        # round-trip); rehydrate them back into OSFingerprint / ExploitEntry
+        # so the rest of the widget (which expects live objects with
+        # .platform / .rank_color() / …) keeps working. Still tolerate
+        # already-live objects in case we ever load an unsaved in-memory
+        # snapshot.
+        try:
+            from modules.exploit_suggester import OSFingerprint, ExploitEntry
+            intel_state = session.target_intel or {}
+            if intel_state:
+                fp_raw = intel_state.get("fingerprint")
+                if isinstance(fp_raw, dict):
+                    fp_obj = OSFingerprint.from_dict(fp_raw)
+                else:
+                    fp_obj = fp_raw   # already an OSFingerprint (or None)
+                self.app.target_intel._fp = fp_obj
+
+                exps_raw = intel_state.get("exploits", []) or []
+                rebuilt = []
+                for e in exps_raw:
+                    if isinstance(e, dict):
+                        rebuilt.append(ExploitEntry.from_dict(e))
+                    else:
+                        rebuilt.append(e)
+                self.app.target_intel._exploits = rebuilt
+
+                self.app.target_intel._auto_findings = (
+                    list(intel_state.get("auto_findings", []) or []))
+                self.app.target_intel._render_all()
+        except Exception as e:
+            print(f"[HAWK] target_intel restore failed: {e}")
+
+        # Status bar + window title
+        self.app.status_bar.set_session(session.target_ip, session.platform)
+        self._update_session_label(session)
+        self.app.title(f"HAWK — {session.target_ip} [{session.platform}]")
+        # Restore the STEALTH MODE checkbox to match the session's
+        # Banner in terminal (appended AFTER the replay)
+        s = session.summary()
+        self.app.terminal.section(f"SESSION RESUMED — {session.target_ip}")
+        self.app.terminal.write(
+            f"[+] Loaded {_os.path.basename(session.file_path or '?')}",
+            "success")
+        if s.get("last_saved"):
+            self.app.terminal.write(
+                f"    Snapshot time  : {s['last_saved']}", "dim")
+
+        # Comprehensive post-load audit — every category that might
+        # have come out of the file is logged with its count so the
+        # user can immediately tell whether the file HAS data (and the
+        # widgets failed to render it) or whether the file is basically
+        # empty (and the "no data" feeling is correct from the file's
+        # contents).  User-reported confusion "ho caricato ma non ha
+        # salvato nessun dato" is almost always file-was-empty.
+        intel = getattr(session, "target_intel", {}) or {}
+        fp_present   = bool(intel.get("fingerprint"))
+        n_exploits   = len(intel.get("exploits") or [])
+        n_findings   = len(intel.get("auto_findings") or [])
+        self.app.terminal.write(
+            f"    Tools recorded     : {s.get('tools_run', 0)}", "dim")
+        self.app.terminal.write(
+            f"    Terminal lines     : {s.get('terminal_lines', 0)}", "dim")
+        self.app.terminal.write(
+            f"    Credentials        : {s.get('creds_found', 0)}", "dim")
+        self.app.terminal.write(
+            f"    Target Intel — OS  : "
+            f"{'✓ fingerprint saved' if fp_present else '✗ no fingerprint'}",
+            "dim")
+        self.app.terminal.write(
+            f"    Target Intel — findings : {n_findings}", "dim")
+        self.app.terminal.write(
+            f"    Target Intel — exploits : {n_exploits}", "dim")
+        self.app.terminal.write(
+            f"    Discovered users   : "
+            f"{len(getattr(session, 'discovered_users', []) or [])}", "dim")
+        self.app.terminal.write(
+            f"    Discovered shares  : "
+            f"{len(getattr(session, 'discovered_shares', []) or [])}", "dim")
+        total = (s.get('tools_run', 0) + s.get('terminal_lines', 0)
+                 + s.get('creds_found', 0) + n_findings
+                 + (1 if fp_present else 0))
+        if total == 0:
+            self.app.terminal.write(
+                "[!] The snapshot contained NO recoverable state "
+                "(the file was saved before any tool produced output).  "
+                "Nothing to restore — start running tools to populate "
+                "Target Intel / Credential Store.",
+                "warn")
+        else:
+            self.app.terminal.write(
+                "[*] Pick up where you left off — previous output is "
+                "restored above.", "info")
+
+        # Restore /etc/hosts entries from session
+        try:
+            saved_hosts = getattr(session, "hawk_hosts_entries", [])
+            if saved_hosts:
+                from utils.hosts_helper import list_hawk_entries, add_entries
+                existing = set()
+                for e in list_hawk_entries():
+                    for h in e["hostnames"]:
+                        existing.add((e["ip"], h))
+                to_add = {}
+                for entry in saved_hosts:
+                    ip = entry.get("ip", "")
+                    hostname = entry.get("hostname", "")
+                    if ip and hostname and (ip, hostname) not in existing:
+                        to_add.setdefault(ip, []).append(hostname)
+                if to_add:
+                    add_entries(list(to_add.items()))
+                    self.app.terminal.write(
+                        f"  [+] Restored {sum(len(v) for v in to_add.values())} "
+                        f"/etc/hosts entry/entries from session", "success")
+            self._refresh_vhost_button()
+        except Exception as e:
+            print(f"[HAWK] vhost restore failed: {e}")
+
+        # Re-enable autosave if it was on before the load — now that
+        # the UI has the restored data, it's safe for the timer to
+        # start writing the session file again.
+        if autosave_was_on:
+            try:
+                self._autosave_enable()
+                self.app.terminal.write(
+                    "  [*] AUTOSAVE resumed.", "dim")
+            except Exception as e:
+                print(f"[HAWK] load: autosave resume failed: {e}")
+
     def _update_session_label(self, session):
         if session is None:
             self._session_label.configure(
@@ -2716,192 +2978,8 @@ class _SessionPickerDialog(ctk.CTkToplevel):
             pass
 
     def _load(self, session):
-        import os as _os
-        # Pause AUTOSAVE for the duration of the restore so a
-        # half-restored state can't be written over the source file
-        # (user-reported hypothesis: "new session + autosave + load =
-        # saved data disappears").  We disable the timer before any
-        # UI repopulation and re-enable it at the end ONLY if it was
-        # on when we started.
-        tb = self.app.target_bar
-        autosave_was_on = getattr(tb, "_autosave_on", False)
-        if autosave_was_on:
-            try:
-                tb._autosave_disable()
-                self.app.terminal.write(
-                    "  [*] AUTOSAVE paused for LOAD — will re-enable "
-                    "after restore completes.", "dim")
-            except Exception as e:
-                print(f"[HAWK] load: autosave pause failed: {e}")
-
-        self.app.session_manager.set_current(session)
-
-        # Target + domain
-        self.app.target_bar._ip_entry.delete(0, "end")
-        self.app.target_bar._ip_entry.insert(0, session.target_ip)
-        self.app.target_bar.set_target_domain(
-            getattr(session, "target_domain", "") or "")
-
-        # Platform dropdown — suppress the trace so setting the value
-        # programmatically doesn't mark the session dirty / re-fire
-        # the "Platform changed to X" terminal line.
-        try:
-            tb = self.app.target_bar
-            plat = (getattr(session, "platform", "") or "HTB").strip()
-            if plat not in ("HTB", "THM", "Custom"):
-                plat = "Custom"
-            tb._platform_suppress_trace = True
-            tb._platform_var.set(plat)
-            tb._platform_suppress_trace = False
-        except Exception as e:
-            print(f"[HAWK] platform restore failed: {e}")
-
-        # Restore terminal history BEFORE writing any new lines — so the
-        # new "session loaded" banner appears at the end of the replay.
-        try:
-            self.app.terminal.restore_lines(session.terminal_lines)
-        except Exception as e:
-            print(f"[HAWK] terminal restore failed: {e}")
-
-        # Restore tool status icons across all kill-chain cards
-        try:
-            status_by_tool = session.last_status_per_tool()
-            kc = getattr(self.app, "kill_chain_panel", None)
-            cards = list(getattr(kc, "_cards", {}).values()) if kc else []
-            for card in cards:
-                for tid in list(getattr(card, "_tool_widgets", {}).keys()):
-                    if tid in status_by_tool:
-                        card._set_tool_status(tid, status_by_tool[tid])
-        except Exception as e:
-            print(f"[HAWK] tool-status restore failed: {e}")
-
-        # Restore Target Intel snapshot.
-        # The snapshot stores fingerprint/exploits as plain dicts (JSON
-        # round-trip); rehydrate them back into OSFingerprint / ExploitEntry
-        # so the rest of the widget (which expects live objects with
-        # .platform / .rank_color() / …) keeps working. Still tolerate
-        # already-live objects in case we ever load an unsaved in-memory
-        # snapshot.
-        try:
-            from modules.exploit_suggester import OSFingerprint, ExploitEntry
-            intel_state = session.target_intel or {}
-            if intel_state:
-                fp_raw = intel_state.get("fingerprint")
-                if isinstance(fp_raw, dict):
-                    fp_obj = OSFingerprint.from_dict(fp_raw)
-                else:
-                    fp_obj = fp_raw   # already an OSFingerprint (or None)
-                self.app.target_intel._fp = fp_obj
-
-                exps_raw = intel_state.get("exploits", []) or []
-                rebuilt = []
-                for e in exps_raw:
-                    if isinstance(e, dict):
-                        rebuilt.append(ExploitEntry.from_dict(e))
-                    else:
-                        rebuilt.append(e)
-                self.app.target_intel._exploits = rebuilt
-
-                self.app.target_intel._auto_findings = (
-                    list(intel_state.get("auto_findings", []) or []))
-                self.app.target_intel._render_all()
-        except Exception as e:
-            print(f"[HAWK] target_intel restore failed: {e}")
-
-        # Status bar + window title
-        self.app.status_bar.set_session(session.target_ip, session.platform)
-        self.app.target_bar._update_session_label(session)
-        self.app.title(f"HAWK — {session.target_ip} [{session.platform}]")
-        # Restore the STEALTH MODE checkbox to match the session's
-        # Banner in terminal (appended AFTER the replay)
-        s = session.summary()
-        self.app.terminal.section(f"SESSION RESUMED — {session.target_ip}")
-        self.app.terminal.write(
-            f"[+] Loaded {_os.path.basename(session.file_path or '?')}",
-            "success")
-        if s.get("last_saved"):
-            self.app.terminal.write(
-                f"    Snapshot time  : {s['last_saved']}", "dim")
-
-        # Comprehensive post-load audit — every category that might
-        # have come out of the file is logged with its count so the
-        # user can immediately tell whether the file HAS data (and the
-        # widgets failed to render it) or whether the file is basically
-        # empty (and the "no data" feeling is correct from the file's
-        # contents).  User-reported confusion "ho caricato ma non ha
-        # salvato nessun dato" is almost always file-was-empty.
-        intel = getattr(session, "target_intel", {}) or {}
-        fp_present   = bool(intel.get("fingerprint"))
-        n_exploits   = len(intel.get("exploits") or [])
-        n_findings   = len(intel.get("auto_findings") or [])
-        self.app.terminal.write(
-            f"    Tools recorded     : {s.get('tools_run', 0)}", "dim")
-        self.app.terminal.write(
-            f"    Terminal lines     : {s.get('terminal_lines', 0)}", "dim")
-        self.app.terminal.write(
-            f"    Credentials        : {s.get('creds_found', 0)}", "dim")
-        self.app.terminal.write(
-            f"    Target Intel — OS  : "
-            f"{'✓ fingerprint saved' if fp_present else '✗ no fingerprint'}",
-            "dim")
-        self.app.terminal.write(
-            f"    Target Intel — findings : {n_findings}", "dim")
-        self.app.terminal.write(
-            f"    Target Intel — exploits : {n_exploits}", "dim")
-        self.app.terminal.write(
-            f"    Discovered users   : "
-            f"{len(getattr(session, 'discovered_users', []) or [])}", "dim")
-        self.app.terminal.write(
-            f"    Discovered shares  : "
-            f"{len(getattr(session, 'discovered_shares', []) or [])}", "dim")
-        total = (s.get('tools_run', 0) + s.get('terminal_lines', 0)
-                 + s.get('creds_found', 0) + n_findings
-                 + (1 if fp_present else 0))
-        if total == 0:
-            self.app.terminal.write(
-                "[!] The snapshot contained NO recoverable state "
-                "(the file was saved before any tool produced output).  "
-                "Nothing to restore — start running tools to populate "
-                "Target Intel / Credential Store.",
-                "warn")
-        else:
-            self.app.terminal.write(
-                "[*] Pick up where you left off — previous output is "
-                "restored above.", "info")
-
-        # Restore /etc/hosts entries from session
-        try:
-            saved_hosts = getattr(session, "hawk_hosts_entries", [])
-            if saved_hosts:
-                from utils.hosts_helper import list_hawk_entries, add_entries
-                existing = set()
-                for e in list_hawk_entries():
-                    for h in e["hostnames"]:
-                        existing.add((e["ip"], h))
-                to_add = {}
-                for entry in saved_hosts:
-                    ip = entry.get("ip", "")
-                    hostname = entry.get("hostname", "")
-                    if ip and hostname and (ip, hostname) not in existing:
-                        to_add.setdefault(ip, []).append(hostname)
-                if to_add:
-                    add_entries(list(to_add.items()))
-                    self.app.terminal.write(
-                        f"  [+] Restored {sum(len(v) for v in to_add.values())} "
-                        f"/etc/hosts entry/entries from session", "success")
-            self.app.target_bar._refresh_vhost_button()
-        except Exception as e:
-            print(f"[HAWK] vhost restore failed: {e}")
-
-        # Re-enable autosave if it was on before the load — now that
-        # the UI has the restored data, it's safe for the timer to
-        # start writing the session file again.
-        if autosave_was_on:
-            try:
-                tb._autosave_enable()
-                self.app.terminal.write(
-                    "  [*] AUTOSAVE resumed.", "dim")
-            except Exception as e:
-                print(f"[HAWK] load: autosave resume failed: {e}")
-
+        # The whole restore lives in TargetBar.apply_session so the
+        # sweep's host promotion goes through the exact same path
+        # (autosave pause, terminal replay, panel rehydration).
+        self.app.target_bar.apply_session(session)
         self.destroy()

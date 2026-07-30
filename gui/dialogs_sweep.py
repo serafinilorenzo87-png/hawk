@@ -52,6 +52,10 @@ def show_sweep_graph_window(parent, cidr, graph_data,
       graph_data:     dict from utils.sweep_graph.build_graph_data().
       on_select_host: callable(ip: str) — fired when the operator
                       clicks SELECT AS TARGET on a host node.
+
+    Returns the Toplevel, or None when the graph could not be drawn.
+    The caller keeps the handle so it can close the window after a
+    promotion — the layout is a snapshot and never redraws itself.
     """
     try:
         import matplotlib
@@ -348,6 +352,8 @@ def show_sweep_graph_window(parent, cidr, graph_data,
         except Exception:
             pass
     win.after(180, _reveal)
+
+    return win
 
 
 def _show_missing_deps(parent, err):
