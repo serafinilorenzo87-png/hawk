@@ -225,20 +225,29 @@ class TargetIntelParserMixin:
         svc_tag = self._SVC_TAG_MAP.get(
             (svc_key or "").lower(), (svc_key or "").upper())
 
-        # False-positive cascade guard for HTTP/HTTPS hydra runs.
+        # Verification pass.  Two layers:
+        #   • the batch cascade guard, scoped to HTTP/HTTPS as before
+        #     (a web endpoint that answers the same to any password);
+        #   • a per-credential probe, which is the ONLY thing that can
+        #     mark a cred verified.  A cred our own probe rejects is
+        #     dropped even though hydra reported it.
         # Only fires when we have the launching cmd (Connect-dialog
-        # brute path) — legacy callers without cmd keep the old
-        # trust-hydra behaviour, so no regression for non-HTTP brute.
+        # brute path); without it nothing can be probed and every hit
+        # is stored unverified.
+        cred_note = "[unverified - no HAWK probe]"
+        probe_by_pair = {}
         if cmd:
             try:
                 from utils.hydra_verify import (
-                    parse_hydra_cmd, detect_false_positive_cascade)
+                    parse_hydra_cmd, verify_creds, unverified_note)
                 cmd_info = parse_hydra_cmd(cmd)
-                if cmd_info.is_http or cmd_info.is_https or \
-                        cmd_info.proto.startswith(("http-", "https-")):
-                    extracted = [
-                        (m.group(4), (m.group(5) or "").strip())
-                        for m in hits]
+                cred_note = unverified_note(cmd_info)
+                is_http = (cmd_info.is_http or cmd_info.is_https or
+                           cmd_info.proto.startswith(("http-", "https-")))
+                extracted = [
+                    (m.group(4), (m.group(5) or "").strip())
+                    for m in hits]
+                if is_http:
                     self.app.terminal.write(
                         f"  [*] Hydra HTTP cascade check: probing "
                         f"{cmd_info.proto}://{cmd_info.host}:"
@@ -246,49 +255,56 @@ class TargetIntelParserMixin:
                         f"fake password to validate "
                         f"{len(extracted)} reported cred(s)…",
                         "dim")
-                    kept, reason, is_cascade = (
-                        detect_false_positive_cascade(
-                            extracted, cmd_info))
-                    if is_cascade:
-                        self.app.terminal.write(
-                            f"  [!] HYDRA FALSE-POSITIVE CASCADE on "
-                            f"{cmd_info.proto}://{cmd_info.host}:"
-                            f"{cmd_info.port}{cmd_info.path} — "
-                            f"dropping all {len(extracted)} reported "
-                            f"cred(s).",
-                            "error")
-                        for ln in (reason or "").splitlines():
-                            self.app.terminal.write(f"      {ln}",
-                                                     "warn")
-                        try:
-                            self.add_auto_finding(
-                                title=(f"HYDRA false-positive cascade "
-                                        f"on {cmd_info.proto}://"
-                                        f"{cmd_info.host}:"
-                                        f"{cmd_info.port}"),
-                                description=(reason or "")
-                                    + "\n\nNo credentials were saved.",
-                                severity="high",
-                                source="Hydra brute force "
-                                       "(cascade guard)")
-                        except Exception:
-                            pass
-                        return
-                    if len(kept) < len(extracted):
-                        # Partial cascade: keep only the survivors.
-                        kept_set = set(kept)
-                        hits = [m for m in hits
-                                if (m.group(4),
-                                    (m.group(5) or "").strip())
-                                in kept_set]
-                        self.app.terminal.write(
-                            f"  [hawk] Hydra cascade check kept "
-                            f"{len(hits)}/{len(extracted)} cred(s) "
-                            f"after counter-probe.", "dim")
+                kept, rejected, reason, is_cascade = verify_creds(
+                    extracted, cmd_info, run_cascade=is_http)
+                if is_cascade:
+                    self.app.terminal.write(
+                        f"  [!] HYDRA FALSE-POSITIVE CASCADE on "
+                        f"{cmd_info.proto}://{cmd_info.host}:"
+                        f"{cmd_info.port}{cmd_info.path} — "
+                        f"dropping all {len(extracted)} reported "
+                        f"cred(s).",
+                        "error")
+                    for ln in (reason or "").splitlines():
+                        self.app.terminal.write(f"      {ln}",
+                                                 "warn")
+                    try:
+                        self.add_auto_finding(
+                            title=(f"HYDRA false-positive cascade "
+                                    f"on {cmd_info.proto}://"
+                                    f"{cmd_info.host}:"
+                                    f"{cmd_info.port}"),
+                            description=(reason or "")
+                                + "\n\nNo credentials were saved.",
+                            severity="high",
+                            source="Hydra brute force "
+                                   "(cascade guard)")
+                    except Exception:
+                        pass
+                    return
+                for _u, _p in rejected:
+                    self.app.terminal.write(
+                        f"  [!] hydra reported {_u} but HAWK's own "
+                        f"{cmd_info.proto or 'auth'} probe was "
+                        f"REJECTED — credential dropped, not saved.",
+                        "error")
+                probe_by_pair = {(u, p): v for u, p, v in kept}
+                if len(kept) < len(extracted):
+                    keep_set = set(probe_by_pair)
+                    hits = [m for m in hits
+                            if (m.group(4),
+                                (m.group(5) or "").strip())
+                            in keep_set]
+                    self.app.terminal.write(
+                        f"  [hawk] Hydra verification kept "
+                        f"{len(hits)}/{len(extracted)} cred(s) "
+                        f"after counter-probe.", "dim")
             except Exception as _e:
-                # Verifier failure → fall back to legacy trust-hydra
-                # behaviour so we don't silently drop real creds.
+                # Verifier failure → keep the creds (dropping real
+                # ones silently would be worse) but none of them can
+                # claim to be verified.
                 print(f"[HAWK] hydra-verify in connect path failed: {_e}")
+                probe_by_pair = {}
 
         new_count = 0
         upgraded  = 0
@@ -299,12 +315,24 @@ class TargetIntelParserMixin:
             hit_user  = m.group(4)
             hit_pass  = (m.group(5) or "").strip()
 
-            note_verified = (
-                f"[verified by Hydra brute force] "
-                f"{svc_tag}@{hit_host}:{hit_port} ({hit_proto})"
-            )
+            # Hydra reporting a hit is not proof — only HAWK's own
+            # probe is (see utils/hydra_verify).
+            probe = probe_by_pair.get((hit_user, hit_pass))
+            if probe is True:
+                hit_note = (
+                    f"[verified by Hydra brute force + HAWK probe] "
+                    f"{svc_tag}@{hit_host}:{hit_port} ({hit_proto})"
+                )
+            else:
+                hit_note = (
+                    f"[hydra reported valid] "
+                    f"{svc_tag}@{hit_host}:{hit_port} ({hit_proto})  "
+                    f"{cred_note}"
+                )
 
-            # Try to upgrade an existing unverified entry first.
+            # Existing entry for the same cred?  Promote it only when
+            # the probe proved it; otherwise leave it untouched (we
+            # learned nothing new) and don't add a duplicate.
             upgraded_this_hit = False
             try:
                 if sess:
@@ -313,22 +341,15 @@ class TargetIntelParserMixin:
                                 and cdict.get("host") == hit_host
                                 and cdict.get("password") == hit_pass
                                 and svc_tag in (cdict.get("services") or [])):
-                            old_notes = cdict.get("notes") or ""
-                            if ("[unverified]" in old_notes
-                                    or "[verified by Hydra" not in old_notes
-                                    or not cdict.get("verified", False)):
-                                cdict["notes"] = note_verified
-                                cdict["verified"] = True
+                            if probe is True and \
+                                    self._promote_cred_dict(cdict, hit_note):
                                 sess._touch()
                                 # Promotion lives in the raw dict, so it
                                 # only reaches disk / the UI if we save
                                 # and repaint here.
                                 self._persist_and_refresh_store()
                                 upgraded += 1
-                                upgraded_this_hit = True
-                            else:
-                                # Already verified — do nothing.
-                                upgraded_this_hit = True
+                            upgraded_this_hit = True
                             break
             except Exception:
                 pass
@@ -336,7 +357,6 @@ class TargetIntelParserMixin:
             if upgraded_this_hit:
                 continue
 
-            # No matching entry → add new verified cred.
             try:
                 store.add_credential(Credential(
                     username=hit_user,
@@ -345,7 +365,8 @@ class TargetIntelParserMixin:
                     services=[svc_tag],
                     source_phase="exploitation",
                     host=hit_host,
-                    notes=note_verified,
+                    notes=hit_note,
+                    verified=(probe is True),
                 ))
                 new_count += 1
             except Exception as e:
@@ -381,9 +402,13 @@ class TargetIntelParserMixin:
                 if len(hits) > 5:
                     desc_parts.append(f"  • … and {len(hits) - 5} more")
                 desc_parts.append("")
+                n_proven = sum(1 for v in probe_by_pair.values()
+                               if v is True)
                 desc_parts.append(
-                    "Credentials saved to the Credential Store with "
-                    "[verified by Hydra brute force] note.")
+                    f"Saved to the Credential Store: {n_proven} of "
+                    f"{len(hits)} confirmed by HAWK's own auth probe; "
+                    f"the rest are marked UNVERIFIED "
+                    f"({cred_note}).")
                 self.add_auto_finding(
                     title=f"{svc_tag} brute force: valid credentials found",
                     description="\n".join(desc_parts),

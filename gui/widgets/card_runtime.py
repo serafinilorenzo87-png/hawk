@@ -1021,16 +1021,21 @@ class CardRuntimeMixin:
             # for hydra (the binary that famously cascades); other
             # tools that flow through this background path are
             # already trustworthy.
-            kept = extracted
+            # (user, password, probe) triples: probe is True when HAWK
+            # authenticated the cred itself, None when no verifier
+            # applies.  Anything hydra reported that our own probe
+            # rejected never gets here.
+            kept = [(u, p, None) for u, p in extracted]
+            cred_note = ""
             cascade_reason = None
             if (extracted and
                     (tool.binary == "hydra"
                      or tool.id.startswith("hydra"))):
                 try:
                     from utils.hydra_verify import (
-                        parse_hydra_cmd,
-                        detect_false_positive_cascade)
+                        parse_hydra_cmd, verify_creds, unverified_note)
                     cmd_info = parse_hydra_cmd(cmd)
+                    cred_note = unverified_note(cmd_info)
                     self.app.terminal.write(
                         f"  [*] hydra: verifying "
                         f"{len(extracted)} candidate cred(s) "
@@ -1038,9 +1043,14 @@ class CardRuntimeMixin:
                         f"{cmd_info.host}:{cmd_info.port}"
                         f"{cmd_info.path} via fake-password "
                         f"counter-check…", "dim")
-                    kept, cascade_reason, is_cascade = (
-                        detect_false_positive_cascade(
-                            extracted, cmd_info))
+                    kept, rejected, cascade_reason, is_cascade = (
+                        verify_creds(extracted, cmd_info))
+                    for _u, _p in rejected:
+                        self.app.terminal.write(
+                            f"  [!] hydra reported {_u} but HAWK's own "
+                            f"{cmd_info.proto or 'auth'} probe was "
+                            f"REJECTED — credential dropped, not "
+                            f"saved.", "error")
                     if is_cascade:
                         self.app.terminal.write(
                             f"  [!] HYDRA FALSE-POSITIVE CASCADE "
@@ -1070,20 +1080,28 @@ class CardRuntimeMixin:
                             print(f"[HAWK] hydra cascade "
                                   f"finding push failed: {e}")
                     else:
+                        n_proven = sum(1 for _, _, v in kept if v is True)
                         self.app.terminal.write(
                             f"  [+] hydra verify: counter-check "
                             f"clean → {len(kept)} credential(s) "
-                            f"look genuine.", "success")
+                            f"kept, {n_proven} authenticated by "
+                            f"HAWK's own probe.", "success")
+                        if n_proven < len(kept):
+                            self.app.terminal.write(
+                                f"      {len(kept) - n_proven} saved as "
+                                f"UNVERIFIED — {cred_note}", "warn")
                 except Exception as e:
                     # Verifier failure → fall back to old
                     # behaviour (trust hydra) so we don't silently
-                    # eat real creds.
+                    # eat real creds.  They stay UNVERIFIED: nothing
+                    # proved them.
                     print(f"[HAWK] hydra verify failed: {e}")
                     self.app.terminal.write(
                         f"  [!] hydra verify failed: {e} — "
-                        f"falling back to legacy behaviour "
-                        f"(saving without counter-check).", "warn")
-                    kept = extracted
+                        f"falling back to legacy behaviour (saving "
+                        f"without counter-check, as UNVERIFIED).",
+                        "warn")
+                    kept = [(u, p, None) for u, p in extracted]
 
             # Summary line shown in the bg-jobs bar when the job
             # finishes.  Hydra-style ("Found N credential(s)") only
@@ -1250,13 +1268,20 @@ class CardRuntimeMixin:
                     svc_tag = f"HTTP-{method}"
             else:
                 svc_tag = tool.id.split("_")[-1].upper()
-            for u, p in kept:
+            for u, p, probe in kept:
+                # VERIFIED only when HAWK's own probe authenticated
+                # the credential — hydra saying so is not proof (see
+                # utils/hydra_verify).  Everything else is stored
+                # unverified and says why in the notes.
                 cred = Credential(
                     username=u, password=p,
                     cred_type="cleartext",
                     services=[svc_tag],
                     source_phase=self.phase_id,
-                    verified=not is_http)
+                    notes=("" if probe is True
+                           else (cred_note
+                                 or "[unverified - no HAWK probe]")),
+                    verified=(probe is True))
                 self.app.cred_store.add_credential(cred)
             self.app.bg_jobs_bar.finish_job(job_id, summary)
             self.after(0, lambda: self._on_done(tool, name, rc, log))
@@ -1331,7 +1356,11 @@ class CardRuntimeMixin:
             username=m.group(1), password=m.group(2),
             cred_type="cleartext",
             services=[tool.id.split("_")[-1].upper()],
-            source_phase=self.phase_id)
+            source_phase=self.phase_id,
+            # No cascade check and no probe on this path — nothing
+            # here proves the credential authenticates.
+            notes="[unverified - no HAWK probe]",
+            verified=False)
         self.app.cred_store.add_credential(cred)
 
     def _run_greenbone(self, tool, scan_config: str):

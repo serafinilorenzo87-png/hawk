@@ -37,10 +37,18 @@ This module sits BETWEEN hydra-finished and credential-store-saved:
      network probe and return either True (auth accepted), False
      (auth rejected), or None (couldn't reach the service / no
      verifier available).
+  4. `verify_creds` runs 2 then 3 and returns a PER-CREDENTIAL
+     verdict, which is what the caller stamps on
+     `Credential(verified=...)`.
 
-If we can't verify (None), we trust hydra and save the cred — the
-cost of being wrong is the operator wasting one manual try, not a
-deluge of false data.
+Tri-state contract, per credential:
+  True  → HAWK's own probe authenticated: store it as VERIFIED.
+  False → HAWK's own probe was rejected: hydra was wrong, DROP it.
+  None  → no verifier for this protocol / probe unreachable: keep the
+          cred (the cost of being wrong is one wasted manual try, not
+          a deluge of false data) but store it UNVERIFIED and say so
+          in the notes, so the operator sees exactly what HAWK did
+          and did not prove.
 """
 
 from __future__ import annotations
@@ -405,6 +413,112 @@ def detect_false_positive_cascade(
                 True)
 
     return (list(creds), None, False)
+
+
+# ─── Per-credential verification ────────────────────────────────────
+
+# Probing costs one network round-trip per credential and today runs
+# on the caller's thread, so cap it.  Creds past the cap are reported
+# as unverifiable (None) instead of silently trusted.
+MAX_PER_CRED_PROBES = 4
+
+
+def unverified_note(cmd_info: HydraCmdInfo) -> str:
+    """Note stamped on a credential HAWK could not prove itself."""
+    return (f"[unverified - no HAWK probe for "
+            f"{cmd_info.proto or 'this protocol'}]")
+
+
+def probe_credential(user: str, password: str,
+                     cmd_info: HydraCmdInfo) -> Optional[bool]:
+    """Authenticate ONE credential against the service.
+
+    Returns True (accepted), False (rejected) or None (no verifier for
+    this protocol, or the probe could not reach a verdict).
+    """
+    proto = cmd_info.proto
+    host  = cmd_info.host
+    port  = cmd_info.port
+    if not host or not port:
+        return None
+    try:
+        if cmd_info.is_http:
+            # Form-based modules post their own body; a Basic-Auth GET
+            # tells us nothing about them, so don't pretend it does.
+            if cmd_info.is_form:
+                return None
+            real = _verify_http_get(host, port, cmd_info.path,
+                                    user, password,
+                                    use_https=cmd_info.is_https)
+            if real[0] is None:
+                return None
+            fake = _verify_http_get(
+                host, port, cmd_info.path, user,
+                f"hawk_fp_{secrets.token_hex(10)}",
+                use_https=cmd_info.is_https)
+            if fake[0] is None:
+                return None
+            # Accepted only when the server answered 2xx/3xx to the
+            # real password AND answered differently to a
+            # guaranteed-wrong one.  Same answer for both → the
+            # endpoint isn't authenticating and the cred proves
+            # nothing; a 4xx/5xx → it was rejected outright.
+            return bool(200 <= real[0] < 400 and real != fake)
+        if proto in ("ftp", "ftps"):
+            return _verify_ftp(host, port, user, password)
+        if proto in ("ssh", "ssh2"):
+            return _verify_ssh(host, port, user, password)
+        if proto in ("smb", "smb2", "smbnt"):
+            return _verify_smb(host, port, user, password)
+    except Exception as e:
+        print(f"[HAWK] per-cred probe failed: {e}")
+        return None
+    return None
+
+
+def verify_creds(creds: list[tuple[str, str]],
+                 cmd_info: HydraCmdInfo,
+                 run_cascade: bool = True) -> tuple[
+                     list[tuple[str, str, "bool | None"]],
+                     list[tuple[str, str]],
+                     "str | None", bool]:
+    """Cascade check + per-credential probe.
+
+    Returns ``(kept, rejected, reason, is_cascade)`` where
+
+    * kept     — ``[(user, password, probe)]`` with ``probe`` True
+                 (HAWK authenticated) or None (unverifiable).
+    * rejected — creds whose own probe said False.  hydra reported
+                 them, our probe says the password does NOT
+                 authenticate, so they never reach the store.
+    * reason   — cascade explanation, or None.
+    * is_cascade — True when the whole batch was dropped.
+
+    ``run_cascade=False`` skips the batch-level cascade heuristic and
+    only runs the per-credential probes (used by callers that already
+    scope the cascade check themselves).
+    """
+    if not creds:
+        return ([], [], None, False)
+
+    if run_cascade:
+        kept_pairs, reason, is_cascade = detect_false_positive_cascade(
+            creds, cmd_info)
+        if is_cascade:
+            return ([], list(creds), reason, True)
+    else:
+        kept_pairs, reason, is_cascade = list(creds), None, False
+
+    kept: list[tuple[str, str, "bool | None"]] = []
+    rejected: list[tuple[str, str]] = []
+    for i, (u, p) in enumerate(kept_pairs):
+        verdict = (probe_credential(u, p, cmd_info)
+                   if i < MAX_PER_CRED_PROBES else None)
+        if verdict is False:
+            rejected.append((u, p))
+        else:
+            kept.append((u, p, verdict))
+    return (kept, rejected, reason, is_cascade)
 
 
 # ─── Helpers ────────────────────────────────────────────────────────
