@@ -41,6 +41,43 @@ class TargetIntelParserMixin:
         except Exception:
             return None
 
+    def _persist_and_refresh_store(self) -> None:
+        """Save the session and repaint the Credential Store.
+
+        In-place promotions (unverified -> verified) mutate the raw
+        ``sess.credentials`` dicts, so neither ``Session.save`` nor the
+        widget refresh happen on their own: without this the promotion
+        is lost on restart and the row keeps showing the UNVERIFIED
+        badge until something else triggers a repaint.
+        """
+        sess = self._sess()
+        if sess:
+            try:
+                sess.save()
+            except Exception as e:
+                print(f"[HAWK] session save after cred promotion: {e}")
+        store = getattr(self.app, "cred_store", None)
+        if store:
+            try:
+                store.refresh()
+            except Exception as e:
+                print(f"[HAWK] cred store refresh after promotion: {e}")
+
+    @staticmethod
+    def _promote_cred_dict(cdict: dict, note: str) -> bool:
+        """Flip an existing credential dict to verified and append the
+        evidence note.  Returns True when something actually changed."""
+        changed = False
+        if not cdict.get("verified", False):
+            cdict["verified"] = True
+            changed = True
+        old_notes = (cdict.get("notes") or "").strip()
+        if note and note not in old_notes:
+            cdict["notes"] = (f"{old_notes}\n{note}".strip()
+                              if old_notes else note)
+            changed = True
+        return changed
+
     def _mark_creds_verified(self, used_creds, host: str, service_tag: str,
                               evidence: str) -> bool:
         """Save a credential to the Credential Store when a captured
@@ -50,7 +87,8 @@ class TargetIntelParserMixin:
         this function is now the ONLY path that adds connect-typed
         credentials to the store.  Behaviour:
           • If a matching ``(user, password|hash, host, service)`` entry
-            already exists → no-op (dedup on retry).
+            already exists → PROMOTE it to verified (the login we just
+            observed is the proof), persist and repaint.
           • Otherwise → add a brand-new ``[verified by <evidence>]`` entry.
 
         Parameters
@@ -69,7 +107,7 @@ class TargetIntelParserMixin:
         -------
         bool
             True if a cred was added, False otherwise (already present
-            or no usable input).
+            — possibly promoted in place — or no usable input).
         """
         if not used_creds:
             return False
@@ -92,7 +130,7 @@ class TargetIntelParserMixin:
         secret = hash_val if cred_type == "hash" else password
         note_verified = f"[verified by {evidence}]"
 
-        # Dedup: matching entry already in store → silent no-op.
+        # Dedup: matching entry already in store → promote it in place.
         try:
             if sess:
                 for cdict in sess.credentials:
@@ -108,7 +146,20 @@ class TargetIntelParserMixin:
                     else:
                         if cdict.get("hash_val") != secret:
                             continue
-                    # Already in the store — nothing to do.
+                    # Already in the store — promote it to verified.
+                    # This used to be a silent no-op, which left a
+                    # credential the operator had just authenticated
+                    # with stuck behind the UNVERIFIED badge.
+                    if self._promote_cred_dict(cdict, note_verified):
+                        sess._touch()
+                        self._persist_and_refresh_store()
+                        try:
+                            self.app.terminal.write(
+                                f"  [+] Cred promoted to verified: "
+                                f"{user} → {service_tag}@{host}  "
+                                f"({evidence})", "success")
+                        except Exception:
+                            pass
                     return False
         except Exception as e:
             print(f"[HAWK] _mark_creds_verified dedup error: {e}")
@@ -263,10 +314,16 @@ class TargetIntelParserMixin:
                                 and cdict.get("password") == hit_pass
                                 and svc_tag in (cdict.get("services") or [])):
                             old_notes = cdict.get("notes") or ""
-                            if "[unverified]" in old_notes or \
-                               "[verified by Hydra" not in old_notes:
+                            if ("[unverified]" in old_notes
+                                    or "[verified by Hydra" not in old_notes
+                                    or not cdict.get("verified", False)):
                                 cdict["notes"] = note_verified
+                                cdict["verified"] = True
                                 sess._touch()
+                                # Promotion lives in the raw dict, so it
+                                # only reaches disk / the UI if we save
+                                # and repaint here.
+                                self._persist_and_refresh_store()
                                 upgraded += 1
                                 upgraded_this_hit = True
                             else:

@@ -533,8 +533,11 @@ class CredentialStoreWidget(ctk.CTkFrame):
 
             # Union of verified flags — verified=True if EITHER row
             # was verified.  Strict no-downgrade: an already-verified
-            # row never reverts to unverified.
-            if getattr(cred, "verified", True) and \
+            # row never reverts to unverified.  The getattr default is
+            # False so a cred that carries no proof can never promote
+            # an existing row (re-importing the same unverified cred
+            # must NOT make it look verified).
+            if getattr(cred, "verified", False) and \
                     not existing.get("verified", True):
                 existing["verified"] = True
                 changed = True
