@@ -683,10 +683,21 @@ class Session:
         return [Credential.from_dict(d) for d in self.credentials]
 
     def mark_cracked(self, idx: int, plaintext: str):
+        """Record a cracked plaintext AND persist it.
+
+        The save is done here, not left to the caller: _touch() only
+        bumps updated_at, so every crack path that forgot to call
+        save() threw the result away — hours of hashcat, a green row on
+        screen, and "cracked": false still on disk after HAWK closed.
+        """
         if 0 <= idx < len(self.credentials):
             self.credentials[idx]["cracked"]      = True
             self.credentials[idx]["cracked_pass"] = plaintext
             self._touch()
+            try:
+                self.save()
+            except Exception as e:
+                print(f"[HAWK] session save after mark_cracked: {e}")
 
     def delete_credential(self, idx: int) -> bool:
         """Remove credential at idx from the session. Returns True on

