@@ -32,6 +32,16 @@ def _mono(size=13, bold=False):
                        weight="bold" if bold else "normal")
 
 
+def needs_unverified_badge(cred) -> bool:
+    """True when a row must carry the ⚠ UNVERIFIED badge.
+
+    The single place that decides what the badge means: HAWK has not
+    watched this credential authenticate.  Kept at module level so the
+    rule is testable without a Tk display.
+    """
+    return not getattr(cred, "verified", True)
+
+
 HASH_FORMATS_JOHN = {
     "NTLM":       "NT",
     "LM":         "LM",
@@ -830,7 +840,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
             font=_mono(10), text_color=COLORS["text_muted"]
             ).pack(side="left", padx=4)
 
-        if not getattr(cred, "verified", True):
+        if needs_unverified_badge(cred):
             ctk.CTkLabel(act, text=" ⚠ UNVERIFIED ",
                 font=_mono(10, True),
                 fg_color="#3A2A00",

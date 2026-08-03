@@ -10,10 +10,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import customtkinter as ctk
+# Headless / GUI-less environments have no customtkinter: skip this
+# module instead of aborting collection for the whole suite.
+ctk = pytest.importorskip("customtkinter")
 
 from utils.plugin_loader import PluginState
 from utils.config import COLORS
