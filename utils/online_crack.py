@@ -31,12 +31,114 @@ import os
 import re
 import json
 import time
+import hashlib
 import threading
 import webbrowser
 import urllib.request
 import urllib.parse
 import urllib.error
 from typing import Optional
+
+
+# ─── Local re-hash verification ──────────────────────────────────────
+#
+# A remote service answering "this hash is X" is a claim, not a proof.
+# Before a plaintext is recorded as a cracked credential we hash it
+# ourselves and compare.  Tri-state:
+#   True  → hash(plaintext) == the hash we submitted: real crack.
+#   False → it does not match: reject, whatever the API said.
+#   None  → we cannot compute this algorithm locally (salted /
+#           challenge-response schemes, or MD4 missing from the local
+#           OpenSSL build) → accept but say so.
+
+def _md4(data: bytes) -> str:
+    """MD4, RFC 1320.  Tries OpenSSL first and falls back to a pure
+    Python implementation: OpenSSL 3 drops MD4 unless the legacy
+    provider is enabled, and without it the NTLM re-hash check — the
+    one that matters most here — would silently never run."""
+    try:
+        h = hashlib.new("md4")
+        h.update(data)
+        return h.hexdigest()
+    except Exception:
+        pass
+
+    mask = 0xFFFFFFFF
+
+    def rol(x, n):
+        x &= mask
+        return ((x << n) | (x >> (32 - n))) & mask
+
+    msg = bytearray(data)
+    bit_len = (len(data) * 8) & 0xFFFFFFFFFFFFFFFF
+    msg.append(0x80)
+    while len(msg) % 64 != 56:
+        msg.append(0)
+    msg += bit_len.to_bytes(8, "little")
+
+    a, b, c, d = 0x67452301, 0xEFCDAB89, 0x98BADCFE, 0x10325476
+    for off in range(0, len(msg), 64):
+        x = [int.from_bytes(msg[off + i * 4:off + i * 4 + 4], "little")
+             for i in range(16)]
+        aa, bb, cc, dd = a, b, c, d
+        for i in range(0, 16, 4):        # round 1: F
+            for j, s in zip(range(4), (3, 7, 11, 19)):
+                k = i + j
+                f = (b & c) | (~b & d)
+                a, b, c, d = d, rol(a + f + x[k], s), b, c
+        for i in range(4):               # round 2: G
+            for j, s in zip(range(4), (3, 5, 9, 13)):
+                k = i + j * 4
+                g = (b & c) | (b & d) | (c & d)
+                a, b, c, d = d, rol(a + g + x[k] + 0x5A827999, s), b, c
+        for i in (0, 2, 1, 3):           # round 3: H
+            for j, s in zip((0, 2, 1, 3), (3, 9, 11, 15)):
+                k = i + j * 4
+                h = b ^ c ^ d
+                a, b, c, d = d, rol(a + h + x[k] + 0x6ED9EBA1, s), b, c
+        a = (a + aa) & mask
+        b = (b + bb) & mask
+        c = (c + cc) & mask
+        d = (d + dd) & mask
+    return b"".join(v.to_bytes(4, "little")
+                    for v in (a, b, c, d)).hex()
+
+
+def _ntlm(plaintext: str) -> Optional[str]:
+    """NTLM = MD4(UTF-16LE(password))."""
+    try:
+        return _md4(plaintext.encode("utf-16le"))
+    except Exception:
+        return None
+
+
+_LOCAL_HASHERS = {
+    "NTLM":   _ntlm,
+    "MD5":    lambda p: hashlib.md5(p.encode()).hexdigest(),
+    "SHA1":   lambda p: hashlib.sha1(p.encode()).hexdigest(),
+    "SHA256": lambda p: hashlib.sha256(p.encode()).hexdigest(),
+    "SHA512": lambda p: hashlib.sha512(p.encode()).hexdigest(),
+}
+
+
+def verify_plaintext(hash_str: str, hash_type: str,
+                     plaintext: str) -> Optional[bool]:
+    """Does *plaintext* really hash to *hash_str*?  See tri-state above."""
+    fn = _LOCAL_HASHERS.get((hash_type or "").strip())
+    if fn is None or not plaintext:
+        return None
+    try:
+        computed = fn(plaintext)
+    except Exception:
+        return None
+    if computed is None:
+        return None
+    # NTLM hashes are often carried around as "LM:NT" — compare against
+    # the last colon-separated field when that is the shape.
+    candidate = (hash_str or "").strip().lower()
+    if ":" in candidate:
+        candidate = candidate.rsplit(":", 1)[-1]
+    return computed.lower() == candidate
 
 
 # ─── Service catalogue ───────────────────────────────────────────────
@@ -302,6 +404,7 @@ class HashesComJob:
                       f"{self.max_poll_minutes} min).")
 
         deadline = time.time() + self.max_poll_minutes * 60
+        rejected: set = set()   # plaintexts that failed the local re-hash
         # Short-circuit: first poll immediately in case hashes.com
         # already has this hash in their DB.
         while not self._stop.is_set() and time.time() < deadline:
@@ -319,12 +422,35 @@ class HashesComJob:
                             or h in self.hash_str.lower()):
                         cracked = (entry.get("plaintext")
                                    or entry.get("plain") or "")
-                        if cracked:
+                        if not cracked:
+                            continue
+                        # Never take the service's word for it: a
+                        # wrong or truncated answer would otherwise
+                        # be stored as a real credential.
+                        ok = verify_plaintext(
+                            self.hash_str, self.hash_type, cracked)
+                        if ok is False:
+                            # The entry matched the loose hash
+                            # comparison but does not hash back:
+                            # drop it and keep looking.
+                            if cracked not in rejected:
+                                rejected.add(cracked)
+                                self._status(
+                                    f"  [!] REJECTED: a plaintext "
+                                    f"returned by the service does "
+                                    f"not hash back to the submitted "
+                                    f"{self.hash_type} — not saved.")
+                            continue
+                        if ok is None:
                             self._status(
-                                f"  [+] cracked: {cracked}")
-                            self._found(cracked)
-                            self._finish(True, cracked)
-                            return
+                                f"  [!] {self.hash_type} cannot be "
+                                f"re-hashed locally — accepting the "
+                                f"service's answer unverified.")
+                        self._status(
+                            f"  [+] cracked: {cracked}")
+                        self._found(cracked)
+                        self._finish(True, cracked)
+                        return
             else:
                 err = r.get("error") or ""
                 self._status(f"  [poll] {err or 'no match yet…'}")
