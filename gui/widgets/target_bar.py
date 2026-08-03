@@ -834,7 +834,16 @@ class TargetBar(ctk.CTkFrame):
             for h in phase1_hosts:
                 enriched = p2_by_ip.get(h["ip"])
                 if enriched:
-                    h["port_hints"] = enriched["port_hints"]
+                    # Union, not overwrite: phase 1 already found ports
+                    # (masscan probes 445/3389/443/80/22, and the -sn
+                    # probe tags carry the ones that answered), while the
+                    # top-100 peek can miss a port that was open a minute
+                    # ago.  Overwriting discarded exactly the ports the
+                    # operator cares about — and the ones the graph
+                    # colours a host on.
+                    h["port_hints"] = sorted(
+                        set(h["port_hints"])
+                        | set(enriched["port_hints"]))
                     h["responded_via"] = sorted(
                         set(h["responded_via"])
                         | set(enriched["responded_via"]))
