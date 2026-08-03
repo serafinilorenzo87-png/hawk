@@ -820,16 +820,23 @@ class TargetBar(ctk.CTkFrame):
 
         finished = datetime.now(timezone.utc).isoformat()
 
+        aborted = self._sweep_aborted
+        self._sweep_aborted = False
+
         # Phase 2 is enrichment only: on failure we skip the (possibly
         # stale or truncated) gnmap file but still persist the phase-1
         # hosts — losing a completed discovery over a failed port peek
         # would be the worse outcome.
         if exit_code != 0:
+            reason = "aborted" if aborted \
+                else f"exited with code {exit_code}"
             self.app.terminal.write(
-                f"[!] Phase 2 exited with code {exit_code} — "
-                f"keeping phase 1 results without port hints.", "warn")
+                f"[!] Phase 2 {reason} — keeping the phase 1 results; any "
+                f"port hints below are phase-1 data, not a port peek.",
+                "warn")
         else:
             # Merge phase 2 port data into phase 1 hosts
+            enriched_n = 0
             p2_by_ip = {h["ip"]: h for h in parse_nmap_gnmap(p2_path)}
             for h in phase1_hosts:
                 enriched = p2_by_ip.get(h["ip"])
@@ -852,11 +859,16 @@ class TargetBar(ctk.CTkFrame):
                     # that answered (e.g. syn:445 on an ICMP-off box).
                     h["os_hint"] = infer_os_hint(h["responded_via"],
                                                  h["port_hints"])
+                    if enriched["port_hints"]:
+                        enriched_n += 1
 
-        enriched_n = sum(1 for h in phase1_hosts if h.get("port_hints"))
-        self.app.terminal.write(
-            f"[+] Phase 2 complete — {enriched_n}/{len(phase1_hosts)} "
-            f"host(s) with port hints.", "success")
+            # Only the success path may say "complete", and the count is
+            # what THIS phase found: sourcing it from phase1_hosts made a
+            # failed peek report phase-1 hints as its own result.
+            self.app.terminal.write(
+                f"[+] Phase 2 complete — {enriched_n}/{len(phase1_hosts)} "
+                f"host(s) with port hints.", "success")
+
         self._persist_sweep_inventory(cidr, method, phase1_hosts,
                                       started, finished)
 
