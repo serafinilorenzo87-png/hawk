@@ -124,20 +124,21 @@ def build_phase1_cmd(cidr: str, method: str,
     )
 
 
-def build_phase2_cmd(alive_ips: List[str],
-                     gnmap_path: str) -> str:
+def build_phase2_cmd(gnmap_path: str, targets_path: str) -> str:
     """Phase 2: light port peek on confirmed-alive hosts.
 
     -Pn is correct here — hosts are already confirmed up.
+
+    `targets_path` is an -iL list the CALLER has already written.  This
+    module stays pure logic: writing the file from here meant doing disk
+    I/O on the UI thread with no error path, and a failure left the sweep
+    half-dismantled with the phase-1 results already discarded.
     """
-    targets_file = os.path.join(TMP_DIR, "sweep_phase2_targets.txt")
-    with open(targets_file, "w", encoding="utf-8") as fh:
-        fh.write("\n".join(alive_ips))
     return (
         f"sudo nmap -Pn --top-ports 100 "
         f"-T4 "
         f"-oG {gnmap_path} "
-        f"-iL {targets_file}"
+        f"-iL {targets_path}"
     )
 
 
@@ -145,6 +146,16 @@ def gnmap_path_for(cidr: str, phase: int) -> str:
     """Return a temp file path for nmap greppable output."""
     safe = cidr.replace("/", "_").replace(".", "-")
     return os.path.join(TMP_DIR, f"sweep_{safe}_p{phase}.gnmap")
+
+
+def phase2_targets_path_for(cidr: str) -> str:
+    """Return the temp path for the phase-2 -iL host list.
+
+    Keyed on the range like the gnmap paths so two sweeps of different
+    ranges never read each other's list.
+    """
+    safe = cidr.replace("/", "_").replace(".", "-")
+    return os.path.join(TMP_DIR, f"sweep_{safe}_p2_targets.txt")
 
 
 def masscan_list_path_for(cidr: str) -> str:
@@ -262,22 +273,33 @@ def parse_arp_scan(lines: List[str]) -> List[Dict]:
 
 # ─── OS hint ──────────────────────────────────────────────────────────────────
 
-_WINDOWS_ONLY_PORTS = {3389, 135, 139}
+_WINDOWS_PORTS = {445, 3389, 135, 139}
 _LINUX_PORTS = {22}
+
+_PROBE_PORT_RE = re.compile(r":(\d{1,5})$")
 
 
 def infer_os_hint(responded_via: List[str], port_hints: List[int]) -> str:
-    """Cheap OS hint from which ports answered — never asserted as fact."""
-    ports = set(port_hints)
-    has_ssh = bool(ports & _LINUX_PORTS)
-    has_win_only = bool(ports & _WINDOWS_ONLY_PORTS)
-    has_445 = 445 in ports
-    if has_ssh:
+    """Cheap OS hint from which ports answered — never asserted as fact.
+
+    Per design §4, 445/3389 mean "likely Windows" and win over 22: a
+    Windows box running OpenSSH (standard since Server 2019) answers on
+    both, and calling it Linux is the more damaging mistake — SMB/RDP are
+    only ever served by Windows or by a Samba box that behaves like one.
+
+    In phase 1 `port_hints` is empty by contract (§7) and `responded_via`
+    ("tcp:445", "syn:3389", "arp", …) is the ONLY signal, so the probe
+    tags are mined for port numbers too.
+    """
+    ports = set(port_hints or ())
+    for entry in responded_via or ():
+        m = _PROBE_PORT_RE.search(str(entry))
+        if m:
+            ports.add(int(m.group(1)))
+    if ports & _WINDOWS_PORTS:
+        return "windows"
+    if ports & _LINUX_PORTS:
         return "linux"
-    if has_win_only:
-        return "windows"
-    if has_445:
-        return "windows"
     return "unknown"
 
 
@@ -350,14 +372,29 @@ def load_latest_inventory(cidr: str) -> Optional[Dict]:
     return load_inventory(candidates[0])
 
 
-def merge_inventory(existing: Dict, new_hosts: List[Dict]) -> Dict:
+def merge_inventory(existing: Dict, new_hosts: List[Dict],
+                    started: str = "", finished: str = "",
+                    age_unseen: bool = True) -> Dict:
     """Merge newly discovered hosts into an existing inventory.
 
-    Preserves session_ref for hosts already worked on.
+    Preserves session_ref for hosts already worked on (§3: never orphan a
+    host the operator already worked).
+
+    `age_unseen` flips `alive` to False on hosts the new sweep did NOT
+    see.  Without it a box that answered once stayed alive:true forever
+    and the graph kept drawing machines powered off days ago.  Pass False
+    for a PARTIAL result set (aborted sweep) — there the silence means
+    "never probed", not "down".
+
+    `started` is the timestamp of the FIRST sweep of this range and is
+    kept as-is; the caller's value only fills it in when the existing
+    inventory has none.
     """
     by_ip = {h["ip"]: h for h in existing.get("hosts", [])}
+    seen = set()
     for nh in new_hosts:
         ip = nh["ip"]
+        seen.add(ip)
         if ip in by_ip:
             old_ref = by_ip[ip].get("session_ref")
             by_ip[ip].update(nh)
@@ -365,8 +402,16 @@ def merge_inventory(existing: Dict, new_hosts: List[Dict]) -> Dict:
                 by_ip[ip]["session_ref"] = old_ref
         else:
             by_ip[ip] = nh
+    if age_unseen:
+        for ip, h in by_ip.items():
+            if ip not in seen:
+                h["alive"] = False
     existing["hosts"] = sorted(by_ip.values(),
                                key=lambda h: _ip_sort_key(h["ip"]))
+    if started and not existing.get("started"):
+        existing["started"] = started
+    if finished:
+        existing["finished"] = finished
     return existing
 
 

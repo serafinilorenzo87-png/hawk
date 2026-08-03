@@ -97,7 +97,8 @@ class NmapGnmapParserTests(unittest.TestCase):
         self.assertEqual(h["ip"], "10.0.0.5")
         self.assertIn(22, h["port_hints"])
         self.assertIn(445, h["port_hints"])
-        self.assertEqual(h["os_hint"], "linux")
+        # 445 wins over 22 — a Windows box with OpenSSH answers both.
+        self.assertEqual(h["os_hint"], "windows")
 
     def test_missing_file_returns_empty(self):
         from modules.discovery import parse_nmap_gnmap
@@ -155,9 +156,19 @@ class OsHintTests(unittest.TestCase):
         from modules.discovery import infer_os_hint
         self.assertEqual(infer_os_hint([], [22]), "linux")
 
-    def test_ssh_takes_precedence(self):
+    def test_smb_rdp_take_precedence_over_ssh(self):
+        """445/3389 beat 22: a Windows host running OpenSSH answers both,
+        and calling it Linux is the more damaging mistake."""
         from modules.discovery import infer_os_hint
-        self.assertEqual(infer_os_hint([], [22, 445]), "linux")
+        self.assertEqual(infer_os_hint([], [22, 445]), "windows")
+        self.assertEqual(infer_os_hint([], [22, 3389]), "windows")
+
+    def test_probe_tags_are_mined_for_ports(self):
+        """Phase 1 has no port_hints — responded_via is the only signal."""
+        from modules.discovery import infer_os_hint
+        self.assertEqual(infer_os_hint(["tcp:445"], []), "windows")
+        self.assertEqual(infer_os_hint(["syn:22"], []), "linux")
+        self.assertEqual(infer_os_hint(["arp"], []), "unknown")
 
     def test_unknown_ports(self):
         from modules.discovery import infer_os_hint

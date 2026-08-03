@@ -685,31 +685,77 @@ class TargetBar(ctk.CTkFrame):
             self._run_phase2(cidr, hosts, method, started, finished)
             return
 
-        # Build and save inventory
+        # An aborted sweep never reached most of the range, so the hosts
+        # it did not report are "not probed", not "down" — do not age them.
+        self._persist_sweep_inventory(cidr, method, hosts, started, finished,
+                                      age_unseen=not aborted)
+
+    def _persist_sweep_inventory(self, cidr, method, hosts, started,
+                                 finished, age_unseen=True):
+        """Merge into the latest inventory for this range, save it and
+        reveal OPEN GRAPH.  Shared by phase 1 and phase 2.
+
+        A failed write must not also cost the operator the results: the
+        inventory stays in memory so the graph still opens, and the real
+        reason is spelled out instead of surfacing as a generic
+        "UI callback error" from the dispatcher.
+        """
+        from modules.discovery import (
+            build_inventory, save_inventory, load_latest_inventory,
+            merge_inventory,
+        )
+
         existing = load_latest_inventory(cidr)
-        inventory = build_inventory(cidr, method, hosts, started, finished)
         if existing:
-            inventory = merge_inventory(existing, hosts)
-            inventory["finished"] = finished
+            inventory = merge_inventory(existing, hosts,
+                                        started=started, finished=finished,
+                                        age_unseen=age_unseen)
             inventory["method"] = method
+        else:
+            inventory = build_inventory(cidr, method, hosts,
+                                        started, finished)
 
-        path = save_inventory(inventory)
         self._sweep_inventory = inventory
-        self._sweep_inventory_path = path
-
         alive = [h for h in inventory.get("hosts", []) if h.get("alive")]
-        self.app.terminal.write(
-            f"[+] Inventory saved: {path}  ({len(alive)} hosts)", "success")
+        try:
+            path = save_inventory(inventory)
+        except OSError as e:
+            self._sweep_inventory_path = None
+            self.app.terminal.write(
+                f"[!] Inventory NOT saved ({e}) — {len(alive)} host(s) kept "
+                f"in memory only, lost when HAWK closes.", "error")
+        else:
+            self._sweep_inventory_path = path
+            self.app.terminal.write(
+                f"[+] Inventory saved: {path}  ({len(alive)} hosts)",
+                "success")
 
         self._sweep_graph_btn.pack(side="left", padx=(10, 0))
 
     def _run_phase2(self, cidr, phase1_hosts, method, started, finished):
-        from modules.discovery import build_phase2_cmd, gnmap_path_for
+        from modules.discovery import (
+            build_phase2_cmd, gnmap_path_for, phase2_targets_path_for,
+        )
         from utils.runner import ToolRunner
 
         alive_ips = [h["ip"] for h in phase1_hosts]
         p2_path = gnmap_path_for(cidr, phase=2)
-        cmd = build_phase2_cmd(alive_ips, p2_path)
+        targets_path = phase2_targets_path_for(cidr)
+        # The -iL list is written here, not inside modules.discovery: that
+        # module is pure logic and its unguarded write left the sweep half
+        # dismantled — phase 1 already discarded — when the disk said no.
+        try:
+            with open(targets_path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(alive_ips) + "\n")
+        except OSError as e:
+            self.app.terminal.write(
+                f"[!] Phase 2 skipped — cannot write target list "
+                f"{targets_path}: {e}", "error")
+            self._persist_sweep_inventory(cidr, method, phase1_hosts,
+                                          started, finished)
+            return
+
+        cmd = build_phase2_cmd(p2_path, targets_path)
         self._drop_stale_output(p2_path)
 
         self.app.terminal.section(f"PHASE 2 — port peek on {len(alive_ips)} hosts")
@@ -758,10 +804,7 @@ class TargetBar(ctk.CTkFrame):
     def _finish_phase2(self, cidr, method, phase1_hosts, p2_path,
                        started, p1_finished, exit_code):
         from datetime import datetime, timezone
-        from modules.discovery import (
-            parse_nmap_gnmap, build_inventory, save_inventory,
-            load_latest_inventory, merge_inventory,
-        )
+        from modules.discovery import parse_nmap_gnmap, infer_os_hint
 
         finished = datetime.now(timezone.utc).isoformat()
 
@@ -780,29 +823,21 @@ class TargetBar(ctk.CTkFrame):
                 enriched = p2_by_ip.get(h["ip"])
                 if enriched:
                     h["port_hints"] = enriched["port_hints"]
-                    h["responded_via"] = list(
+                    h["responded_via"] = sorted(
                         set(h["responded_via"])
                         | set(enriched["responded_via"]))
-                    h["os_hint"] = enriched["os_hint"]
+                    # Recompute from the UNION: the phase-2 hint alone
+                    # would drop whatever phase 1 learned from the probes
+                    # that answered (e.g. syn:445 on an ICMP-off box).
+                    h["os_hint"] = infer_os_hint(h["responded_via"],
+                                                 h["port_hints"])
 
-        existing = load_latest_inventory(cidr)
-        inventory = build_inventory(cidr, method, phase1_hosts,
-                                    started, finished)
-        if existing:
-            inventory = merge_inventory(existing, phase1_hosts)
-            inventory["finished"] = finished
-
-        path = save_inventory(inventory)
-        self._sweep_inventory = inventory
-        self._sweep_inventory_path = path
-
-        alive = [h for h in inventory["hosts"] if h.get("alive")]
+        enriched_n = sum(1 for h in phase1_hosts if h.get("port_hints"))
         self.app.terminal.write(
-            f"[+] Phase 2 complete — {len(alive)} hosts with port hints.",
-            "success")
-        self.app.terminal.write(f"[+] Inventory: {path}", "success")
-
-        self._sweep_graph_btn.pack(side="left", padx=(10, 0))
+            f"[+] Phase 2 complete — {enriched_n}/{len(phase1_hosts)} "
+            f"host(s) with port hints.", "success")
+        self._persist_sweep_inventory(cidr, method, phase1_hosts,
+                                      started, finished)
 
     def _open_sweep_graph(self):
         if not self._sweep_inventory:
