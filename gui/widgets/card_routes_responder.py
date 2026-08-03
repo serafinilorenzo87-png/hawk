@@ -419,12 +419,18 @@ class CardResponderRoutesMixin:
                        f"-smb2support  (see RELAY LIVE button in the "
                        f"Responder live dialog)"),
                 linked_run_id=new_run_id(),
-                category=TOOL_RUN_CATEGORY)
+                category=TOOL_RUN_CATEGORY,
+                # A Responder capture is a challenge/response blob:
+                # never cracked, never authenticated by us.  It only
+                # becomes verified if the crack path recovers the
+                # plaintext.
+                verified=False)
             sess.add_credential(cred)
+            sess.save()
             # Refresh Credential Store UI if available.
             cs = getattr(self.app, "cred_store", None)
-            if cs and hasattr(cs, "_render_creds"):
-                cs._render_creds()
+            if cs:
+                cs.refresh()
             self.app.terminal.write(
                 f"  [+] Responder captured NTLMv2 for "
                 f"{user}@{domain or '(no-domain)'} → Credential "

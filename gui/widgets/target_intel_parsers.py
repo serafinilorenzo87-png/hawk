@@ -176,6 +176,9 @@ class TargetIntelParserMixin:
                 source_phase="exploitation",
                 host=host,
                 notes=note_verified,
+                # Only reached when a captured parser observed the
+                # login succeed — that is the proof.
+                verified=True,
             ))
             try:
                 self.app.terminal.write(
@@ -465,6 +468,9 @@ class TargetIntelParserMixin:
                     username=usr, password=pw, cred_type="cleartext",
                     services=[svc_tag], source_phase="exploitation",
                     host=target, notes=note,
+                    # netexec prints [+] only after the login was
+                    # accepted by the service.
+                    verified=True,
                 ))
                 new_count += 1
                 if pwn3d:
@@ -570,6 +576,9 @@ class TargetIntelParserMixin:
                     username=usr, password=pw, cred_type="cleartext",
                     services=services, source_phase="exploitation",
                     host=target, notes=note,
+                    # kerbrute VALID LOGIN = Kerberos pre-auth
+                    # succeeded with this password.
+                    verified=True,
                 ))
                 new_count += 1
             except Exception as e:
@@ -652,6 +661,9 @@ class TargetIntelParserMixin:
                     username=usr, password=pw, cred_type="cleartext",
                     services=[svc_tag], source_phase="exploitation",
                     host=target, notes=note,
+                    # A patator hit row is a login the module drove to
+                    # success against the service.
+                    verified=True,
                 ))
                 new_count += 1
             except Exception as e:
@@ -838,6 +850,9 @@ class TargetIntelParserMixin:
                             f"--shares\n"
                             f"enum4linux -a {target}\n"
                             f"rpcclient -U '' -N {target}"),
+                        # Guarded by anon_login_ok: smbclient reported
+                        # "Anonymous login successful".
+                        verified=True,
                     )
                     if hasattr(self.app, "cred_store"):
                         self.app.cred_store.add_credential(cred)
@@ -873,7 +888,8 @@ class TargetIntelParserMixin:
                         cred_type="cleartext", services=["SMB"],
                         source_phase="enumeration", host=target,
                         notes=f"Validated via netexec smb ({dom}\\{usr})"
-                              + (" — LOCAL ADMIN" if admin else "")))
+                              + (" — LOCAL ADMIN" if admin else ""),
+                        verified=True))
 
     def _parse_winrm_connect(self, aid, target, port, lines, text,
                               used_creds=None):
@@ -902,7 +918,8 @@ class TargetIntelParserMixin:
                     cred_type="cleartext", services=["WINRM"],
                     source_phase="enumeration", host=target,
                     notes=f"Validated via netexec winrm ({dom}\\{usr})"
-                          + (" — ADMIN" if admin else "")))
+                          + (" — ADMIN" if admin else ""),
+                    verified=True))
         # evil-winrm shell-success heuristic — must see the actual
         # PowerShell prompt ("*Evil-WinRM* PS C:\\Users\\..."), which
         # evil-winrm prints ONLY after auth succeeds.  The plain
@@ -1071,7 +1088,9 @@ class TargetIntelParserMixin:
                     username="anonymous", password="anonymous",
                     cred_type="cleartext", services=["FTP"],
                     source_phase="enumeration", host=target,
-                    notes=f"FTP anonymous login on {target}:{port}"))
+                    notes=f"FTP anonymous login on {target}:{port}",
+                    # Guarded by login_ok: the server answered 230.
+                    verified=True))
         elif login_ok:
             # Authenticated login confirmed by 230 → verify the cred.
             self.add_auto_finding(
@@ -1272,7 +1291,10 @@ class TargetIntelParserMixin:
                         cred_type="cleartext", services=["TELNET"],
                         source_phase="enumeration", host=target,
                         notes=f"Telnet weak/empty creds from nmap "
-                              f"telnet-brute on {target}:{port}"))
+                              f"telnet-brute on {target}:{port}",
+                        # nmap telnet-brute prints the pair only after
+                        # a successful login.
+                        verified=True))
 
     def _parse_http_connect(self, aid, target, port, lines, text,
                             scheme="http", used_creds=None):
@@ -1734,7 +1756,10 @@ class TargetIntelParserMixin:
                         notes=(f"[verified by HTTP basic-auth probe] "
                                f"{scheme}://{target}:{port} returned "
                                f"{stat_b} with credentials "
-                               f"(endpoint confirmed protected)")))
+                               f"(endpoint confirmed protected)"),
+                        # Dual probe: 401 without creds, 2xx/3xx with
+                        # them — the credentials did authenticate.
+                        verified=True))
             elif endpoint_protected and stat_b == "401":
                 self.add_auto_finding(
                     f"{SCHEME} basic-auth rejected",
@@ -1803,7 +1828,10 @@ class TargetIntelParserMixin:
                     username="root", password="",
                     cred_type="cleartext", services=["MYSQL"],
                     source_phase="enumeration", host=target,
-                    notes=f"MySQL root:empty on {target}:{port}"))
+                    notes=f"MySQL root:empty on {target}:{port}",
+                    # The mysql> prompt / information_schema output is
+                    # only reachable after the login succeeded.
+                    verified=True))
         if aid == "list_dbs":
             import re as _re
             dbs = _re.findall(
@@ -1830,18 +1858,13 @@ class TargetIntelParserMixin:
                 "PostgreSQL login succeeded",
                 f"{target}:{port} — psql session established.",
                 severity="high", source="CONNECT / PostgreSQL")
-            # Extract username from "psql -U user" in the command
-            import re as _re2
-            pu = _re2.search(r"-U\s+(\S+)", text)
-            pg_user = pu.group(1) if pu else "postgres"
-            if hasattr(self.app, "cred_store"):
-                from utils.session import Credential
-                self.app.cred_store.add_credential(Credential(
-                    username=pg_user, password="",
-                    cred_type="cleartext", services=["POSTGRESQL"],
-                    source_phase="enumeration", host=target,
-                    notes=f"PostgreSQL login on {target}:{port}"))
-            # Upgrade the [unverified] save-on-launch entry too.
+            # The credential that opened this session is whatever the
+            # operator typed in the dialog, and _mark_creds_verified
+            # below stores exactly that.  This used to ALSO fabricate a
+            # `<user>:<empty password>` row from the psql -U flag —
+            # a credential nobody ever authenticated with, which then
+            # sat in the store looking real.  Service tag kept aligned
+            # with the connect dialog's ("POSTGRES").
             self._mark_creds_verified(
                 used_creds, target, "POSTGRES",
                 "PostgreSQL psql session opened")
@@ -1872,7 +1895,8 @@ class TargetIntelParserMixin:
                     cred_type="cleartext", services=["MSSQL"],
                     source_phase="enumeration", host=target,
                     notes=f"Validated via netexec mssql ({dom}\\{usr})"
-                          + (" — SYSADMIN" if admin else "")))
+                          + (" — SYSADMIN" if admin else ""),
+                    verified=True))
 
     def _parse_ldap_connect(self, aid, target, port, lines, text,
                              used_creds=None):
@@ -1901,7 +1925,10 @@ class TargetIntelParserMixin:
                         username="anonymous", password="anonymous",
                         cred_type="cleartext", services=["LDAP"],
                         source_phase="enumeration", host=target,
-                        notes=f"LDAP anonymous bind on {target}:{port}"))
+                        notes=f"LDAP anonymous bind on {target}:{port}",
+                        # "result: 0 Success" / numEntries — the
+                        # anonymous bind was accepted.
+                        verified=True))
                 # Authenticated bind succeeded → upgrade typed creds.
                 if not is_anon:
                     self._mark_creds_verified(
@@ -1947,7 +1974,10 @@ class TargetIntelParserMixin:
                     cred_type="cleartext", services=["REDIS"],
                     source_phase="enumeration", host=target,
                     notes=f"Redis no-auth on {target}:{port} — "
-                          + ", ".join(bits)))
+                          + ", ".join(bits),
+                    # INFO returned real data without AUTH: the
+                    # unauthenticated access is proven, not inferred.
+                    verified=True))
 
     def _parse_vnc_connect(self, aid, target, port, lines, text):
         """Parse `nmap --script vnc-info,realvnc-auth-bypass` output and
@@ -2141,7 +2171,12 @@ class TargetIntelParserMixin:
                 username="(no auth)", password="",
                 cred_type="cleartext", services=["VNC"],
                 source_phase="enumeration", host=target,
-                notes=f"VNC no-auth on {target}:{port}"))
+                notes=(f"VNC no-auth on {target}:{port} — advertised "
+                       f"by the server's security-types list; no "
+                       f"session was established"),
+                # nmap read the advertised security types, it did not
+                # open a VNC session: not proven.
+                verified=False))
 
     def _parse_smtp_connect(self, aid, target, port, lines, text):
         import re as _re

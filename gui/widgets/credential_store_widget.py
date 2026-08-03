@@ -1885,10 +1885,14 @@ class CredentialStoreWidget(ctk.CTkFrame):
         def _save():
             u = user_e.get().strip()
             s = [x.strip() for x in svc_e.get().split(",") if x.strip()]
+            # Manual entries are operator input: nothing has
+            # authenticated them yet.  They get promoted the moment a
+            # CONNECT / brute parser proves the login.
             if type_var.get() == "cleartext":
                 cred = Credential(username=u,
                     password=pass_e.get().strip(),
-                    cred_type="cleartext", services=s, source_phase="manual")
+                    cred_type="cleartext", services=s,
+                    source_phase="manual", verified=False)
             else:
                 hv = hash_e.get().strip()
                 # If the user pasted a FULL line (pwdump / shadow / user:hash)
@@ -1905,7 +1909,8 @@ class CredentialStoreWidget(ctk.CTkFrame):
                     ht = (parsed_ht if parsed_ht != "Unknown"
                           else detect_hash_type(hv))
                 cred = Credential(username=u, hash_val=hv, hash_type=ht,
-                    cred_type="hash", services=s, source_phase="manual")
+                    cred_type="hash", services=s,
+                    source_phase="manual", verified=False)
             _safe_destroy(win)
             self.add_credential(cred)
 
@@ -2080,17 +2085,19 @@ class CredentialStoreWidget(ctk.CTkFrame):
                 u, v, ht = split_username_hash(line)
                 if not v:
                     continue
+                # Pasted text proves nothing: a secretsdump block is
+                # fifty hashes nobody has authenticated with.
                 if ht != "Unknown":
                     cred = Credential(
                         username=u or "", hash_val=v, hash_type=ht,
                         cred_type="hash", services=svcs,
-                        source_phase="import")
+                        source_phase="import", verified=False)
                 elif u:
                     # user:<non-hash> → treat as cleartext credential
                     cred = Credential(
                         username=u, password=v,
                         cred_type="cleartext", services=svcs,
-                        source_phase="import")
+                        source_phase="import", verified=False)
                 else:
                     # Unknown single token — skip (nothing to do with it)
                     continue

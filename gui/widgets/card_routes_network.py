@@ -1046,7 +1046,10 @@ class CardNetworkRoutesMixin:
                 source_phase="enumeration",
                 host=target,
                 notes=(f"SNMP community string on {target}: '{community}'.\n"
-                       f"Use:  snmpwalk -v2c -c {community} {target}")))
+                       f"Use:  snmpwalk -v2c -c {community} {target}"),
+                # Both callers only get here after the agent answered
+                # to this community string.
+                verified=True))
         except Exception as e:
             print(f"[HAWK] save SNMP community failed: {e}")
 

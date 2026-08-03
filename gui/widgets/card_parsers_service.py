@@ -1094,7 +1094,10 @@ class CardServiceParserMixin:
                 cred_type="cleartext",
                 services=["KERBEROS"],
                 source_phase=self.phase_id,
-                host=target, notes=note)
+                host=target, notes=note,
+                # userenum proves the account EXISTS.  No password was
+                # ever tried, so there is nothing verified about it.
+                verified=False)
             self.app.cred_store.add_credential(cred)
 
         # Valid logins — full cleartext creds.
@@ -1112,7 +1115,10 @@ class CardServiceParserMixin:
                 cred_type="cleartext",
                 services=["KERBEROS", "SMB", "WINRM"],
                 source_phase=self.phase_id,
-                host=target, notes=note)
+                host=target, notes=note,
+                # VALID LOGIN line: Kerberos pre-auth succeeded with
+                # this password.
+                verified=True)
             self.app.cred_store.add_credential(cred)
 
         # Severity: a valid login is HIGH, enumeration-only is MEDIUM.
@@ -1386,7 +1392,10 @@ class CardServiceParserMixin:
                     services=[svc],
                     source_phase=self.phase_id,
                     host=target,
-                    notes=f"Added via {tool.name} retry dialog")
+                    notes=f"Added via {tool.name} retry dialog",
+                    # Typed by the operator before the retry even
+                    # runs — a guess until something authenticates.
+                    verified=False)
                 self.app.cred_store.add_credential(cred)
             except Exception as e:
                 print(f"[HAWK] cred save failed: {e}")

@@ -397,11 +397,16 @@ class CardAccessRoutesMixin:
                     source_phase="post_exploit",
                     host=target,
                     notes="Cracked from /etc/shadow via john",
+                    # Only reached with john's cracked list: the
+                    # plaintext hashes back to the shadow entry, which
+                    # is proof the password is the account's.
+                    verified=True,
                 )
                 if h:
                     cred.cracked = True
                     cred.cracked_pass = pw
                 sess.add_credential(cred)
+            sess.save()
             self.app.terminal.write(
                 f"  [SHADOW CRACK] {len(cracked_list)} credential(s) "
                 f"saved to Credential Store", "success")

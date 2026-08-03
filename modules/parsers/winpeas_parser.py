@@ -1028,7 +1028,10 @@ def _push_credential(app, c: dict, run_id: str):
             cred_type=c.get("cred_type", "cleartext"),
             notes=c.get("notes", ""),
             source_phase="post_exploit",
-            linked_run_id=run_id)
+            linked_run_id=run_id,
+            # Scraped out of files/registry on the host: a candidate
+            # secret, not a login winpeas performed.
+            verified=False)
         app.cred_store.add_credential(cred)
     except Exception:
         pass

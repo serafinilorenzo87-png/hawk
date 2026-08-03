@@ -152,7 +152,7 @@ class Credential:
                  services: list = None, source_phase: str = "",
                  hash_type: str = "", host: str = "", notes: str = "",
                  linked_run_id: str = "", category: str = "",
-                 verified: bool = True):
+                 verified: bool = False):
         self.username     = username
         self.password     = password
         self.hash_val     = hash_val
@@ -165,7 +165,15 @@ class Credential:
         self.timestamp    = datetime.now().isoformat()
         self.cracked      = False
         self.cracked_pass = ""
-        self.verified     = verified    # False for HTTP brute-force creds pending manual check
+        # The Credential Store is meant to hold VERIFIED credentials.
+        # The default is False — "HAWK has not proved this one works" —
+        # so a producer that forgets the flag gets an extra UNVERIFIED
+        # badge (a false negative the operator can see) instead of a
+        # silent claim of compromise.  Pass verified=True only where an
+        # authentication actually succeeded.  Every construction site in
+        # the codebase passes it explicitly; tests/test_credential_
+        # verified.py enforces that.
+        self.verified     = verified
         # Cross-navigation between Credential Store and Target Intel.
         # When a tool parser pushes both a credential AND a finding in
         # the same run, it generates one UUID and attaches the same
@@ -212,6 +220,11 @@ class Credential:
             notes=d.get("notes", ""),
             linked_run_id=d.get("linked_run_id", ""),
             category=d.get("category", ""),
+            # Deserialisation keeps the legacy default: every session
+            # file HAWK has ever written carries an explicit "verified"
+            # key, so this only affects hand-edited / pre-field JSON.
+            # Flipping it here would re-label old sessions, not fix
+            # them — the producers are where the truth is set.
             verified=d.get("verified", True),
         )
         c.timestamp    = d.get("timestamp", c.timestamp)

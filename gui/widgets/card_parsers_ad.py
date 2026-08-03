@@ -136,7 +136,9 @@ class CardADParserMixin:
                                f"NT:   {nt}\n"
                                f"Crack:  hashcat -m 1000 {nt} rockyou.txt"),
                         linked_run_id=rid,
-                        category=TOOL_RUN_CATEGORY))
+                        category=TOOL_RUN_CATEGORY,
+                        # A dumped hash is loot, not a proven login.
+                        verified=False))
                     added += 1
                 except Exception as e:
                     print(f"[HAWK] cred store add (NTLM) failed: {e}")
@@ -160,7 +162,9 @@ class CardADParserMixin:
                                f"Crack:  hashcat -m 2100 "
                                f"<hash> rockyou.txt"),
                         linked_run_id=rid,
-                        category=TOOL_RUN_CATEGORY))
+                        category=TOOL_RUN_CATEGORY,
+                        # Uncracked DCC2 blob — nothing authenticated.
+                        verified=False))
                     added += 1
                 except Exception as e:
                     print(f"[HAWK] cred store add (DCC2) failed: {e}")
@@ -186,7 +190,10 @@ class CardADParserMixin:
                                f"Crack:  hashcat -m {mode} "
                                f"<hash> rockyou.txt"),
                         linked_run_id=rid,
-                        category=TOOL_RUN_CATEGORY))
+                        category=TOOL_RUN_CATEGORY,
+                        # Uncracked Kerberos hash — nothing
+                        # authenticated.
+                        verified=False))
                     added += 1
                 except Exception as e:
                     print(f"[HAWK] cred store add (Krb) failed: {e}")
@@ -368,7 +375,9 @@ class CardADParserMixin:
                            f"Remove with:  impacket-addcomputer -delete "
                            f"-computer-name {computer} ..."),
                     linked_run_id=rid,
-                    category=TOOL_RUN_CATEGORY))
+                    category=TOOL_RUN_CATEGORY,
+                    # The account was created, never logged into.
+                    verified=False))
             except Exception as e:
                 print(f"[HAWK] addcomputer cred push failed: {e}")
 
@@ -647,7 +656,9 @@ class CardADParserMixin:
                            f"If cracked → the SPN-bound service account "
                            f"password, often reused across the domain."),
                     linked_run_id=rid,
-                    category=TOOL_RUN_CATEGORY))
+                    category=TOOL_RUN_CATEGORY,
+                    # Roasted TGS, still encrypted — not a login.
+                    verified=False))
                 added += 1
             except Exception as e:
                 print(f"[HAWK] kerberoast cred push failed: {e}")
@@ -824,7 +835,9 @@ class CardADParserMixin:
                            f"User has DONT_REQ_PREAUTH flag — no "
                            f"password needed to request the TGT."),
                     linked_run_id=rid,
-                    category=TOOL_RUN_CATEGORY))
+                    category=TOOL_RUN_CATEGORY,
+                    # AS-REP blob to crack offline — not a login.
+                    verified=False))
                 added += 1
             except Exception as e:
                 print(f"[HAWK] asrep cred push failed: {e}")
@@ -1601,6 +1614,8 @@ class CardADParserMixin:
                         source_phase="nxc_ldap --kerberoasting",
                         category=TOOL_RUN_CATEGORY,
                         linked_run_id=rid,
+                        # Encrypted TGS — crack it first.
+                        verified=False,
                     ))
                 for h in asrep_hashes:
                     m = re.match(r"\$krb5asrep\$\d+\$([^@]+)", h)
@@ -1615,7 +1630,17 @@ class CardADParserMixin:
                         source_phase="nxc_ldap --asreproast",
                         category=TOOL_RUN_CATEGORY,
                         linked_run_id=rid,
+                        # Encrypted AS-REP — crack it first.
+                        verified=False,
                     ))
+                if kerberoastable_hashes or asrep_hashes:
+                    # sess.add_credential() only mutates the in-memory
+                    # list: without this the roasted hashes are lost on
+                    # exit and never show up in the store.
+                    sess.save()
+                    store = getattr(self.app, "cred_store", None)
+                    if store:
+                        store.refresh()
         except Exception as e:
             print(f"[HAWK] nxc-ldap cred push failed: {e}")
 

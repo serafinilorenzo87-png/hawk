@@ -1879,7 +1879,10 @@ class TargetIntelRenderMixin:
                     username="anonymous", password="anonymous",
                     cred_type="cleartext", services=["FTP"],
                     source_phase="scanning", host=target,
-                    notes=f"FTP anon login (nmap ftp-anon) on {target}:{ftp_port}"))
+                    notes=f"FTP anon login (nmap ftp-anon) on {target}:{ftp_port}",
+                    # ftp-anon reports "login allowed" only after the
+                    # script logged in anonymously.
+                    verified=True))
 
         # vsftpd 2.3.4 backdoor — detected by version banner in nmap -sV
         m_vsftpd = re.search(r'vsftpd\s+2\.3\.4', full_text, re.I)
@@ -1965,7 +1968,10 @@ class TargetIntelRenderMixin:
                     username="guest", password="",
                     cred_type="cleartext", services=["SMB"],
                     source_phase="scanning", host=target,
-                    notes=f"SMB guest session (nmap) on {target}:{smb_port}"))
+                    notes=f"SMB guest session (nmap) on {target}:{smb_port}",
+                    # "account_used: guest" means nmap's SMB session
+                    # was established with the guest account.
+                    verified=True))
 
     def _add_vuln_finding(self, vuln_name: str, cve: str,
                           desc_lines: list, refs: list = None):

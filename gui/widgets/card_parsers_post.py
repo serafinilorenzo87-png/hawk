@@ -230,19 +230,29 @@ class CardPostParserMixin:
                                 cred = Credential(
                                     username=c.get("username",""),
                                     password=c.get("password",""),
-                                    hash_value=c.get("hash",""),
+                                    hash_val=c.get("hash",""),
                                     hash_type=c.get("hash_type",""),
-                                    service=c.get("service",""),
+                                    cred_type=("hash" if c.get("hash")
+                                               else "cleartext"),
+                                    services=([c["service"]]
+                                              if c.get("service") else []),
                                     host=target,
-                                    source=c.get("source","winpeas"),
+                                    source_phase="post_exploit",
+                                    notes=c.get("source","winpeas"),
                                     linked_run_id=run_id,
+                                    # Scraped off the filesystem: a
+                                    # hash to crack or a string that
+                                    # looks like a password, never a
+                                    # login HAWK watched succeed.
+                                    verified=False,
                                 )
                                 sess.add_credential(cred)
                             except Exception as ce:
                                 print(f"[HAWK] winpeas cred push failed: {ce}")
                         sess.save()
-                        if hasattr(self.app, "credential_store"):
-                            self.app.credential_store.refresh()
+                        cs = getattr(self.app, "cred_store", None)
+                        if cs:
+                            cs.refresh()
 
                 # Summary in terminal
                 self.app.terminal.write(
@@ -427,17 +437,23 @@ class CardPostParserMixin:
                         services=["SMB"],
                         source_phase=self.phase_id,
                         host=target,
-                        notes=(f"Verified via {tool.name} on "
-                               f"{target}"
+                        notes=(f"Share listing observed via "
+                               f"{tool.name} on {target}"
                                + (f" (domain: {domain})"
                                   if domain else "")
                                + f" — {len(shares)} share(s) "
-                                 f"listed."))
+                                 f"listed."),
+                        # A share list can also come back from a
+                        # server that mapped us to guest, so the
+                        # listing alone does not prove THIS user
+                        # authenticated.
+                        verified=False)
                     sess.add_credential(cred)
+                    sess.save()
                     pushed_cred = True
                     cs = getattr(self.app, "cred_store", None)
-                    if cs and hasattr(cs, "_render_creds"):
-                        cs._render_creds()
+                    if cs:
+                        cs.refresh()
                     self.app.terminal.write(
                         f"  [+] {tool.name}: credential "
                         f"{uname}:{'*' * len(auth_pass)} confirmed "
@@ -460,10 +476,14 @@ class CardPostParserMixin:
                         source_phase=self.phase_id,
                         host=target,
                         notes=(f"SMB anonymous access confirmed by "
-                               f"{tool.name} on {target}.")))
+                               f"{tool.name} on {target}."),
+                        # The anonymous session itself succeeded —
+                        # that IS the credential working.
+                        verified=True))
+                    sess.save()
                     cs = getattr(self.app, "cred_store", None)
-                    if cs and hasattr(cs, "_render_creds"):
-                        cs._render_creds()
+                    if cs:
+                        cs.refresh()
             except Exception as e:
                 print(f"[HAWK] smb anon cred push failed: {e}")
 
@@ -574,6 +594,9 @@ class CardPostParserMixin:
                             source_phase=self.phase_id,
                             host=target,
                             notes="\n".join(note_lines),
+                            # Anonymous login was accepted by the
+                            # server (same branch as above).
+                            verified=True,
                         )
                         self.app.cred_store.add_credential(cred)
                         self.app.terminal.write(
