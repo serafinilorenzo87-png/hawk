@@ -224,6 +224,61 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(by_ip["10.0.0.1"]["session_ref"]["session_id"], "abc")
         self.assertIn(445, by_ip["10.0.0.1"]["port_hints"])
 
+    def test_aborted_inventory_has_no_finished_time(self):
+        from modules.discovery import build_inventory
+        inv = build_inventory("10.0.0.0/24", "nmap-sn", [],
+                              "2026-08-03T00:00:00Z", "2026-08-03T00:00:30Z",
+                              aborted="2026-08-03T00:00:30Z")
+        self.assertEqual(inv["finished"], "")
+        self.assertEqual(inv["aborted"], "2026-08-03T00:00:30Z")
+
+    def test_complete_sweep_ages_unseen_hosts(self):
+        from modules.discovery import merge_inventory
+        existing = {
+            "range": "10.0.0.0/24",
+            "hosts": [
+                {"ip": "10.0.0.1", "alive": True, "responded_via": ["arp"],
+                 "port_hints": [], "os_hint": "unknown", "session_ref": None},
+                {"ip": "10.0.0.9", "alive": True, "responded_via": ["arp"],
+                 "port_hints": [], "os_hint": "unknown", "session_ref": None},
+            ],
+        }
+        new_hosts = [
+            {"ip": "10.0.0.1", "alive": True, "responded_via": ["arp"],
+             "port_hints": [], "os_hint": "unknown", "session_ref": None},
+        ]
+        merged = merge_inventory(existing, new_hosts,
+                                 finished="2026-08-03T00:05:00Z")
+        by_ip = {h["ip"]: h for h in merged["hosts"]}
+        self.assertFalse(by_ip["10.0.0.9"]["alive"])
+        self.assertEqual(merged["finished"], "2026-08-03T00:05:00Z")
+
+    def test_aborted_merge_does_not_age_or_stamp_finished(self):
+        """An unprobed host is not "down", and a partial run must not
+        leave the file reading as a completed sweep."""
+        from modules.discovery import merge_inventory
+        existing = {
+            "range": "10.0.0.0/24",
+            "finished": "2026-08-02T00:00:00Z",
+            "hosts": [
+                {"ip": "10.0.0.1", "alive": True, "responded_via": ["arp"],
+                 "port_hints": [], "os_hint": "unknown", "session_ref": None},
+                {"ip": "10.0.0.9", "alive": True, "responded_via": ["arp"],
+                 "port_hints": [], "os_hint": "unknown", "session_ref": None},
+            ],
+        }
+        new_hosts = [
+            {"ip": "10.0.0.1", "alive": True, "responded_via": ["tcp:445"],
+             "port_hints": [445], "os_hint": "windows", "session_ref": None},
+        ]
+        merged = merge_inventory(existing, new_hosts,
+                                 finished="2026-08-03T00:05:00Z",
+                                 aborted="2026-08-03T00:05:00Z")
+        by_ip = {h["ip"]: h for h in merged["hosts"]}
+        self.assertTrue(by_ip["10.0.0.9"]["alive"])
+        self.assertEqual(merged["finished"], "")
+        self.assertEqual(merged["aborted"], "2026-08-03T00:05:00Z")
+
     def test_set_session_ref(self):
         from modules.discovery import set_session_ref
         inv = {"hosts": [

@@ -645,8 +645,6 @@ class TargetBar(ctk.CTkFrame):
         from datetime import datetime, timezone
         from modules.discovery import (
             parse_nmap_gnmap, parse_masscan_list, parse_arp_scan,
-            build_inventory, save_inventory, load_latest_inventory,
-            merge_inventory, build_phase2_cmd, gnmap_path_for,
         )
 
         finished = datetime.now(timezone.utc).isoformat()
@@ -685,15 +683,20 @@ class TargetBar(ctk.CTkFrame):
             self._run_phase2(cidr, hosts, method, started, finished)
             return
 
-        # An aborted sweep never reached most of the range, so the hosts
-        # it did not report are "not probed", not "down" — do not age them.
         self._persist_sweep_inventory(cidr, method, hosts, started, finished,
-                                      age_unseen=not aborted)
+                                      aborted=finished if aborted else "")
 
     def _persist_sweep_inventory(self, cidr, method, hosts, started,
-                                 finished, age_unseen=True):
+                                 finished, aborted=""):
         """Merge into the latest inventory for this range, save it and
         reveal OPEN GRAPH.  Shared by phase 1 and phase 2.
+
+        `aborted` is the ISO time the operator stopped the sweep, empty
+        when it ran to the end.  An aborted sweep never reached most of
+        the range, so the file must not claim otherwise: it carries no
+        `finished` time, and the hosts it never probed keep whatever
+        state the last COMPLETE sweep recorded rather than being aged to
+        down or re-declared alive as of now.
 
         A failed write must not also cost the operator the results: the
         inventory stays in memory so the graph still opens, and the real
@@ -709,26 +712,35 @@ class TargetBar(ctk.CTkFrame):
         if existing:
             inventory = merge_inventory(existing, hosts,
                                         started=started, finished=finished,
-                                        age_unseen=age_unseen)
+                                        aborted=aborted)
             inventory["method"] = method
         else:
             inventory = build_inventory(cidr, method, hosts,
-                                        started, finished)
+                                        started, finished, aborted=aborted)
 
         self._sweep_inventory = inventory
         alive = [h for h in inventory.get("hosts", []) if h.get("alive")]
+        # Only the hosts this run actually probed are a fresh claim; on
+        # an aborted sweep the rest are carried over from an earlier one.
+        probed = len(hosts)
+        if aborted:
+            counted = (f"{probed} host(s) probed before abort, "
+                       f"{len(alive)} alive in the range so far")
+        else:
+            counted = f"{len(alive)} hosts"
         try:
             path = save_inventory(inventory)
         except OSError as e:
             self._sweep_inventory_path = None
             self.app.terminal.write(
-                f"[!] Inventory NOT saved ({e}) — {len(alive)} host(s) kept "
+                f"[!] Inventory NOT saved ({e}) — {counted}, kept "
                 f"in memory only, lost when HAWK closes.", "error")
         else:
             self._sweep_inventory_path = path
+            label = "Partial inventory saved" if aborted \
+                else "Inventory saved"
             self.app.terminal.write(
-                f"[+] Inventory saved: {path}  ({len(alive)} hosts)",
-                "success")
+                f"[+] {label}: {path}  ({counted})", "success")
 
         self._sweep_graph_btn.pack(side="left", padx=(10, 0))
 

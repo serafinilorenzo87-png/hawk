@@ -318,12 +318,20 @@ def _blank_host(ip: str) -> Dict:
 
 def build_inventory(cidr: str, method: str,
                     hosts: List[Dict],
-                    started: str, finished: str) -> Dict:
-    """Build the inventory dict matching the §7 contract."""
+                    started: str, finished: str,
+                    aborted: str = "") -> Dict:
+    """Build the inventory dict matching the §7 contract.
+
+    `aborted` is the ISO time the operator stopped the sweep, empty when
+    it ran to the end.  An aborted sweep has NO `finished` time: most of
+    the range was never probed, and stamping one makes a partial result
+    read as a complete picture of the network days later.
+    """
     return {
         "range": cidr,
         "started": started,
-        "finished": finished,
+        "finished": "" if aborted else finished,
+        "aborted": aborted,
         "method": method,
         "hosts": hosts,
     }
@@ -374,17 +382,20 @@ def load_latest_inventory(cidr: str) -> Optional[Dict]:
 
 def merge_inventory(existing: Dict, new_hosts: List[Dict],
                     started: str = "", finished: str = "",
-                    age_unseen: bool = True) -> Dict:
+                    aborted: str = "") -> Dict:
     """Merge newly discovered hosts into an existing inventory.
 
     Preserves session_ref for hosts already worked on (§3: never orphan a
     host the operator already worked).
 
-    `age_unseen` flips `alive` to False on hosts the new sweep did NOT
-    see.  Without it a box that answered once stayed alive:true forever
-    and the graph kept drawing machines powered off days ago.  Pass False
-    for a PARTIAL result set (aborted sweep) — there the silence means
-    "never probed", not "down".
+    A COMPLETE sweep ages the hosts it did not see to `alive: False`.
+    Without that a box that answered once stayed alive:true forever and
+    the graph kept drawing machines powered off days ago.
+
+    `aborted` (ISO abort time, empty when the sweep completed) says the
+    result set is PARTIAL: the silence of a host then means "never
+    probed", not "down", so `alive` is left alone — and no `finished`
+    time is stamped, because nothing about this range was verified whole.
 
     `started` is the timestamp of the FIRST sweep of this range and is
     kept as-is; the caller's value only fills it in when the existing
@@ -402,7 +413,7 @@ def merge_inventory(existing: Dict, new_hosts: List[Dict],
                 by_ip[ip]["session_ref"] = old_ref
         else:
             by_ip[ip] = nh
-    if age_unseen:
+    if not aborted:
         for ip, h in by_ip.items():
             if ip not in seen:
                 h["alive"] = False
@@ -410,8 +421,12 @@ def merge_inventory(existing: Dict, new_hosts: List[Dict],
                                key=lambda h: _ip_sort_key(h["ip"]))
     if started and not existing.get("started"):
         existing["started"] = started
-    if finished:
+    if aborted:
+        existing["finished"] = ""
+        existing["aborted"] = aborted
+    elif finished:
         existing["finished"] = finished
+        existing["aborted"] = ""
     return existing
 
 
