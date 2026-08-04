@@ -18,46 +18,20 @@ import os
 import re
 import customtkinter as ctk
 from utils.config import COLORS, WINDOW
-
-
-# Keys we store on finding dicts to hold live Tk widget references —
-# used by target_intel_widget.TargetIntelWidget._apply_read_style to
-# repaint a single finding card in place instead of rerendering the
-# whole auto_findings section.  These MUST be stripped before the
-# session is serialised to JSON — Tk widgets are not JSON-serialisable.
-#
-# `_raw_description` carries the un-masked counterpart of a finding's
-# description (Bloody Crawl JS-secret values).  It's deliberately kept
-# in memory only — writing real tokens / emails / endpoints to a
-# session JSON on disk would defeat the masking design (`mask_secret`
-# in utils/web_findings.py).  After SAVE/LOAD the SHOW RAW toggle is
-# disabled until the parser re-runs.
-_FINDING_NON_PERSISTED_KEYS = (
-    "_frame_ref", "_badge_ref", "_mark_btn_ref",
-    "_raw_description",
-    # AI-OPS finding side-data captured at probe time.  Re-detected
-    # on the next probe run so it doesn't need to survive save/load.
-    "_aiops_detected_version",
+from utils.target_intel_sync import (
+    FINDING_NON_PERSISTED_KEYS,
+    strip_finding_widget_refs,
+    sync_target_intel,
 )
-# Backward-compat alias — older code paths might still import the
-# original name.  Same value, same semantics.
-_FINDING_WIDGET_REF_KEYS = _FINDING_NON_PERSISTED_KEYS
 
 
-def _strip_finding_widget_refs(findings):
-    """Return a list of shallow-cloned finding dicts with widget
-    references and other in-memory-only keys removed so the session
-    serialiser doesn't trip on tkinter widget objects and doesn't leak
-    un-masked secrets to disk."""
-    out = []
-    for f in findings or []:
-        if not isinstance(f, dict):
-            out.append(f)
-            continue
-        clean = {k: v for k, v in f.items()
-                 if k not in _FINDING_NON_PERSISTED_KEYS}
-        out.append(clean)
-    return out
+# The Target Intel snapshot (and the key list it strips) moved to the
+# Tk-free utils/target_intel_sync.py so the REPORT path can take the very
+# same snapshot before reading the session — see the module docstring
+# there.  These aliases keep the historical names importable from here.
+_FINDING_NON_PERSISTED_KEYS = FINDING_NON_PERSISTED_KEYS
+_FINDING_WIDGET_REF_KEYS = FINDING_NON_PERSISTED_KEYS
+_strip_finding_widget_refs = strip_finding_widget_refs
 
 
 class TargetBar(ctk.CTkFrame):
@@ -2323,27 +2297,10 @@ class TargetBar(ctk.CTkFrame):
         sess = self.app.session_manager.current
 
         # Capture a snapshot of the Target Intel panel so it can be
-        # restored on reload. The panel holds live Python objects
-        # (OSFingerprint, ExploitEntry dataclass) that the JSON encoder
-        # can't serialise directly — call their explicit to_dict() helpers
-        # so the save doesn't fail with "Object of type X is not JSON
-        # serializable".
-        try:
-            intel = self.app.target_intel
-            fp = getattr(intel, "_fp", None)
-            exploits = getattr(intel, "_exploits", []) or []
-            sess.set_target_intel({
-                "fingerprint":    (fp.to_dict() if fp is not None and
-                                    hasattr(fp, "to_dict") else None),
-                "exploits":       [(e.to_dict() if hasattr(e, "to_dict")
-                                    else e)
-                                   for e in exploits],
-                "auto_findings":  _strip_finding_widget_refs(
-                                      getattr(intel, "_auto_findings",
-                                              []) or []),
-            })
-        except Exception as e:
-            print(f"[HAWK] target_intel snapshot failed: {e}")
+        # restored on reload.  Same helper the autosave tick and the
+        # report path use, so the three can never disagree on what the
+        # session's copy of the findings contains.
+        sync_target_intel(self.app, sess)
 
         try:
             path = sess.save(new_file=True)
@@ -2457,22 +2414,7 @@ class TargetBar(ctk.CTkFrame):
 
         # Snapshot the Target Intel panel the same way _do_save_current
         # does — otherwise reload would lose fingerprint/exploits/findings.
-        try:
-            intel = self.app.target_intel
-            fp = getattr(intel, "_fp", None)
-            exploits = getattr(intel, "_exploits", []) or []
-            sess.set_target_intel({
-                "fingerprint":    (fp.to_dict() if fp is not None and
-                                    hasattr(fp, "to_dict") else None),
-                "exploits":       [(e.to_dict() if hasattr(e, "to_dict")
-                                    else e)
-                                   for e in exploits],
-                "auto_findings":  _strip_finding_widget_refs(
-                                      getattr(intel, "_auto_findings",
-                                              []) or []),
-            })
-        except Exception as e:
-            print(f"[HAWK] autosave intel snapshot failed: {e}")
+        sync_target_intel(self.app, sess)
 
         try:
             # new_file=False → overwrite the same file. If this session

@@ -2604,6 +2604,14 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
         if hasattr(self, "_notes_box"):
             session.notes = self._notes_box.get("1.0", "end").strip()
 
+        # The report reads the SESSION, but the live auto-findings live in
+        # the Target Intel panel and only reach the session when somebody
+        # saves — and autosave is off by default.  Without this the very
+        # normal "run the tools, click REPORT" flow shipped a report with
+        # zero findings and no Target Intelligence section, silently.
+        from utils.target_intel_sync import sync_target_intel
+        sync_target_intel(self.app, session)
+
         # Pre-export curation: the operator reviews / excludes / overrides
         # findings in a dedicated dialog, then "Generate report" runs the
         # engine on exactly the curated set.  The dialog calls back with
