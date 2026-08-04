@@ -312,6 +312,22 @@ _CSV_COLUMNS = ["n", "effective_severity", "original_severity",
                 "title", "endpoint", "parameter", "confidence", "method",
                 "port", "kev", "operator_note"]
 
+# Excel / LibreOffice / Google Sheets treat a cell starting with any of
+# these as a FORMULA.  Finding titles and descriptions are tool output —
+# i.e. text the target controls — so an endpoint or banner beginning with
+# "=" would execute on the PM's machine when they open the deliverable.
+_CSV_FORMULA_LEADS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell(value) -> str:
+    """Neutralise a spreadsheet formula lead by prefixing an apostrophe —
+    the standard defusing: the sheet shows the original text, the parser
+    no longer sees a formula.  Non-strings pass through str()."""
+    s = "" if value is None else str(value)
+    if s[:1] in _CSV_FORMULA_LEADS:
+        return "'" + s
+    return s
+
 
 def render_csv(ctx, sections=None) -> str:
     """Flat dump of the CURATED, visible findings (same set + same
@@ -325,7 +341,7 @@ def render_csv(ctx, sections=None) -> str:
     for i, f in enumerate(ordered, 1):
         v = ctx.finding_view(f, i)
         fields = {k.lower(): val for k, val in v["fields"]}
-        w.writerow([
+        w.writerow([_csv_cell(c) for c in (
             v["n"], v["severity_key"], (v["original_severity"] or "").lower(),
             "yes" if v["overridden"] else "no", v["origin"], v["phase_id"],
             v["source"], v["title"], fields.get("endpoint", ""),
@@ -333,5 +349,5 @@ def render_csv(ctx, sections=None) -> str:
             fields.get("method", ""), fields.get("port", ""),
             fields.get("kev", ""),
             v["operator_note"].replace("\n", " "),
-        ])
+        )])
     return buf.getvalue()
