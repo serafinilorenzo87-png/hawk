@@ -198,8 +198,9 @@ class AssaultState:
                 self.target_host = (urlparse(url).hostname or "").lower()
             except Exception:
                 self.target_host = ""
-            # Reset payloads but keep cancel_event slot (recreate fresh
-            # so a previous cancel doesn't bleed into the new target).
+            # Reset payloads and clear the cancel flag so a previous
+            # cancel doesn't bleed into the new target.  Clear in place
+            # (never rebind) — see reset_cancel().
             self.tech_stack    = []
             self.api_endpoints = []
             self.exposures     = []
@@ -215,7 +216,7 @@ class AssaultState:
                                        "error": ""}
             self.pipeline_started_at = None
             self.pipeline_updated_at = None
-            self.cancel_event = threading.Event()
+            self.cancel_event.clear()
         self._notify()
 
     def in_scope(self, url: str) -> bool:
@@ -238,9 +239,15 @@ class AssaultState:
         self._notify()
 
     def reset_cancel(self):
-        """Clear the cancel flag — call before starting a new run."""
+        """Clear the cancel flag — call before starting a new run.
+
+        Clears the EXISTING Event instead of rebinding a fresh one:
+        jobs capture the object once at construction time
+        (`JwtAnalyzerJob`, `InjectionTesterJob`), so a rebind would
+        leave `cancel()` setting an Event nobody is watching.
+        """
         with self._lock:
-            self.cancel_event = threading.Event()
+            self.cancel_event.clear()
 
     def is_cancelled(self) -> bool:
         return self.cancel_event.is_set()
