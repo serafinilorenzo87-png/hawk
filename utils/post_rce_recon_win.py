@@ -187,10 +187,17 @@ def generate_snippet() -> str:
     #   - the path contains a space AND
     #   - it isn't already quoted with leading "
     # which is the classic vulnerable shape (C:\Program Files\…\foo.exe).
+    # NOTE the `\x22` instead of a literal double quote: the whole
+    # payload lives inside ONE pair of cmd double quotes (see the
+    # invariant at the bottom of this function), so a literal `"`
+    # here closes the cmd argument early and dumps the rest of the
+    # snippet — metacharacters and all — into cmd's parser.
+    # `\x22` is the .NET-regex escape for `"` and matches the same
+    # thing.
     section("UNQUOTED_SVC", [
         "Get-CimInstance Win32_Service "
         "| Where-Object { $_.PathName -and "
-        "$_.PathName -notmatch '^\"' -and "
+        "$_.PathName -notmatch '^\\x22' -and "
         "$_.PathName -match ' ' } "
         "| Select-Object Name, PathName, StartMode, StartName "
         "| Format-Table -AutoSize | Out-String -Width 4096",
@@ -241,7 +248,9 @@ def generate_snippet() -> str:
         "try { "
         "$r = Invoke-WebRequest -Uri 'https://1.1.1.1' "
         "-UseBasicParsing -TimeoutSec 3 -ErrorAction Stop; "
-        "Write-Host \"http_code=$($r.StatusCode)\" "
+        # Concatenation, not an interpolated double-quoted string:
+        # see the no-double-quote invariant below.
+        "Write-Host ('http_code=' + $r.StatusCode) "
         "} catch { Write-Host 'http_code=000' }",
     ])
 
@@ -249,12 +258,33 @@ def generate_snippet() -> str:
 
     # Join into a single PS one-liner with semicolons.  Then wrap
     # in `powershell -NoProfile -ExecutionPolicy Bypass -Command`
-    # so it pastes cleanly into any cmd.exe shell.  Single-quote
-    # the entire PS payload — cmd doesn't interpret single quotes,
-    # PS does.  Inner single quotes inside the payload are already
-    # the marker strings (echo '<<<SECTION:…>>>'), which works
-    # because the OUTER cmd quote is a double quote.
+    # so it pastes cleanly into any cmd.exe shell.  The whole PS
+    # payload goes inside ONE pair of cmd DOUBLE quotes: cmd passes
+    # it through untouched, and PowerShell then sees the inner
+    # SINGLE quotes as its own string delimiters — which is why
+    # every literal in the payload (markers included) is
+    # single-quoted and why the payload must never contain a
+    # double quote of its own.
     ps_payload = "; ".join(ps_lines)
+
+    # Hard invariant, not a style rule.  cmd.exe toggles quoting on
+    # every `"` it sees: the wrapper opens the argument, and the
+    # FIRST literal double quote inside the payload closes it again.
+    # Everything after that is parsed by cmd, which then meets the
+    # payload's `|`, `<`, `>` and `2>$null` as real pipes and
+    # redirections — cmd answers "The syntax of the command is
+    # incorrect." and no ___HAWK_BEGIN___ block ever comes back.
+    # It shipped broken exactly this way, so the invariant is
+    # enforced here rather than left to a comment.  Use `\x22` in
+    # regexes and string concatenation instead of interpolation.
+    if '"' in ps_payload:
+        bad = ps_payload.index('"')
+        raise AssertionError(
+            "post_rce_recon_win: PowerShell payload must contain no "
+            "double quotes (the cmd.exe wrapper supplies the only "
+            f"pair). First one at offset {bad}: "
+            f"...{ps_payload[max(0, bad - 40):bad + 40]}...")
+
     return (
         "powershell -NoProfile -ExecutionPolicy Bypass -Command "
         f"\"{ps_payload}\""
