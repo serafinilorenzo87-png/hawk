@@ -74,6 +74,11 @@ def generate(session, formats=REPORT_FORMATS, *, branding=None,
     ``out_dir`` defaults to REPORTS_DIR; any override must still resolve
     inside the HAWK tree (require_within_base) — the deliverable never
     escapes the portable folder.
+
+    Degradation is PER FORMAT: a render target that raises (a template
+    problem in HTML, a write that fails) costs that format and only that
+    format.  MD and CSV have no dependencies at all — losing them
+    because HTML blew up would leave the operator with nothing.
     """
     ctx = ReportContext(session, branding=load_branding(branding))
     sections = build_sections(ctx, providers=providers)
@@ -92,38 +97,60 @@ def generate(session, formats=REPORT_FORMATS, *, branding=None,
     # best-effort PDF (same template -> identical layout).
     want_html = "html" in formats
     want_pdf = "pdf" in formats
-    html_str = render.render_html(ctx, sections) \
-        if (want_html or want_pdf) else None
+    html_str = None
+    if want_html or want_pdf:
+        try:
+            html_str = render.render_html(ctx, sections)
+        except Exception as e:
+            print(f"[HAWK] report: HTML render failed: {e} — the other "
+                  f"formats are still produced.", file=sys.stderr)
 
     paths = {}
     for fmt in formats:
         if fmt == "pdf":
             continue                       # handled after the text formats
-        content = html_str if fmt == "html" else None
-        if content is None:
-            renderer = _RENDERERS.get(fmt)
-            if renderer is None:
-                continue
-            content = renderer(ctx, sections)
-        path = _dst(fmt)
-        # CSV: render_csv uses csv.writer, which ALREADY emits "\r\n" line
-        # terminators.  Opening in text mode without newline="" lets the
-        # platform translate the "\n" again (-> "\r\r\n" on Windows: a blank
-        # row between records in Excel).  newline="" disables that so CSV
-        # rows end in a single "\r\n" everywhere.  HTML/MD keep native EOL.
-        newline = "" if fmt == "csv" else None
-        with open(path, "w", newline=newline, encoding="utf-8") as f:
-            f.write(content)
-        paths[fmt] = path
+        try:
+            if fmt == "html":
+                content = html_str
+                if content is None:
+                    continue               # already reported above
+            else:
+                renderer = _RENDERERS.get(fmt)
+                if renderer is None:
+                    continue
+                content = renderer(ctx, sections)
+            path = _dst(fmt)
+            # CSV: render_csv uses csv.writer, which ALREADY emits "\r\n"
+            # line terminators.  Opening in text mode without newline=""
+            # lets the platform translate the "\n" again (-> "\r\r\n" on
+            # Windows: a blank row between records in Excel).  newline=""
+            # disables that so CSV rows end in a single "\r\n" everywhere.
+            # HTML/MD keep native EOL.
+            newline = "" if fmt == "csv" else None
+            with open(path, "w", newline=newline, encoding="utf-8") as f:
+                f.write(content)
+            paths[fmt] = path
+        except Exception as e:
+            # One format down, the rest stand — result_summary then tells
+            # the operator exactly which ones were produced.
+            print(f"[HAWK] report: {fmt.upper()} target failed: {e}",
+                  file=sys.stderr)
 
     # ── Optional PDF: best-effort, binary, silent on absence ──
     if want_pdf and html_str is not None:
+        # render_pdf_from_html never raises (absence of WeasyPrint is the
+        # normal state and it logs the reason itself); the try guards the
+        # WRITE, which can, and which must not cost the other formats.
         pdf_bytes = render.render_pdf_from_html(html_str)
         if pdf_bytes:
-            path = _dst("pdf")
-            with open(path, "wb") as f:
-                f.write(pdf_bytes)
-            paths["pdf"] = path
+            try:
+                path = _dst("pdf")
+                with open(path, "wb") as f:
+                    f.write(pdf_bytes)
+                paths["pdf"] = path
+            except Exception as e:
+                print(f"[HAWK] report: PDF write failed: {e}",
+                      file=sys.stderr)
         else:
             # render_pdf_from_html already logged the reason; the result
             # dict simply carries no "pdf" key and HTML/MD/CSV stand.
