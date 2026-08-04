@@ -32,6 +32,142 @@ import urllib.request
 
 from gui.dialogs_common import *
 
+
+# ── BloodHound CE install guide ──────────────────────────────────────
+# Rendered step-by-step by show_bloodhound_ce_setup_dialog() and copied
+# as one script by its "COPY ALL COMMANDS" button.  Embedded rather than
+# fetched so the guide still works on an air-gapped Kali.
+#
+# Step numbering is referenced from the dialog's own text — the
+# credentials block points at step 7 for the password reset and the
+# troubleshooting appendix points at steps 1 and 2 — so keep the order
+# stable when editing.
+_BHCE_SETUP_STEPS = [
+    ("1. Install the Docker engine",
+     "# Kali ships docker.io in the standard repo.  If you already run\n"
+     "# Docker Desktop or docker-ce, skip this step.\n"
+     "sudo apt update && sudo apt install -y docker.io\n"
+     "sudo systemctl enable --now docker\n"
+     "docker --version"),
+
+    ("2. Install the Docker Compose plugin",
+     "# BH CE ships a compose file and needs compose v2 (the plugin,\n"
+     "# invoked as `docker compose`, NOT the old `docker-compose`).\n"
+     "sudo apt install -y docker-compose-v2 || sudo apt install -y docker-compose-plugin\n"
+     "docker compose version"),
+
+    ("3. Let your user talk to the Docker socket",
+     "# Without this every docker call needs sudo and the compose file\n"
+     "# writes root-owned volumes into your home.\n"
+     "sudo usermod -aG docker \"$USER\"\n"
+     "\n"
+     "# Group membership only applies to NEW logins — load it in the\n"
+     "# current shell instead of logging out:\n"
+     "newgrp docker\n"
+     "docker ps"),
+
+    ("4. Fetch the official compose file",
+     "mkdir -p ~/bloodhound-ce && cd ~/bloodhound-ce\n"
+     "\n"
+     "# SpecterOps publish the current compose file behind a short URL.\n"
+     "curl -L https://ghst.ly/getbhce -o docker-compose.yml\n"
+     "\n"
+     "# Sanity-check what you just downloaded before running it.\n"
+     "head -40 docker-compose.yml"),
+
+    ("5. Pull the images",
+     "# Four images: postgres, neo4j, the bloodhound API and the UI.\n"
+     "# ~2 GB on a cold cache — do this before you're on the clock.\n"
+     "cd ~/bloodhound-ce && docker compose pull"),
+
+    ("6. Start the stack",
+     "cd ~/bloodhound-ce && docker compose up -d\n"
+     "\n"
+     "# Give neo4j ~30s on first boot to initialise its store, then:\n"
+     "cd ~/bloodhound-ce && docker compose ps"),
+
+    ("7. First login — read the one-time password and change it",
+     "# The initial admin password is printed ONCE, in the API logs.\n"
+     "cd ~/bloodhound-ce && docker compose logs bloodhound 2>&1 | "
+     "grep -i 'Initial Password'\n"
+     "\n"
+     "# Username is always:  admin\n"
+     "# BH CE forces a password change on first login — do it there.\n"
+     "\n"
+     "# Locked out later?  Reset to a known value without losing data:\n"
+     "cd ~/bloodhound-ce && docker compose exec bloodhound python3 -c \"\n"
+     "import bcrypt, psycopg2, os\n"
+     "c = psycopg2.connect(os.environ['BHE_DATABASE_CONNECTION'])\n"
+     "h = bcrypt.hashpw(b'HawkRecovered123!', bcrypt.gensalt()).decode()\n"
+     "cur = c.cursor()\n"
+     "cur.execute(\\\"UPDATE auth_secrets SET digest=%s WHERE \\\n"
+     "  user_id=(SELECT id FROM users WHERE principal_name='admin');\\\", (h,))\n"
+     "c.commit(); print('OK - admin reset to HawkRecovered123!')\""),
+
+    ("8. Verify the web UI",
+     "# The compose file binds the UI to loopback only.\n"
+     "curl -s -o /dev/null -w '%{http_code}\\n' http://localhost:8080/ui/login\n"
+     "\n"
+     "xdg-open http://localhost:8080  ||  firefox http://localhost:8080  &"),
+
+    ("9. Collect data and upload it",
+     "# Remote collection from Kali (no agent on the DC):\n"
+     "bloodhound-python -u USER -p PASS -d DOMAIN.LOCAL -dc DC01.DOMAIN.LOCAL "
+     "-c All --zip\n"
+     "\n"
+     "# Or run SharpHound.exe on the target:\n"
+     "#   SharpHound.exe -c All --zipfilename bh.zip\n"
+     "\n"
+     "# Then in the UI:  Administration > File Ingest > Upload Files\n"
+     "# and drop the .zip.  HAWK's own BLOODHOUND card produces the\n"
+     "# same .zip — the path is shown in the run summary."),
+
+    ("10. Day-to-day: stop, update, wipe",
+     "# Stop the stack (data on disk is preserved):\n"
+     "cd ~/bloodhound-ce && docker compose down\n"
+     "\n"
+     "# Update to the latest BH CE release:\n"
+     "cd ~/bloodhound-ce && docker compose pull && docker compose up -d\n"
+     "\n"
+     "# Wipe EVERYTHING including the graph (new engagement, clean DB):\n"
+     "cd ~/bloodhound-ce && docker compose down -v"),
+]
+
+# One-shot version of the steps above, for the COPY ALL COMMANDS button.
+# Deliberately stops before step 7: the initial password has to be read
+# from the logs by a human, so the script prints it and hands over.
+_BHCE_SETUP_SCRIPT = "\n".join([
+    "#!/usr/bin/env bash",
+    "# BloodHound CE — install + first start (Kali).  Generated by HAWK.",
+    "# Run it, then read the admin password it prints at the end.",
+    "set -euo pipefail",
+    "",
+    "sudo apt update",
+    "sudo apt install -y docker.io",
+    "sudo apt install -y docker-compose-v2 || sudo apt install -y docker-compose-plugin",
+    "sudo systemctl enable --now docker",
+    "sudo usermod -aG docker \"$USER\"",
+    "",
+    "mkdir -p ~/bloodhound-ce",
+    "cd ~/bloodhound-ce",
+    "curl -L https://ghst.ly/getbhce -o docker-compose.yml",
+    "",
+    "# `sg docker` runs the compose calls with the new group without",
+    "# needing a fresh login for the rest of this script.",
+    "sg docker -c 'docker compose pull'",
+    "sg docker -c 'docker compose up -d'",
+    "",
+    "echo '[*] Waiting 45s for neo4j / postgres to initialise...'",
+    "sleep 45",
+    "sg docker -c 'docker compose ps'",
+    "",
+    "echo '[*] Initial admin password (user: admin):'",
+    "sg docker -c 'docker compose logs bloodhound' 2>&1 | grep -i 'Initial Password' || \\",
+    "  echo '[!] Not found - run: docker compose logs bloodhound | grep -i password'",
+    "echo '[*] UI: http://localhost:8080'",
+])
+
+
 def show_bloodhound_summary_dialog(parent, target, stats, zip_path,
                                    graph_data=None, on_run_tool=None):
     """Modal dialog shown after `bloodhound-python` completes.
