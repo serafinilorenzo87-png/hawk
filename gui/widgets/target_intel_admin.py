@@ -619,10 +619,12 @@ class TargetIntelAdminMixin:
             ])
 
         def _done(exploits):
-            self.after(0, lambda: self.add_exploit_results(exploits))
+            self.after(0, lambda: self._finish_exploit_search(
+                exploits, runner.errors))
 
-        MsfSearchRunner(progress_callback=_progress, done_callback=_done).search(
-            queries, self._fp)
+        runner = MsfSearchRunner(progress_callback=_progress,
+                                 done_callback=_done)
+        runner.search(queries, self._fp)
 
     def _run_exploit_search_custom(self, keywords: str):
         """Custom-keyword variant of _run_exploit_search.
@@ -656,14 +658,32 @@ class TargetIntelAdminMixin:
             ])
 
         def _done(exploits):
-            self.after(0, lambda: self.add_exploit_results(exploits))
+            self.after(0, lambda: self._finish_exploit_search(
+                exploits, runner.errors))
 
         # fp=None → MsfSearchRunner skips _filter_by_ports so user-typed
         # keywords aren't dropped just because they don't map to an
         # open port on the current target.
-        MsfSearchRunner(
-            progress_callback=_progress, done_callback=_done
-        ).search(queries, fp=None)
+        runner = MsfSearchRunner(
+            progress_callback=_progress, done_callback=_done)
+        runner.search(queries, fp=None)
+
+    def _finish_exploit_search(self, exploits, errors):
+        """Render the results and — crucially — report a FAILED search.
+
+        A missing msfconsole or a 60s timeout used to be swallowed
+        inside MsfSearchRunner and reached the operator as a
+        successful search with zero results: "0 exploits match open
+        ports" for a target that was never actually searched.
+        """
+        for msg in (errors or []):
+            self.app.terminal.write(f"  [!] EXPLOIT SEARCH: {msg}",
+                                    "error")
+        if errors and not exploits:
+            self.app.terminal.write(
+                "  [!] The search did NOT complete — the empty result "
+                "below says nothing about the target.", "error")
+        self.add_exploit_results(exploits)
 
     def _start_cve_search(self):
         # Show the two-mode picker.  Fp-mode uses the existing flow;

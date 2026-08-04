@@ -58,8 +58,10 @@ WEB_TOOLS = {
     "nuclei", "wpscan", "sqlmap", "wafw00f", "whatweb", "dirb",
 }
 SMB_TOOLS = {
+    # These are TOOL IDS, not binary names — tests/test_dialog_contracts
+    # asserts every one of them exists in the module registry.
+    # "crackmapexec_smb" used to sit here and matches no tool at all.
     "enum4linux", "netexec", "smbclient_list",
-    "crackmapexec_smb",
     # rpcclient MUST live here — otherwise the dispatcher in
     # card_routes_scan._route_tool falls through to the generic
     # `_run_raw(tool, tool.build_command(target))` path and launches

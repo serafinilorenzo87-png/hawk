@@ -51,6 +51,22 @@ class CardScanRoutesMixin:
         if tool is None:
             return
 
+        # A tool declared runs_on_target is meant to execute inside the
+        # TARGET shell.  Never dispatch it down the local-run path, no
+        # matter how it got here: several of the Windows built-ins have
+        # same-named binaries on Kali (`whoami`, `net`, `netstat`), so
+        # an availability-gated check let them run locally and report
+        # Kali's state as the target's.
+        if getattr(tool, "runs_on_target", False):
+            # netsh_portfwd has its own guided builder (it needs the
+            # three ports before a command exists at all); it also only
+            # ever produces a paste-in-the-target-shell command.
+            if tool.id == "netsh_portfwd":
+                self._route_netsh_portfwd(tool)
+            else:
+                self._show_target_command_dialog(tool)
+            return
+
         # Generic pre-check: if the tool's binary isn't on PATH, show
         # the install wizard BEFORE routing to any dialog.  Without
         # this, AD tools (bloodhound-python, adidnsdump, certipy, …)

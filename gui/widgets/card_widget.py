@@ -1306,7 +1306,15 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
         if install_first and not installed:
             desc_first = "Not installed — click INSTALL to launch the install wizard"
             desc_color = COLORS["text_yellow"]
-        elif runs_on_target and not installed:
+        elif runs_on_target:
+            # NOT `and not installed`.  Several of these Windows
+            # built-ins have same-named binaries on Kali (`whoami`,
+            # `net`, `netstat`), so gating on local availability sent
+            # them down the normal RUN path: HAWK executed them
+            # LOCALLY and reported Kali's users, privileges and
+            # listening ports as if they were the target's.  A tool
+            # declared runs_on_target runs on the target, whatever is
+            # installed here.
             desc_first = f"▶ Run on target shell — click SHOW to copy command"
             desc_color = COLORS["text_dim"]
         elif avail:
@@ -1337,7 +1345,7 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
             btn_label  = "INSTALL"
             btn_border = COLORS["border_amber"]
             btn_text   = COLORS["text_yellow"]
-        elif runs_on_target and not installed:
+        elif runs_on_target:
             btn_label  = "SHOW"
             btn_border = COLORS.get("text_cyan", "#7EC8E3")
             btn_text   = COLORS.get("text_cyan", "#7EC8E3")
@@ -1361,7 +1369,9 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
             # runs_on_target tools: show the command with a copy button
             # so the user can paste it into the target shell (meterpreter,
             # evil-winrm, cmd, PowerShell, etc.) rather than running locally.
-            if getattr(t, "runs_on_target", False) and not t.is_available():
+            # Local availability is deliberately NOT consulted — see the
+            # matching comment in the row builder above.
+            if getattr(t, "runs_on_target", False):
                 self._show_target_command_dialog(t)
                 return
             self._gate_check(t)

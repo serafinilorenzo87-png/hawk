@@ -103,7 +103,13 @@ class EnumerationModule(BaseModule):
             requires_sudo=False,
         ),
         Tool(
-            id="crackmapexec",
+            # Id is "netexec", NOT "crackmapexec": every GUI dispatcher
+            # keys on "netexec" (card_routes_network._route_tool,
+            # card_runtime's intel-parser hop, card_common.SMB_TOOLS),
+            # so under the old id this tool matched none of them — the
+            # card fell through to the generic raw-run path, never
+            # reached its SMB dialog and never ran its intel parser.
+            id="netexec",
             name="NETEXEC (CME)",
             desc="SMB/WinRM enumeration — works on Windows and Linux. Requires SMB.",
             # Explicit empty creds force a real null-session bind.
