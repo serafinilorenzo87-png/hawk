@@ -53,6 +53,51 @@ _FUZZ_API_HINTS = {
     "service", "services",
 }
 
+# Marker HAWK puts in a finding's `source` when the finding reports
+# what a TOOL did — or failed to do — rather than what the target is.
+_DIAGNOSTIC_SOURCE_MARK = "(diagnostic)"
+
+# Finding sources whose cards must NOT offer EXPLOIT WITH MSF, matched
+# as substrings against the lowercased source:
+#   • Bloody Crawl     — endpoint mapping / IDOR, no CVE.
+#   • Cert advisories  — informational, action via FUZZ VHOSTS /
+#                        ADD HOSTS buttons.
+#   • Vhost / DNS hits — informational, action via ADD HOSTS /
+#                        ATTACK NEW VHOSTS.
+#   • HAWK CVE KB      — the entry already ships an authoritative PoC
+#                        in the description.  The MSF index keyword
+#                        fallback overmatches (e.g. "RCE" →
+#                        java_rmi_server) and was surfacing exploits
+#                        whose required ports aren't even open.
+#   • (diagnostic)     — the finding is about HAWK, not the target.
+#                        "NSE scripts that failed during this scan"
+#                        lists script NAMES, so the keyword fallback
+#                        read `smb-vuln-ms17-010` out of the failure
+#                        list and offered EXPLOIT WITH MSF for
+#                        EternalBlue against a host that was never
+#                        tested for it.
+_MSF_SKIP_SOURCES = (
+    "bloody crawl",
+    "cert-advisory",
+    "connect /",
+    "ffuf-vhost",
+    "gobuster-dns",
+    "hawk cve kb",
+    "post-rce-recon",
+    _DIAGNOSTIC_SOURCE_MARK,
+)
+
+
+def _msf_suggestions_suppressed(source: str) -> bool:
+    """True when a finding's source must not get MSF module suggestions."""
+    src = (source or "").lower()
+    return any(s in src for s in _MSF_SKIP_SOURCES)
+
+
+def _is_diagnostic_source(source: str) -> bool:
+    """True for findings that describe a tool's own failure."""
+    return _DIAGNOSTIC_SOURCE_MARK in (source or "").lower()
+
 
 class TargetIntelRenderMixin:
     # ─── Selectable text helper ───────────────────────────────────────────
@@ -1902,20 +1947,35 @@ class TargetIntelRenderMixin:
                 severity="critical", source="nmap banner",
                 port=ftp_port2)
 
-        # distcc daemon RCE (CVE-2004-2687) — port 3632
-        if re.search(r'distccd|distcc', full_text, re.I):
+        # distcc daemon RCE (CVE-2004-2687).
+        #
+        # Gate on an actual open-port line, not on the bare substring:
+        # `distcc` anywhere in the output (an NSE script name, a
+        # package name echoed by http-* scripts, a page body) used to
+        # emit a CRITICAL RCE hardcoded on port 3632 for a host that
+        # was never running the daemon.  The port now comes from the
+        # match instead of being assumed.
+        m_distcc = re.search(
+            r'^\s*(\d+)/tcp\s+open\s+distcc', full_text, re.I | re.M)
+        if m_distcc:
+            distcc_port = int(m_distcc.group(1))
             self.add_auto_finding(
                 "DistCC daemon RCE (CVE-2004-2687)",
-                f"{target}:3632 — DistCC daemon detected.\n\n"
-                f"DistCC is a distributed C compiler that executes arbitrary\n"
-                f"commands sent over the network without authentication.\n\n"
+                f"{target}:{distcc_port} — DistCC daemon detected.\n\n"
+                f"DistCC is a distributed C compiler that executes compile\n"
+                f"jobs sent over the network. There is no authentication —\n"
+                f"the only access control is the daemon's --allow list.\n\n"
+                f"NOT CONFIRMED — service match only. Exploitable if the daemon\n"
+                f"accepts jobs from your IP (the historic default, and the case\n"
+                f"on Metasploitable2); a daemon started with a restrictive\n"
+                f"--allow will refuse the job.\n\n"
                 f"EXPLOIT: the Metasploit module sends a compile job containing\n"
                 f"a reverse shell payload — returns a shell as the 'daemon' user.\n"
                 f"From there, check for SUID binaries (nmap 5.x is installed on\n"
                 f"Metasploitable and has --interactive → root).\n\n"
                 f"Use the RUN WITH MSF button to launch the Metasploit module.",
                 severity="critical", source="nmap banner",
-                port=3632)
+                port=distcc_port)
 
         # UnrealIRCd 3.2.8.1 backdoor (CVE-2010-2075) — port 6667
         if re.search(r'UnrealIRCd\s+3\.2\.8\.1', full_text, re.I):
@@ -1928,25 +1988,44 @@ class TargetIntelRenderMixin:
                 severity="critical", source="nmap banner",
                 port=6667)
 
-        # Samba usermap_script (CVE-2007-2447) — old Samba on port 139/445
+        # Samba usermap_script (CVE-2007-2447) — port 139/445.
+        #
+        # Version gate is 3.0.0–3.0.25rc3, NOT "anything below 3.4".
+        # The wider gate reported every Samba 3.x banner as a confirmed
+        # CRITICAL RCE: `Samba smbd 3.2.5`, the default on Ubuntu
+        # 8.10/9.04 and on plenty of HTB boxes, is not vulnerable at
+        # all.  FINDING_INFO (see the `usermap_script` entry further
+        # down this file) always had the correct range.
+        #
+        # It stays `high` and not `critical` because the version alone
+        # does not make the box exploitable: CVE-2007-2447 needs
+        # `username map script` configured in smb.conf, which is NOT a
+        # default.  That precondition is now stated in the description
+        # instead of being implied away.
         m_samba = re.search(r'Samba\s+(\d+\.\d+\.\d+)', full_text, re.I)
         if m_samba:
             parts = m_samba.group(1).split(".")
             try:
                 major, minor = int(parts[0]), int(parts[1])
-                if major == 3 and minor < 4:
+                patch = int(parts[2])
+                if major == 3 and minor == 0 and patch <= 25:
                     # Prefer 445 (modern SMB) when available, fallback 139
                     smb_p = (445 if re.search(
                                 r'445/tcp\s+open', full_text)
                              else 139)
                     self.add_auto_finding(
                         f"Samba {m_samba.group(1)} — usermap_script RCE (CVE-2007-2447)",
-                        f"{target} — Samba {m_samba.group(1)} detected (versions < 3.4 "
-                        f"are vulnerable to CVE-2007-2447).\n\n"
-                        f"A username metacharacter injection in the MS-RPC SamrCreateUser\n"
-                        f"call allows unauthenticated RCE as root.\n\n"
+                        f"{target} — Samba {m_samba.group(1)} detected. This is inside "
+                        f"the vulnerable range for CVE-2007-2447 (3.0.0-3.0.25rc3).\n\n"
+                        f"NOT CONFIRMED — version match only. The bug is a username\n"
+                        f"metacharacter injection in the MS-RPC SamrCreateUser call, and\n"
+                        f"it only reaches a shell when smb.conf defines a\n"
+                        f"`username map script` — which is NOT the default. On a stock\n"
+                        f"configuration the exploit fails against a vulnerable version.\n\n"
+                        f"Confirm before reporting: run the MSF module (it fails cleanly\n"
+                        f"if the option is unset), or read smb.conf if you get a shell.\n\n"
                         f"Use the RUN WITH MSF button to launch the Metasploit module.",
-                        severity="critical", source="nmap banner",
+                        severity="high", source="nmap banner",
                         port=smb_p)
             except (ValueError, IndexError):
                 pass
@@ -3675,33 +3754,11 @@ class TargetIntelRenderMixin:
             # log4shell has exploit+scanner, etc.).  The button label
             # adapts — shows a chevron hint when a picker will open.
             #
-            # Skip the lookup entirely for finding sources that carry
-            # their own actionable payload OR for which an MSF module
-            # makes no sense:
-            #   • Bloody Crawl     — endpoint mapping / IDOR, no CVE.
-            #   • Cert advisories  — informational, action via FUZZ
-            #                         VHOSTS / ADD HOSTS buttons.
-            #   • Vhost / DNS hits — informational, action via ADD
-            #                         HOSTS / ATTACK NEW VHOSTS.
-            #   • HAWK CVE KB      — the entry already ships an
-            #                         authoritative PoC in the
-            #                         description.  The MSF index
-            #                         keyword fallback overmatches
-            #                         (e.g. "RCE" → java_rmi_server)
-            #                         and was previously surfacing
-            #                         exploits whose required ports
-            #                         aren't even open on the target.
-            src = (finding.get("source") or "").lower()
-            _SKIP_MSF_SOURCES = (
-                "bloody crawl",
-                "cert-advisory",
-                "connect /",
-                "ffuf-vhost",
-                "gobuster-dns",
-                "hawk cve kb",
-                "post-rce-recon",
-            )
-            if any(s in src for s in _SKIP_MSF_SOURCES):
+            # Some sources carry their own actionable payload, or an
+            # MSF module makes no sense for them at all — see
+            # _MSF_SKIP_SOURCES at the top of this module for the
+            # per-entry rationale.
+            if _msf_suggestions_suppressed(finding.get("source")):
                 exploit_modules = []
             else:
                 exploit_modules = _get_exploits_for_vuln(
@@ -4349,7 +4406,16 @@ class TargetIntelRenderMixin:
         # resolve to the same Exim entry).
         combined = (title + " " + description).lower()
         info = None
-        for key, data in FINDING_INFO.items():
+        # Diagnostic findings describe what a tool failed to do, not
+        # what the target is: their description is a list of NSE script
+        # names, and keyword-matching it against the CVE table pulled
+        # up an EternalBlue card because `smb-vuln-ms17-010` happened
+        # to be among the scripts that ERRORED.  Skip both keyword
+        # lookups for them and go straight to the generic renderer.
+        # (The matching EXPLOIT WITH MSF suppression lives in
+        # _MSF_SKIP_SOURCES.)
+        is_diagnostic = _is_diagnostic_source(finding.get("source"))
+        for key, data in (() if is_diagnostic else FINDING_INFO.items()):
             if key not in combined:
                 continue
             if isinstance(data, str) and data.startswith("__alias__"):
@@ -4366,7 +4432,7 @@ class TargetIntelRenderMixin:
         # Tool-specific info (for recon / info-gathering tools where the
         # CVE-centric FINDING_INFO doesn't apply).  Match on the tool name
         # that HAWK embeds in the finding title, e.g. "WAFW00F — 1.2.3.4".
-        if not info:
+        if not info and not is_diagnostic:
             info = self._recon_tool_info(title, description)
 
         # If still no match, auto-generate structured info from the
