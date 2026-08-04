@@ -17,6 +17,7 @@ Lets user choose payload by OS, architecture, and shell type.
 
 import customtkinter as ctk
 from utils.config import COLORS, SZ
+from gui.dialogs_common import _autosize_window
 
 
 def _f(key="md", bold=False):
@@ -123,8 +124,11 @@ class PayloadSelectorDialog:
         sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
         win.geometry(f"680x620+{(sw-680)//2}+{(sh-620)//2}")
 
-        win.after(80, self._autosize)
-        win.after(250, self._autosize)
+        # Shared autosize helper — this class has no `_autosize` of its
+        # own, and referencing one aborted __init__ before any widget was
+        # built (the dialog could never open).
+        win.after(80, lambda: _autosize_window(win, min_w=680, min_h=620))
+        win.after(250, lambda: _autosize_window(win, min_w=680, min_h=620))
 
         def _reveal():
             try:
