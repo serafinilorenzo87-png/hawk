@@ -24,11 +24,36 @@ never persist.  And ``Finding.to_auto_dict()`` does NOT re-emit the merge
 bookkeeping (occurrences, run_count, first_seen, …) that lives in
 ``Finding.extra`` — rebuilding the dict from a Finding would silently drop
 it.  So the controller writes curation keys directly onto the EXISTING
-source dicts in ``session.phases[*]["findings"]`` and
-``session.target_intel["auto_findings"]`` — lossless, and exactly what
-``session.save()`` serializes.  The report engine then reads the curated
-state back through ``get_all_findings()`` — the dialog SETS, the engine
-COUNTS; the curation logic is never duplicated.
+source dicts.  The report engine then reads the curated state back through
+``get_all_findings()`` — the dialog SETS, the engine COUNTS; the curation
+logic is never duplicated.
+
+WHICH source dicts — the part that used to be wrong
+───────────────────────────────────────────────────
+Phase findings ARE owned by the session: ``session.phases[*]["findings"]``
+is the authoritative list, so writing there is genuinely lossless and is
+exactly what ``session.save()`` serializes.
+
+Auto findings are NOT.  ``session.target_intel["auto_findings"]`` holds
+shallow CLONES that ``sync_target_intel`` rebuilds from the live panel
+list (``TargetIntelWidget._auto_findings``) on every save.  Curating a
+clone meant the next SAVE silently threw the curation away: the operator's
+false positive came back into the report, the severity override and the
+note were gone.  So when the controller is handed the running ``app`` it
+collects auto findings from the LIVE list and re-takes the snapshot in
+``persist()``; the clone then carries the curation keys like any other
+key, for this save and every later one.  With no ``app`` — a session
+loaded from disk, or a headless test — it falls back to the session
+snapshot, which in that case IS the authoritative copy.
+
+CANCEL IS A REAL ROLLBACK
+─────────────────────────
+``__init__`` records, per item, which curation keys the source dict had
+and with which values (and, just as important, which ones it did NOT
+have).  ``revert()`` restores exactly that state.  Mutation stays
+in place — that is what keeps the merge bookkeeping intact — it is simply
+undoable now, so opening the dialog to *look* at a reduced report and
+then cancelling no longer mutates the session for good.
 
 Curation keys follow the Finding serialization convention: a key is
 written only when it deviates from its default and removed when it returns
@@ -38,9 +63,11 @@ to default, so session JSON stays minimal and old builds keep loading.
 from __future__ import annotations
 
 import re
+import sys
 
 from utils.config import KILL_CHAIN_PHASES
 from utils.session import Finding
+from utils.target_intel_sync import live_auto_findings, sync_target_intel
 
 # Severity choices for the override control.  "" / None means "keep the
 # original objective severity" — the override is cleared.
@@ -50,6 +77,13 @@ SEVERITY_KEEP = ""   # the "(none)" option
 _PHASE_LABEL = {p["id"]: (p["name"] or "").title() for p in KILL_CHAIN_PHASES}
 _PHASE_ORDER = [p["id"] for p in KILL_CHAIN_PHASES]
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+# Shown by the dialog (and printed) when the collected set is empty: the
+# operator is one click away from handing the client a report whose body,
+# counts and Target Intelligence section are all empty.
+EMPTY_WARNING = ("No findings collected — the report would be EMPTY "
+                 "(no findings, no Target Intelligence, no ATT&CK). "
+                 "Check the Target Intel panel before exporting.")
 
 
 class CurationItem:
@@ -66,10 +100,22 @@ class CurationItem:
 
 
 class CurationController:
-    def __init__(self, session):
+    def __init__(self, session, app=None):
         self.session = session
+        # The running app, when there is one.  Only used to reach the
+        # LIVE auto-finding dicts and to re-take the Target Intel
+        # snapshot on persist — see the module docstring.  None keeps the
+        # controller fully headless.
+        self.app = app
         self._items: list[CurationItem] = []
+        # Per item, the curation keys the source dict carried BEFORE the
+        # dialog touched anything.  Parallel to _items; consumed by
+        # revert().
+        self._baseline: list[dict] = []
         self._collect()
+        self._snapshot_baseline()
+        if not self._items:
+            print(f"[HAWK] curation: {EMPTY_WARNING}", file=sys.stderr)
 
     # ── build the item list from the persisted source dicts ──
     def _collect(self) -> None:
@@ -100,13 +146,56 @@ class CurationController:
                 if isinstance(raw, dict):
                     n += 1
                     self._items.append(CurationItem(raw, "phase", pid, n))
-        # Target Intel auto-findings.
-        intel = self.session.target_intel if isinstance(
-            self.session.target_intel, dict) else {}
-        for raw in (intel.get("auto_findings") or []):
+        # Target Intel auto-findings.  Prefer the LIVE panel list: the
+        # session copy is a clone that the next save rebuilds, so
+        # curating it would be thrown away (see module docstring).
+        for raw in self._auto_source():
             if isinstance(raw, dict):
                 n += 1
                 self._items.append(CurationItem(raw, "auto", "", n))
+
+    def _auto_source(self) -> list:
+        """The auto-finding dicts to curate: the live panel list when a
+        running app is available, else the session snapshot."""
+        live = live_auto_findings(self.app)
+        if live is not None:
+            return live
+        intel = self.session.target_intel if isinstance(
+            self.session.target_intel, dict) else {}
+        return intel.get("auto_findings") or []
+
+    # ── transaction support (Cancel must undo) ──
+    def _snapshot_baseline(self) -> None:
+        for it in self._items:
+            self._baseline.append({
+                k: (list(it.raw[k]) if isinstance(it.raw[k], list)
+                    else it.raw[k])
+                for k in Finding._CURATION_KEYS if k in it.raw
+            })
+
+    def revert(self) -> None:
+        """Undo every curation write made through this controller.
+
+        Restores each source dict to the exact state recorded at
+        construction: a key that HELD a value gets that value back, a key
+        that was ABSENT is removed again — otherwise a cancelled
+        "included=False" would linger as an explicit ``included=True``
+        and pollute the session JSON.  Only the curation keys are
+        touched; the finding's own data and merge bookkeeping are never
+        in scope."""
+        for it, base in zip(self._items, self._baseline):
+            for key in Finding._CURATION_KEYS:
+                if key in base:
+                    val = base[key]
+                    it.raw[key] = list(val) if isinstance(val, list) else val
+                else:
+                    it.raw.pop(key, None)
+
+    def warning(self) -> str:
+        """Non-empty when the collected set would produce an empty
+        deliverable.  Surfaced by the dialog; the controller also prints
+        it, so a headless generate leaves a trace too."""
+        return EMPTY_WARNING if not self._items else ""
 
     @property
     def items(self) -> list:
@@ -259,7 +348,14 @@ class CurationController:
 
     # ── persistence + generation ──
     def persist(self) -> str:
-        """Write the curation into the session JSON (in-place save)."""
+        """Write the curation into the session JSON (in-place save).
+
+        When the curation went onto the LIVE auto-finding dicts, the
+        session still holds the pre-curation clones — re-take the
+        snapshot first so what gets serialized (and what the report then
+        reads back) is the curated set."""
+        if live_auto_findings(self.app) is not None:
+            sync_target_intel(self.app, self.session)
         return self.session.save(new_file=False)
 
     def generate(self, formats=None, *, branding=None, out_dir=None) -> dict:

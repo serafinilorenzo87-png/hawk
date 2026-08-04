@@ -23,6 +23,12 @@ deliverable: include/exclude, mark false-positive, override severity
 (objective severity is never overwritten — effective = override or
 severity), and annotate.  A live "X of Y included" counter reflects the
 curated set; "Generate report" runs the engine on exactly that set.
+
+"Cancel" is a real rollback (controller.revert()), not just a destroy:
+the setters write straight into the session's own finding dicts, so
+opening the dialog to *see* a reduced report and then backing out must
+leave the session exactly as it was found.  The window-manager X takes
+the same route.
 """
 
 import tkinter as tk
@@ -44,8 +50,11 @@ def open_curation_dialog(app, session, on_generated=None) -> None:
     """Open the pre-export curation review.  ``on_generated`` is called
     with the primary deliverable path (HTML) after a successful generate,
     preserving the one-path contract the report button expects."""
-    controller = CurationController(session)
-    win = _make_win(app, "HAWK — Curate findings before export", 920, 640)
+    controller = CurationController(session, app=app)
+    # Cancel (and the window-manager X) must roll the session back — the
+    # setters write straight into the live/persisted dicts.
+    win = _make_win(app, "HAWK — Curate findings before export", 920, 640,
+                    on_close=controller.revert)
     _title(win, "Review findings before generating the report")
 
     counter = ctk.CTkLabel(win, text="", font=_f("md", True),
@@ -55,12 +64,32 @@ def open_curation_dialog(app, session, on_generated=None) -> None:
     status = ctk.CTkLabel(win, text="", font=_f("sm"),
                           text_color=COLORS["text_dim"])
 
+    # An empty collection means the deliverable would have no findings,
+    # no Target Intelligence and no ATT&CK section — say so loudly here
+    # AND in the terminal instead of printing "0 of 0" and moving on.
+    empty_warning = controller.warning()
+    if empty_warning:
+        ctk.CTkLabel(win, text=empty_warning, font=_f("sm", True),
+                     text_color=COLORS["text_red"], wraplength=860,
+                     justify="left").pack(pady=(0, 6), padx=10)
+        try:
+            app.terminal.write(f"[!] {empty_warning}", "warn")
+        except Exception:
+            pass
+
     def _refresh_counter():
         inc, total = controller.included_count()
         counter.configure(text=f"{inc} of {total} findings included")
 
     scroll = ctk.CTkScrollableFrame(win, fg_color=COLORS["bg_secondary"])
     scroll.pack(fill="both", expand=True, padx=10, pady=6)
+
+    # The free-text controls (operator note, ATT&CK override) commit on
+    # <FocusOut>.  Clicking "Generate report" does not always move focus
+    # out of the entry first, so the LAST field the operator typed in
+    # would be dropped without a word.  Every row registers its commit
+    # here and generate replays them all — the setters are idempotent.
+    pending_commits = []
 
     def _add_row(parent, item):
         view = controller.view(item)
@@ -139,6 +168,7 @@ def open_curation_dialog(app, session, on_generated=None) -> None:
         def _on_tq(_evt=None, it=item, v=tq_var):
             controller.set_techniques(it, v.get())
         tq.bind("<FocusOut>", _on_tq)
+        pending_commits.append(_on_tq)
 
         note_var = tk.StringVar(value=view["operator_note"])
         note = ctk.CTkEntry(ctrl, textvariable=note_var,
@@ -149,6 +179,7 @@ def open_curation_dialog(app, session, on_generated=None) -> None:
         def _on_note(_evt=None, it=item, v=note_var):
             controller.set_operator_note(it, v.get())
         note.bind("<FocusOut>", _on_note)
+        pending_commits.append(_on_note)
 
     for label, items in controller.groups():
         ctk.CTkLabel(scroll, text=label, font=_f("lg", True),
@@ -169,9 +200,21 @@ def open_curation_dialog(app, session, on_generated=None) -> None:
         except Exception:
             pass
 
+    def _cancel():
+        """Cancel means cancel: the setters already wrote into the
+        session's own dicts, so the dialog has to hand back the state it
+        found."""
+        controller.revert()
+        _close()
+
     def _on_generate(btn=None):
         status.configure(text="Generating report…",
                          text_color=COLORS["text_dim"])
+        for commit in pending_commits:
+            try:
+                commit()
+            except Exception:
+                pass
         try:
             win.update_idletasks()
             paths = controller.generate()
@@ -204,5 +247,5 @@ def open_curation_dialog(app, session, on_generated=None) -> None:
             pass
         _close()
 
-    _btn(bar, "Cancel", _close, w=120)
+    _btn(bar, "Cancel", _cancel, w=120)
     _btn(bar, "Generate report", _on_generate, primary=True, w=180)
