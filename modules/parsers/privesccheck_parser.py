@@ -344,15 +344,26 @@ def _emit_finding_and_cred(block: dict, target: str,
         pwd_m = re.search(
             r"(?:Password|Secret|Key)\s*[:=]\s*(\S+)", body)
         pwd = pwd_m.group(1) if pwd_m else ""
-        creds.append({
-            "username":  usr,
-            "password":  pwd,
-            "host":      target,
-            "services":  ["Windows", "PrivescCheck"],
-            "cred_type": "cleartext" if pwd else "hash",
-            "notes":     (f"{name} reported by PrivescCheck — "
-                          f"inspect the finding for details"),
-        })
+        # Only record a credential when we actually extracted one.
+        # A cred-leaky check whose body carried neither a username nor
+        # a password used to append {username: "", password: "",
+        # cred_type: "hash"} — a row in the Credential Store with no
+        # user, no password and no hash, i.e. a credential that does
+        # not exist.  The finding above already tells the operator the
+        # check fired and where to look.
+        if usr or pwd:
+            creds.append({
+                "username":  usr,
+                "password":  pwd,
+                # cred_type says what we HOLD.  Without a password
+                # there is no cleartext; calling it a hash when no
+                # hash was captured was the second half of the lie.
+                "cred_type": "cleartext" if pwd else "username-only",
+                "host":      target,
+                "services":  ["Windows", "PrivescCheck"],
+                "notes":     (f"{name} reported by PrivescCheck — "
+                              f"inspect the finding for details"),
+            })
 
 
 def _normalise_severity(raw: str, check_name: str) -> str:

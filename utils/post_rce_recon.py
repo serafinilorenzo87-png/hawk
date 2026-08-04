@@ -147,10 +147,18 @@ def generate_snippet() -> str:
     # NSS sources and is unaffected by whether the current shell
     # loaded supplementary groups.
     priv_group_names = " ".join(g for g, _, _ in _PRIV_GROUPS)
+    # Exact match on the member list, NOT `grep -wq "$_U"` over the
+    # whole getent line.  grep's word characters are [A-Za-z0-9_], so
+    # `-w svc` matched the member `svc-backup` (the `-` counts as a
+    # boundary) and the group name field matched a same-named user —
+    # both produced a phantom membership, which the analyzer then
+    # reported as a CRITICAL "id lies / hidden group".
+    # `cut -f4` is the member list; the case glob compares whole
+    # comma-separated names.  POSIX sh, no awk, busybox-safe.
     section("NSS_GROUPS", [
         f"_U=$(id -un 2>/dev/null); for g in {priv_group_names}; do "
-        f"getent group $g 2>/dev/null | grep -wq \"$_U\" "
-        f"&& echo \"$g\"; done",
+        f"_M=$(getent group \"$g\" 2>/dev/null | cut -d: -f4); "
+        f"case \",$_M,\" in *\",$_U,\"*) echo \"$g\" ;; esac; done",
     ])
 
     section("SUDO_LIST", [

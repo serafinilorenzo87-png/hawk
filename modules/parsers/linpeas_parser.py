@@ -114,9 +114,75 @@ _DANGEROUS_CAPS = {
 
 
 # ─── Secret-name env detector (shared with winpeas style) ───────────
+# (capability, binary) pairs that ship as a distro DEFAULT.  `getcap
+# -r /` on any stock Debian/Ubuntu/Kali prints
+# `/usr/bin/ping = cap_net_raw+ep`; reporting it as a privesc vector
+# buries the real hits under noise the operator has to dismiss on
+# every single target.
+_DEFAULT_CAP_BINARIES = {
+    "cap_net_raw": {
+        "ping", "ping6", "arping", "traceroute", "traceroute6",
+        "traceroute6.iputils", "mtr", "mtr-packet", "clockdiff",
+        "dumpcap",
+    },
+    "cap_net_admin": {"dumpcap"},
+    "cap_net_bind_service": {"dumpcap"},
+}
+
+# Capabilities whose impact is NOT a path to root.  Everything not
+# listed here keeps the default "high".
+_CAP_SEVERITY = {
+    "cap_net_raw":   "medium",
+    "cap_net_admin": "medium",
+}
+
 _SECRET_ENV_RE = re.compile(
     r"(?i)(pass|pwd|secret|token|key|api[_-]?key|auth|credential|"
     r"session|cookie|private[_-]?key|access[_-]?key|bearer)")
+
+
+# Key names that actually denote a secret VALUE.
+#
+# `_SECRET_ENV_RE` above is deliberately broad — it decides which
+# LINES are worth showing the operator.  It is far too broad to decide
+# that `<key> = <value>` is a credential worth writing into the
+# Credential Store: it has no word boundaries, so it matches `cookie`
+# in `session.cookie_domain`, `key` in `monkey`, `auth` in `author`.
+# A line from a grepped php.ini —
+#     /etc/php/8.2/cli/php.ini:session.cookie_domain = example.com
+# — used to become the credential `password=example.com`, which then
+# reached the report as a fact.  This one is anchored and is applied
+# to the KEY only.
+_PASSWORD_KEY_RE = re.compile(
+    r"(?i)(?:^|[._\-])"
+    r"(?:passwd|password|passphrase|pass|pwd|secret|"
+    r"api[._\-]?key|apikey|access[._\-]?key|secret[._\-]?key|"
+    r"private[._\-]?key|token|bearer)"
+    r"(?:$|[._\-])")
+
+# Values that are configuration, not secrets: URLs, paths, booleans,
+# bare numbers, env-var references and the usual placeholders.
+_NON_SECRET_VALUE_RE = re.compile(
+    r"(?i)^(?:"
+    r"https?://|ftp://|/|\./|~/|\\\\|"
+    r"[$%]\{?[A-Za-z_][\w]*\}?%?$|"
+    r"<[^>]*>$|"
+    r"(?:true|false|null|none|nil|yes|no|on|off|undefined|empty)$|"
+    r"\d+$|"
+    r"(?:changeme|change_me|placeholder|example|test|todo|"
+    r"x{3,}|\*{3,}|your[_\-]?password|password|passwd|secret)$"
+    r")")
+
+
+def _looks_like_a_real_secret(key: str, value: str) -> bool:
+    """True when `<key> = <value>` is worth a Credential Store entry."""
+    if len(value) < 4:
+        return False
+    if not _PASSWORD_KEY_RE.search(key):
+        return False
+    if _NON_SECRET_VALUE_RE.match(value):
+        return False
+    return True
 
 
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -459,10 +525,18 @@ def _parse_capabilities(sections, target, findings):
         if not m:
             continue
         path, caps_str = m.group(1), m.group(2)
+        basename = os.path.basename(path)
         for cap, desc in _DANGEROUS_CAPS.items():
-            if cap in caps_str:
-                hits.append((path, cap, desc))
-                break  # one finding per binary
+            if cap not in caps_str:
+                continue
+            # Distro default → carries no information about this
+            # target.  Keep scanning: dumpcap holds cap_net_raw by
+            # default but a second, non-default capability on the same
+            # binary is still worth reporting.
+            if basename in _DEFAULT_CAP_BINARIES.get(cap, ()):
+                continue
+            hits.append((path, cap, desc))
+            break  # one finding per binary
 
     if not hits:
         return None
@@ -474,7 +548,7 @@ def _parse_capabilities(sections, target, findings):
                 f"Binary: {path}\n"
                 f"Capability: {cap}\n\n"
                 f"Impact: {desc}"),
-            "severity":    "high",
+            "severity":    _CAP_SEVERITY.get(cap, "high"),
             "source":      "linpeas parser",
         })
     return {"name": "File Capabilities", "body": body}
@@ -516,6 +590,37 @@ def _parse_cron_jobs(sections, target, findings):
     return {"name": "Cron Jobs", "body": body}
 
 
+# "not writable" / "isn't writable" is the OPPOSITE claim; matching
+# the bare word inside it inverted the finding.
+_NOT_WRITABLE_RE = re.compile(r"\b(?:not|isn'?t|non)\s+writable", re.I)
+# ls -l mode string: type char + owner/group/other triplets.
+_LS_MODE_RE = re.compile(
+    r"(?:^|\s)[-dlbcps]"
+    r"([-r][-w][-xsS])"      # owner
+    r"([-r][-w][-xsS])"      # group
+    r"([-r][-w][-xtT])"      # other
+    r"(?=\s|$|\.|\+)")
+
+
+def _line_claims_writable(line: str, path: str) -> bool:
+    """True when `line` is positive evidence that `path` is writable.
+
+    Positive evidence is either the word "writable" (not negated) or an
+    ls-style mode string whose group or other write bit is set.  A
+    line that merely mentions the path is not evidence of anything.
+    """
+    if path not in line:
+        return False
+    if _NOT_WRITABLE_RE.search(line):
+        return False
+    if re.search(r"\bwritable\b", line, re.I):
+        return True
+    m = _LS_MODE_RE.search(line)
+    # group or other write bit — owner-write says nothing unless we
+    # already know we ARE the owner, which the line doesn't tell us.
+    return bool(m and ("w" in m.group(2) or "w" in m.group(3)))
+
+
 def _parse_writable_critical_files(sections, target, findings):
     """Writable /etc/passwd, /etc/shadow, /etc/sudoers → CRITICAL."""
     body = (_find_section(sections, "interesting", "files")
@@ -527,13 +632,21 @@ def _parse_writable_critical_files(sections, target, findings):
     criticals = []
     # linPEAS prints "/etc/passwd" in red if writable; after ANSI strip
     # we still see the line, but can't tell if it was red.  We rely on
-    # explicit "[+] /etc/passwd" markers or "(writable)" annotations.
+    # explicit "(writable)" annotations or on an ls-style mode string
+    # with the group/other write bit set.
+    #
+    # The previous pattern was
+    #     <file>.*?(writable|ww|w\+)
+    # which claimed a CRITICAL writable /etc/passwd for
+    #   • any line saying the file is NOT writable — "writable" is a
+    #     substring of "not writable";
+    #   • any line mentioning `www` after the path (www-data owns most
+    #     of what linPEAS greps on a web box).
+    # `ww` and `w+` were never linPEAS tokens in the first place.
     for critical_file in ("/etc/passwd", "/etc/shadow", "/etc/sudoers",
                            "/etc/sudoers.d"):
-        pat = re.compile(
-            rf"{re.escape(critical_file)}.*?(writable|ww|w\+)",
-            re.I)
-        if pat.search(body):
+        if any(_line_claims_writable(ln, critical_file)
+               for ln in body.splitlines()):
             criticals.append(critical_file)
 
     if not criticals:
@@ -731,16 +844,18 @@ def _parse_passwords_in_files(sections, target, findings, creds):
     if not file_hits:
         return None
 
+    pushed = 0
     for path, content in file_hits[:20]:
-        # Try to extract a credential pair.
+        # Try to extract a credential pair.  The KEY has to look like a
+        # password field and the VALUE has to look like a secret —
+        # otherwise this is a config line that merely happens to sit on
+        # a secret-looking row, and inventing a credential out of it
+        # puts a fabricated fact in the report.
         m = re.search(r"[\"']?(\w+)[\"']?\s*[=:]\s*[\"']?([^\"'\s]+)",
                       content)
         if m:
             key, val = m.group(1), m.group(2)
-            # Only push as credential if the value looks non-trivial
-            if len(val) >= 4 and val.lower() not in (
-                    "null", "none", "false", "true", "undefined",
-                    "password", "changeme"):
+            if _looks_like_a_real_secret(key, val):
                 creds.append({
                     "username":  "",
                     "password":  val,
@@ -749,15 +864,19 @@ def _parse_passwords_in_files(sections, target, findings, creds):
                     "cred_type": "cleartext",
                     "notes":     f"Secret '{key}' in {path}",
                 })
+                pushed += 1
 
     lines = [f"  • {p}:  {c[:100]}" for p, c in file_hits[:15]]
     findings.append({
         "title":       f"Passwords/secrets found in files "
                        f"({len(file_hits)})",
         "description": (
-            f"linPEAS grep found potential credentials in config "
-            f"files on {target}.  Each match was pushed to the "
-            f"Credential Store when a value was extractable.\n\n"
+            f"linPEAS grep matched {len(file_hits)} line(s) in config "
+            f"files on {target}. These are CANDIDATES — the grep "
+            f"matches on the line, not on a proven credential.\n"
+            f"{pushed} of them had a password-like key with a "
+            f"secret-looking value and were pushed to the Credential "
+            f"Store; the rest are listed here as evidence only.\n\n"
             + "\n".join(lines)),
         "severity":    "high",
         "source":      "linpeas parser",

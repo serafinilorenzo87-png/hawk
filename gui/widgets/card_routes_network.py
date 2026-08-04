@@ -713,11 +713,28 @@ class CardNetworkRoutesMixin:
             closed         = _re.search(r"161/udp\s+closed", text, _re.I)
 
             def _on_ui():
-                if open_match or open_filt:
+                if open_match:
                     self.app.terminal.write(
-                        "  [+] SNMP port reachable — opening SNMPWALK "
-                        "dialog to enumerate.", "success")
+                        "  [+] SNMP port OPEN (161/udp answered the "
+                        "probe) — opening SNMPWALK to enumerate.",
+                        "success")
                     self._show_snmp_dialog(tool, target, 161)
+                elif open_filt:
+                    # `open|filtered` is nmap saying it got NOTHING
+                    # back: a silent open UDP port and a dropping
+                    # firewall are indistinguishable from the outside.
+                    # It is the NORMAL result for UDP, and calling it
+                    # "port reachable" told the operator a fact nmap
+                    # never established.
+                    self.app.terminal.write(
+                        "  [?] 161/udp open|filtered — no reply. nmap "
+                        "cannot tell an open silent port from a "
+                        "filtered one; this is the usual UDP result. "
+                        "Opening SNMPWALK: an actual community-string "
+                        "reply is what proves the service is there.",
+                        "warn")
+                    self._show_snmp_dialog(tool, target, 161,
+                                           state_confirmed=False)
                 elif filtered_only:
                     self.app.terminal.write(
                         "  [!] SNMP port filtered by firewall. Skip "
@@ -739,12 +756,23 @@ class CardNetworkRoutesMixin:
         r.run(cmd, "NMAP UDP 161 probe")
 
     def _show_snmp_dialog(self, tool, target, port, *,
-                          preset_community=None):
+                          preset_community=None,
+                          state_confirmed: bool = True):
+        """SNMPWALK dialog.
+
+        ``state_confirmed=False`` when the caller only saw
+        `open|filtered` — the subtitle then says what was actually
+        observed instead of asserting the service is there.
+        """
         from gui.dialogs import (_make_win, _title, _sub, _note_box,
                                   _btn_row, _btn, _safe_destroy)
         win = _make_win(self, "SNMPWALK", 560, 440)
         _title(win, "SNMPWALK  —  SNMP Enumeration")
-        _sub(win, f"SNMP detected on port {port}.")
+        _sub(win, f"SNMP detected on port {port}."
+                  if state_confirmed else
+                  f"Port {port}/udp is open|filtered — no reply to the "
+                  f"nmap probe. SNMP is NOT confirmed; this walk is "
+                  f"the test.")
 
         # Plain-language primer — the previous dialog showed two bare
         # dropdowns ("Community string" / "SNMP version") that meant

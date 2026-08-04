@@ -712,6 +712,12 @@ class CardOracleRoutesMixin:
                 resolved.add(_normalize(full))
             return resolved, js_urls
 
+        # A trailing number is not always an object id.  `/api/v2`
+        # matches `^(.*?)(\d+)$` just as well as `/user/2` does, and
+        # the whole API then got probed as an IDOR range.  Reject
+        # prefixes whose last path token is a version marker.
+        VERSION_PREFIX_RE = re.compile(r'(?i)(?:^|/)v(?:er|ersion)?$')
+
         def _detect_idor(endpoints):
             idor_candidates = []
             ID_RE = re.compile(r'^(.*?)(\d+)$')
@@ -721,6 +727,8 @@ class CardOracleRoutesMixin:
                 m = ID_RE.match(path)
                 if m:
                     prefix = m.group(1)
+                    if VERSION_PREFIX_RE.search(prefix.rstrip('/')):
+                        continue
                     num = int(m.group(2))
                     prefix_map.setdefault(prefix, []).append((num, ep))
             for prefix, items in prefix_map.items():
@@ -1016,25 +1024,33 @@ class CardOracleRoutesMixin:
                             _write(f"      {idor['prefix']}{i} "
                                    f"→ {p['status']} ({p['size']}B)"
                                    f"{big}")
-                if sizes:
-                    unique_sizes = len(set(sizes.values()))
-                    idor["probed"] = sizes
-                    idor["unique_sizes"] = unique_sizes
-                    idor["accessible_count"] = len(sizes)
-                    idor_findings.append(idor)
-                    total = idor_max + 1
-                    if unique_sizes > 1:
-                        _write(f"  ⚠ IDOR CONFIRMED: "
-                               f"{len(sizes)}/{total} IDs accessible, "
-                               f"{unique_sizes} unique sizes "
-                               f"— content varies per ID!", "warn")
-                    elif len(sizes) == total:
-                        _write(f"  [?] All {total} IDs return same size "
-                               f"({list(sizes.values())[0]}B) — might be "
-                               f"a generic response, verify manually.")
-                    else:
-                        _write(f"  [+] {len(sizes)}/{total} IDs accessible",
-                               "success")
+                total = idor_max + 1
+                # One accessible id is the page we already crawled —
+                # nothing was enumerated, so there is nothing to
+                # report.  Enumeration needs at least two.
+                if len(sizes) < 2:
+                    if sizes:
+                        _write(f"  [-] only {len(sizes)}/{total} ID(s) "
+                               f"accessible under {idor['prefix']} — no "
+                               f"enumerable range, not reported")
+                    continue
+                unique_sizes = len(set(sizes.values()))
+                idor["probed"] = sizes
+                idor["unique_sizes"] = unique_sizes
+                idor["accessible_count"] = len(sizes)
+                idor_findings.append(idor)
+                if unique_sizes > 1:
+                    _write(f"  ⚠ Enumerable IDs, content varies: "
+                           f"{len(sizes)}/{total} accessible, "
+                           f"{unique_sizes} distinct sizes — "
+                           f"verify authorisation manually", "warn")
+                elif len(sizes) == total:
+                    _write(f"  [?] All {total} IDs return same size "
+                           f"({list(sizes.values())[0]}B) — might be "
+                           f"a generic response, verify manually.")
+                else:
+                    _write(f"  [+] {len(sizes)}/{total} IDs accessible",
+                           "success")
 
         elapsed = time.time() - t0
 
@@ -1109,18 +1125,29 @@ class CardOracleRoutesMixin:
         if idor_findings:
             parts.append(f"\n{'─' * 50}")
             for idor in idor_findings:
-                confirmed = idor["unique_sizes"] > 1
-                header = ("⚠ IDOR CONFIRMED" if confirmed
-                          else "IDOR CANDIDATE")
+                varies = idor["unique_sizes"] > 1
+                header = ("⚠ IDOR CANDIDATE (content varies per ID)"
+                          if varies else "IDOR CANDIDATE")
                 parts.append(f"{header}: {idor['prefix']}[ID]\n")
                 parts.append(
                     f"  Accessible: {idor['accessible_count']}/"
                     f"{idor_max + 1} IDs  |  "
                     f"Unique sizes: {idor['unique_sizes']}")
-                if confirmed:
+                if varies:
+                    # NOT a confirmation.  All HAWK observed is that
+                    # sequential ids are reachable and return different
+                    # bodies — which is how every per-object endpoint
+                    # behaves, authorised or not.  Confirming IDOR
+                    # needs two identities, and HAWK only ever used
+                    # one.  The old wording ("IDOR CONFIRMED — other
+                    # users' data is likely exposed") went into the
+                    # client report as a finding.
                     parts.append(
-                        "  → Content varies per ID = different "
-                        "users' data is likely exposed!")
+                        "  → Content varies per ID. That is normal for "
+                        "any per-object endpoint and is NOT proof of "
+                        "an authorisation flaw: HAWK probed with a "
+                        "single identity. Confirm per step 5 below "
+                        "before reporting.")
                 probed = idor.get("probed", {})
                 big_ids = [i for i, sz in probed.items()
                            if sz > 100_000]

@@ -184,9 +184,18 @@ def generate_snippet() -> str:
     # Unquoted service paths.  Win32_Service via CIM is portable
     # back to Win 7 / 2008 R2 — wmic is deprecated on Win11/2022
     # so we don't use it.  We filter for services where:
-    #   - the path contains a space AND
-    #   - it isn't already quoted with leading "
+    #   - it isn't already quoted with a leading " AND
+    #   - the EXECUTABLE PATH contains a space
     # which is the classic vulnerable shape (C:\Program Files\…\foo.exe).
+    #
+    # "the executable path", not "the PathName": PathName includes the
+    # arguments, and `-match ' '` over the whole string made every
+    # stock svchost service —
+    #     C:\Windows\system32\svchost.exe -k netsvcs -p
+    # — a HIGH privesc candidate. There is no space in that exe path;
+    # the spaces are in the arguments and Windows never mis-parses
+    # them. Splitting on `.exe` and testing only what comes before it
+    # keeps the real hits and drops that entire class.
     # NOTE the `\x22` instead of a literal double quote: the whole
     # payload lives inside ONE pair of cmd double quotes (see the
     # invariant at the bottom of this function), so a literal `"`
@@ -198,7 +207,7 @@ def generate_snippet() -> str:
         "Get-CimInstance Win32_Service "
         "| Where-Object { $_.PathName -and "
         "$_.PathName -notmatch '^\\x22' -and "
-        "$_.PathName -match ' ' } "
+        "(($_.PathName -split '(?i)\\.exe')[0]) -match ' ' } "
         "| Select-Object Name, PathName, StartMode, StartName "
         "| Format-Table -AutoSize | Out-String -Width 4096",
     ])
@@ -302,6 +311,27 @@ def _extract_section(blob: str, name: str) -> str:
     if nl == -1 or nl >= end:
         return ""
     return blob[nl + 1:end].rstrip("\n").rstrip()
+
+
+def _aie_hive_is_set(aie_text: str, hive: str) -> bool:
+    """True when `hive`'s OWN reg-query block reports 0x1.
+
+    The AIE section holds the output of two `reg query` calls, one per
+    hive, back to back.  The previous check was a single DOTALL
+    regex — `HKEY_LOCAL_MACHINE.*?AlwaysInstallElevated\\s+REG_DWORD\\s+0x1`
+    — whose `.*?` walked straight past the HKLM block's `0x0` and
+    matched the value line in the HKCU block below it.  Both probes
+    then returned True and a lone 0x1 on HKCU was reported as the
+    CRITICAL "both keys are set" condition, which is not exploitable.
+    Scope the search to the block that belongs to the hive.
+    """
+    for block in re.split(r"(?m)^(?=HKEY_)", aie_text or ""):
+        if not block.startswith(hive):
+            continue
+        if re.search(r"AlwaysInstallElevated\s+REG_DWORD\s+0x0*1\b",
+                     block, re.I):
+            return True
+    return False
 
 
 def _extract_target_label(out: dict) -> str:
@@ -415,12 +445,8 @@ def analyze_output(text: str) -> dict:
     #     HKEY_LOCAL_MACHINE\…\Installer
     #         AlwaysInstallElevated    REG_DWORD    0x1
     aie_text = _extract_section(blob, "AIE")
-    hklm_set = bool(re.search(
-        r"HKEY_LOCAL_MACHINE.*?AlwaysInstallElevated\s+REG_DWORD\s+0x1",
-        aie_text, re.S))
-    hkcu_set = bool(re.search(
-        r"HKEY_CURRENT_USER.*?AlwaysInstallElevated\s+REG_DWORD\s+0x1",
-        aie_text, re.S))
+    hklm_set = _aie_hive_is_set(aie_text, "HKEY_LOCAL_MACHINE")
+    hkcu_set = _aie_hive_is_set(aie_text, "HKEY_CURRENT_USER")
     if hklm_set and hkcu_set:
         out["findings"].append({
             "title":       (f"AlwaysInstallElevated enabled on "
