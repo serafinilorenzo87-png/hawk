@@ -123,6 +123,7 @@ class JwtAnalysisResult:
     findings:        list = field(default_factory=list)
     elapsed_secs:    float = 0.0
     wordlist_used:   str = ""
+    cancelled:       bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -142,6 +143,7 @@ class JwtAnalysisResult:
             "findings":         list(self.findings),
             "elapsed_secs":     self.elapsed_secs,
             "wordlist_used":    self.wordlist_used,
+            "cancelled":        self.cancelled,
         }
 
 
@@ -389,6 +391,17 @@ def analyze_token(token: str,
             log(f"[none] Forge failed: {e}", "warn")
 
     if is_cancelled and is_cancelled():
+        # Never fall through silently: an aborted run must not look
+        # like a clean negative result to the operator.
+        log("[!] Analysis cancelled before the brute-force stage", "warn")
+        result.cancelled = True
+        result.findings.append({
+            "title": "JWT analysis cancelled",
+            "severity": "info",
+            "evidence": [
+                "Cancelled by the operator before the brute-force "
+                "stage — the signing secret was NOT tested."],
+        })
         result.elapsed_secs = time.time() - t0
         return result
 
@@ -470,6 +483,19 @@ def analyze_token(token: str,
                         "flipped) — see result.forged_admin", "success")
                 except Exception as e:
                     log(f"[role] Forge admin token failed: {e}", "warn")
+        elif is_cancelled and is_cancelled():
+            # crack_hs256 also returns None on cancel — the wordlist was
+            # not exhausted, so "no weak secret" would be a lie.
+            result.cancelled = True
+            log("[brute] Cancelled — wordlist not exhausted", "warn")
+            result.findings.append({
+                "title": "JWT analysis cancelled",
+                "severity": "info",
+                "evidence": [
+                    f"Wordlist: {result.wordlist_used}",
+                    "Brute-force stopped on operator cancel — the "
+                    "absence of a weak secret is NOT established."],
+            })
         else:
             log("[brute] No weak secret in wordlist", "info")
             if not used_wallarm:

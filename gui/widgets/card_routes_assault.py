@@ -370,6 +370,11 @@ class CardAssaultRoutesMixin:
             self.app.after(0, lambda r=result: self._jwt_finalize(
                 tool, r, log_lines))
 
+        # Clear a leftover STOP from a previous run, otherwise the job
+        # sees is_cancelled() already True and exits without testing
+        # anything while still reporting "completed".
+        if state is not None:
+            state.reset_cancel()
         cancel_event = (state.cancel_event if state is not None
                         else threading.Event())
         job = JwtAnalyzerJob(
@@ -423,12 +428,18 @@ class CardAssaultRoutesMixin:
                     < SEV_RANK.get(worst, 99):
                 worst = f.get("severity")
 
+        cancelled = getattr(result, "cancelled", False)
+        if cancelled:
+            parts.append("RUN CANCELLED — the analysis is incomplete; "
+                         "no conclusion can be drawn from it.")
+
         title = ("JWT Analyzer — secret recovered"
                  if result.cracked_secret else
                  ("JWT Analyzer — alg:none accepted"
                   if any("none" in f.get("title","").lower()
                          for f in result.findings)
-                  else "JWT Analyzer — token analysis"))
+                  else ("JWT Analyzer — analysis cancelled" if cancelled
+                        else "JWT Analyzer — token analysis")))
 
         try:
             self.app.target_intel.add_auto_finding(
@@ -459,13 +470,23 @@ class CardAssaultRoutesMixin:
 
         state = getattr(self.app, "assault_state", None)
         if state is not None:
-            state.set_step("jwt", "done")
+            if cancelled:
+                state.set_step("jwt", "error", "cancelled by operator")
+            else:
+                state.set_step("jwt", "done")
 
-        terminal.write(
-            f"[+] JWT ANALYZER complete: "
-            f"{len(result.findings)} finding(s) — "
-            f"{result.elapsed_secs:.2f}s",
-            "success")
+        if cancelled:
+            terminal.write(
+                f"[!] JWT ANALYZER cancelled: "
+                f"{len(result.findings)} finding(s) — "
+                f"{result.elapsed_secs:.2f}s (analysis incomplete)",
+                "warn")
+        else:
+            terminal.write(
+                f"[+] JWT ANALYZER complete: "
+                f"{len(result.findings)} finding(s) — "
+                f"{result.elapsed_secs:.2f}s",
+                "success")
 
         try:
             self._on_done(tool, tool.name, 0,
@@ -754,6 +775,10 @@ class CardAssaultRoutesMixin:
             self.app.after(0, lambda s=stats:
                            self._inject_finalize(tool, s, log_lines))
 
+        # Clear a leftover STOP from a previous run — see the same
+        # guard in _run_jwt_analyzer.
+        if state is not None:
+            state.reset_cancel()
         cancel_event = (state.cancel_event if state is not None
                         else threading.Event())
         job = InjectionTesterJob(
@@ -783,12 +808,36 @@ class CardAssaultRoutesMixin:
         confirmed = stats.get("confirmed", 0)
         probable  = stats.get("probable", 0)
         elapsed   = stats.get("elapsed", 0.0)
-        terminal.write(
-            f"[+] INJECTION complete: {confirmed} confirmed, "
-            f"{probable} probable — {elapsed:.1f}s", "success")
+        tested    = stats.get("tested", 0)
+        cancelled = bool(stats.get("cancelled"))
+        if cancelled:
+            terminal.write(
+                f"[!] INJECTION cancelled after {tested} parameter(s): "
+                f"{confirmed} confirmed, {probable} probable — "
+                f"{elapsed:.1f}s (coverage incomplete, the untested "
+                f"parameters are NOT clean)", "warn")
+            try:
+                self.app.target_intel.add_auto_finding(
+                    title="Injection test cancelled",
+                    description=(
+                        f"The Injection Tester was cancelled after "
+                        f"{tested} parameter(s).  Parameters that were "
+                        f"not reached have NOT been tested — this run "
+                        f"establishes nothing about them."),
+                    severity="info", source="Injection Tester")
+            except Exception as e:
+                terminal.write(
+                    f"  [!] could not push cancel finding: {e}", "warn")
+        else:
+            terminal.write(
+                f"[+] INJECTION complete: {confirmed} confirmed, "
+                f"{probable} probable — {elapsed:.1f}s", "success")
         state = getattr(self.app, "assault_state", None)
         if state is not None:
-            state.set_step("inject", "done")
+            if cancelled:
+                state.set_step("inject", "error", "cancelled by operator")
+            else:
+                state.set_step("inject", "done")
         try:
             self._on_done(tool, tool.name, 0,
                           [(t, m) for t, m in log_lines])

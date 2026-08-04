@@ -250,7 +250,8 @@ class InjectionTesterJob:
         self.on_done      = on_done or (lambda *_: None)
         self._thread      = None
         self._stats       = {"tested": 0, "confirmed": 0, "probable": 0,
-                              "skipped": 0, "elapsed": 0.0}
+                              "skipped": 0, "elapsed": 0.0,
+                              "cancelled": False}
 
     # ── Lifecycle ───────────────────────────────────────────────
     def cancel(self):
@@ -332,10 +333,14 @@ class InjectionTesterJob:
                     self._test_upload(target)
 
             self._stats["elapsed"] = time.time() - t0
+            # Report the abort: a cancelled sweep covered only part of
+            # the targets, so "0 confirmed" is not a clean result.
+            self._stats["cancelled"] = self.is_cancelled()
             self.on_done(self._stats)
         except Exception as e:
             self.on_log(f"[!] Injection job crashed: {e}", "error")
             self._stats["elapsed"] = time.time() - t0
+            self._stats["cancelled"] = self.is_cancelled()
             self.on_done(self._stats)
 
     # ── Request helpers ─────────────────────────────────────────
