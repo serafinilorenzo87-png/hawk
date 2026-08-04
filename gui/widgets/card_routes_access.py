@@ -46,6 +46,40 @@ from utils.runner import ToolRunner, MultiRunner, MetasploitRunner, GreenBoneRun
 from utils.session import Credential
 from gui.widgets.card_common import *
 
+
+def parse_john_show(stdout: str) -> list:
+    """Return [(username, password)] from `john --show` output.
+
+    john echoes the ORIGINAL passwd-format line with the hash field
+    replaced by the cracked plaintext:
+
+        bob:S3cr:et!:1001:1001::/home/bob:/bin/bash
+
+    The old `^([^:]+):([^:]+):` stopped at the first colon INSIDE the
+    password and stored `S3cr` — a wrong password saved as a fact, with
+    nothing on screen to say it had been truncated.  The tail is a
+    fixed five fields (uid:gid:gecos:home:shell), so everything between
+    the username and that tail is the password, colons included.
+    (Twin of the same bug in crack_runner.py.)
+    """
+    out = []
+    for line in (stdout or "").splitlines():
+        if ":" not in line or line.startswith("0 password"):
+            continue
+        if line.endswith("password hashes cracked"):
+            continue
+        parts = line.split(":")
+        if len(parts) >= 7:
+            user, pw = parts[0], ":".join(parts[1:-5])
+        elif len(parts) >= 2:
+            user, pw = parts[0], ":".join(parts[1:])
+        else:
+            continue
+        if pw and pw not in ("*", "!", "x"):
+            out.append((user, pw))
+    return out
+
+
 class CardAccessRoutesMixin:
     def _gate_check(self, tool, _skip_privesc_dialog=False,
                      _skip_winpeas_exe_preflight=False):
@@ -325,17 +359,8 @@ class CardAccessRoutesMixin:
                 capture_output=True, text=True, timeout=30,
                 errors="replace")
 
-            cracked_count = 0
-            cracked_list = []
-            for line in (show_r.stdout or "").splitlines():
-                if ":" in line and not line.startswith("0 password"):
-                    m = re.match(r"^([^:]+):([^:]+):", line)
-                    if m and not line.endswith("password hashes cracked"):
-                        user = m.group(1)
-                        pw = m.group(2)
-                        if pw and pw not in ("*", "!", "x"):
-                            cracked_list.append((user, pw))
-                            cracked_count += 1
+            cracked_list = parse_john_show(show_r.stdout or "")
+            cracked_count = len(cracked_list)
 
             total_match = re.search(
                 r"(\d+) password hash(?:es)? cracked",

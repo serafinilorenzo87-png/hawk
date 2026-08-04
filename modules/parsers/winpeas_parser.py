@@ -181,6 +181,38 @@ def parse_winpeas(text: str,
     # Drop empty section reports (helpers return None if nothing found).
     section_reports = [s for s in section_reports if s]
 
+    # No recognised section header anywhere means the splitter put the
+    # WHOLE output into `_preamble`, every one of the 13 section
+    # parsers looked up a section that does not exist and returned
+    # None, and the summary below would have reported a clean parse of
+    # nothing.  That happens whenever the box-drawing characters are
+    # lost — a mangled code page, a copy-paste through a terminal that
+    # stripped them, `winpeas.bat` output piped through `find`/`more`.
+    # Say so instead of reporting silence as success.
+    unparsed = (list(sections.keys()) == ["_preamble"]
+                and bool(text.strip()))
+    if unparsed:
+        findings.append({
+            "title": f"winPEAS output not parsed — no section headers "
+                     f"({target})",
+            "description": (
+                "HAWK found no winPEAS section headers (the "
+                "`╔══════════╣ <name>` lines) in this output, so none "
+                "of the section parsers ran and NOTHING below was "
+                "checked — this is not a clean result.\n\n"
+                "Usual causes:\n"
+                "  • the box-drawing characters were lost in transit "
+                "(wrong code page, copy-paste through a terminal that "
+                "stripped them, output piped through more/find)\n"
+                "  • only a fragment of the run was captured\n\n"
+                "Fix: re-run winPEAS with output redirected to a file "
+                "on the target (`winPEASx64.exe > peas.txt`), transfer "
+                "the file, and load THAT — do not copy from the "
+                "console."),
+            "severity": "medium",
+            "source":   "winpeas parser",
+        })
+
     # ── Severity tally for the summary finding ─────────────────────
     sev_counts = {"critical": 0, "high": 0, "medium": 0,
                   "low": 0, "info": 0}
@@ -368,6 +400,25 @@ def _parse_system_info(sections, target, findings):
     return {"name": "System Information", "body": body}
 
 
+def _priv_state(line: str) -> str:
+    """'enabled' / 'disabled' / '' for one privilege line.
+
+    Handles both `whoami /priv`'s State column and winPEAS.exe's
+    SE_PRIVILEGE_* flag constants.  Only SE_PRIVILEGE_ENABLED counts as
+    enabled: SE_PRIVILEGE_ENABLED_BY_DEFAULT on its own describes the
+    token's default, not its current state.
+    """
+    s = (line or "").upper()
+    s_wo_default = s.replace("SE_PRIVILEGE_ENABLED_BY_DEFAULT", "")
+    if "SE_PRIVILEGE_ENABLED" in s_wo_default:
+        return "enabled"
+    if "SE_PRIVILEGE_REMOVED" in s or re.search(r"\bDISABLED\b", s):
+        return "disabled"
+    if re.search(r"\bENABLED\b", s_wo_default):
+        return "enabled"
+    return ""
+
+
 def _parse_token_privs(sections, target, findings):
     """Detect dangerous privileges in the `whoami /priv` dump."""
     body = (_find_section(sections, "token", "priv")
@@ -376,18 +427,28 @@ def _parse_token_privs(sections, target, findings):
     if not body:
         return None
 
-    # Focus on the typical table format:
-    #   SeImpersonatePrivilege   Impersonate a client after auth   Enabled
+    # Two output shapes reach this parser, and the old pattern
+    #     ^<priv>\s+.*?\b(Enabled|Disabled)\b
+    # only ever matched the first one:
+    #
+    #   `whoami /priv` table — name at column 0, state as a word:
+    #     SeImpersonatePrivilege   Impersonate a client after auth   Enabled
+    #
+    #   winPEAS.exe's own dump — INDENTED, and the state is a flag
+    #   constant whose ENABLED is glued to an underscore, so
+    #   `\bEnabled\b` never matched it:
+    #     SeImpersonatePrivilege: SE_PRIVILEGE_ENABLED_BY_DEFAULT, SE_PRIVILEGE_ENABLED
+    #
+    # SeImpersonatePrivilege is the prerequisite of the entire Potato
+    # chain, and it was being dropped in silence on every winPEAS.exe
+    # run.
     dangerous_found = []
     for priv, (sev, hint) in _DANGEROUS_PRIVS.items():
-        # Match the privilege name followed (eventually) by "Enabled".
-        # winPEAS keeps them on a single line and colour-codes the state;
-        # after ANSI strip the raw text remains.
         pat = re.compile(
-            rf"^{re.escape(priv)}\s+.*?\b(Enabled|Disabled)\b",
+            rf"^[^\S\n]*{re.escape(priv)}[^\S\n]*[:\s][^\n]*$",
             re.M | re.I)
         m = pat.search(body)
-        if m and m.group(1).lower() == "enabled":
+        if m and _priv_state(m.group(0)) == "enabled":
             dangerous_found.append((priv, sev, hint))
 
     if not dangerous_found:
@@ -421,8 +482,26 @@ def _parse_always_install_elevated(sections, target, findings):
     if not body:
         return None
 
-    hklm = _scrape(body, r"HKLM.*?(0x[01])")
-    hkcu = _scrape(body, r"HKCU.*?(0x[01])")
+    # Read the value off the SAME LINE as the key name.
+    #
+    # `_scrape(body, r"HKLM.*?(0x[01])")` searched the whole body, and
+    # in the fallback path that body is an entire unrelated winPEAS
+    # section that merely mentions AlwaysInstallElevated somewhere.
+    # `.*?` then walked to the first `0x1` anywhere below — a value
+    # belonging to some other registry key — and the parser announced
+    # the CRITICAL "any MSI runs as SYSTEM" condition off it.
+    hklm = hkcu = ""
+    for ln in body.splitlines():
+        if "alwaysinstallelevated" not in ln.lower():
+            continue
+        m = re.search(r"(0x[01])\b", ln, re.I)
+        if not m:
+            continue
+        val = m.group(1).lower()
+        if re.search(r"\bHKLM\b|HKEY_LOCAL_MACHINE", ln, re.I):
+            hklm = hklm or val
+        elif re.search(r"\bHKCU\b|HKEY_CURRENT_USER", ln, re.I):
+            hkcu = hkcu or val
     if not (hklm or hkcu):
         return None
 
@@ -667,6 +746,43 @@ def _parse_modifiable_services(sections, target, findings):
     return {"name": "Modifiable Services", "body": body}
 
 
+_SCHTASKS_FIELD_RE = re.compile(r"^\s*([A-Za-z][A-Za-z /]*?)\s*:\s*(.*)$")
+
+
+def _schtasks_records(body: str) -> list:
+    """Split `schtasks /query /fo LIST /v` output into per-task dicts.
+
+    Replaces a three-hop DOTALL regex
+        TaskName…\\n.*?Run As User…\\n.*?Task To Run…
+    which was wrong twice over:
+
+    * schtasks prints `Task To Run` BEFORE `Run As User`, so the third
+      hop skipped past the end of the current record and picked up the
+      NEXT task's binary.  Every task was reported with someone else's
+      executable and roughly half were lost.
+    * three nested lazy `.*?` over the whole section backtrack
+      cubically.  On a real host's task list (hundreds of records) a
+      near-miss could pin the GUI thread for minutes.
+
+    A field-per-line walk is linear and does not care about ordering.
+    """
+    records, cur = [], {}
+    for line in body.splitlines():
+        m = _SCHTASKS_FIELD_RE.match(line)
+        if not m:
+            continue
+        key = re.sub(r"\s+", " ", m.group(1)).strip().lower()
+        val = m.group(2).strip()
+        # A second TaskName/HostName opens the next record.
+        if key in ("taskname", "hostname") and cur.get("taskname"):
+            records.append(cur)
+            cur = {}
+        cur[key] = val
+    if cur.get("taskname"):
+        records.append(cur)
+    return records
+
+
 def _parse_scheduled_tasks(sections, target, findings):
     """Scheduled tasks — weak permissions on the binary/script the task
     runs means scheduled RCE as whoever owns the task."""
@@ -680,11 +796,13 @@ def _parse_scheduled_tasks(sections, target, findings):
     # AND an executable path in a user-writable location.  We can't
     # assess ACLs from text alone, so we just flag tasks where the
     # "Run As User" is SYSTEM/admin and ask the user to verify.
-    tasks = re.findall(
-        r"TaskName[:\s]+([^\n]+?)\n.*?"
-        r"Run As User[:\s]+([^\n]+?)\n.*?"
-        r"Task To Run[:\s]+([^\n]+)",
-        body, re.S | re.I)
+    tasks = []
+    for rec in _schtasks_records(body):
+        name = rec.get("taskname", "")
+        user = rec.get("run as user", "")
+        action = rec.get("task to run", "")
+        if name and user:
+            tasks.append((name, user, action))
     if not tasks:
         return None
 
@@ -781,6 +899,17 @@ def _parse_dpapi(sections, target, findings):
     return {"name": "DPAPI Master Keys", "body": body}
 
 
+# `netsh wlan show profile <name> key=clear` prints
+#     SSID name              : "HomeNet"
+#     Key Content            : Sup3rWiFi!2026
+# winPEAS.exe condenses it to `SSID: …` / `Password: …`.
+_WIFI_SSID_RE = re.compile(
+    r"^\s*SSID(?:\s+name)?\s*[:=]\s*(.+?)\s*$", re.I)
+_WIFI_NAME_RE = re.compile(r"^\s*Name\s*[:=]\s*(.+?)\s*$", re.I)
+_WIFI_KEY_RE = re.compile(
+    r"^\s*(?:Key\s+Content|Password|PSK)\s*[:=]\s*(.*?)\s*$", re.I)
+
+
 def _parse_wifi(sections, target, findings, creds):
     """Wi-Fi profiles with cleartext keys (`netsh wlan show profile
     key=clear`)."""
@@ -790,10 +919,46 @@ def _parse_wifi(sections, target, findings, creds):
     if not body:
         return None
 
-    # Match SSID + keys that winPEAS prints side-by-side.
-    profiles = re.findall(
-        r"SSID[:\s]+(.+?)\s*\n.*?(?:Key Content|Password)[:\s]+(.+)",
-        body, re.S | re.I)
+    # Walk the profile block line by line and pair each key with the
+    # SSID above it.
+    #
+    # The old pattern was
+    #     SSID[:\s]+(.+?)\s*\n.*?(?:Key Content|Password)[:\s]+(.+)
+    # with DOTALL, which broke three ways at once on real
+    # `netsh wlan show profile … key=clear` output:
+    #   • `SSID[:\s]+` matched the SSID NAME label, so the captured
+    #     "SSID" was `name              : "HomeNet"`;
+    #   • the trailing `(.+)` under DOTALL swallowed THE REST OF THE
+    #     SECTION as the PSK — that string went into the Credential
+    #     Store as a Wi-Fi password;
+    #   • the greedy tail left nothing for findall to iterate, so only
+    #     the first profile was ever reported.
+    profiles = []
+    current_ssid = ""
+    fallback_name = ""
+    for line in body.splitlines():
+        m = _WIFI_SSID_RE.match(line)
+        if m:
+            current_ssid = m.group(1).strip().strip('"')
+            continue
+        m = _WIFI_NAME_RE.match(line)
+        if m:
+            fallback_name = m.group(1).strip().strip('"')
+            continue
+        m = _WIFI_KEY_RE.match(line)
+        if not m:
+            continue
+        key = m.group(1).strip()
+        # `Security key : Present` is a presence flag, not a key; the
+        # key regex already excludes it, but netsh also prints
+        # "Absent"/"N/A" in the Key Content slot on open networks.
+        if not key or key.lower() in ("present", "absent", "n/a", "none"):
+            continue
+        ssid = current_ssid or fallback_name
+        if not ssid:
+            continue
+        profiles.append((ssid, key))
+        current_ssid = ""
     if not profiles:
         return None
 

@@ -461,15 +461,25 @@ def _parse_suid_binaries(sections, target, findings):
 
     gtfo_hits = []
     all_suids = []
-    # SUID lines in linPEAS look like:
-    #   -rwsr-xr-x 1 root root 61240 /bin/mount
+    # SUID lines in linPEAS are plain `ls -l` rows, e.g.
+    #   -rwsr-xr-x 1 root root 55K Jan 20  2022 /usr/bin/mount
+    #   -rwsr-sr-x 1 daemon daemon 55K Nov 12  2018 /usr/bin/at  --->  RTF
+    #
+    # The old pattern went mode, links, owner, group, size, PATH — it
+    # had no place for the three date fields, and `ls` prints a
+    # human-readable size ("55K") rather than a byte count, so it
+    # matched nothing at all and the WHOLE SUID section was dropped in
+    # silence.  Anchor on the mode column and take the first absolute
+    # path on the line: that also survives the `---> ` annotations
+    # linPEAS appends and a non-English locale in the date fields.
     for line in body.splitlines():
-        m = re.match(
-            r"^\s*(-[rwxsSTt-]{9})\s+\d+\s+\S+\s+\S+\s+\d+\s+"
-            r"(/\S+)", line)
+        m = re.match(r"^\s*(-[rwxsSTt-]{9})[.+]?(?=\s)", line)
         if not m:
             continue
-        perms, path = m.group(1), m.group(2)
+        path_m = re.search(r"\s(/\S+)", line)
+        if not path_m:
+            continue
+        perms, path = m.group(1), path_m.group(1)
         if "s" not in perms.lower():
             continue
         all_suids.append(path)
@@ -771,9 +781,21 @@ def _parse_ssh_keys(sections, target, findings, creds):
         return None
 
     # linPEAS dumps filenames of readable private keys.
+    #
+    # Two bugs in the old pattern
+    # `(/(?:home|root)/[^\s:]+/\.ssh/[^\s:]*id_\w+)`:
+    #   • `[^\s:]+` between the prefix and `/.ssh/` needed at least
+    #     one path component, so `/root/.ssh/id_rsa` — the single most
+    #     valuable key on any box — could never match;
+    #   • `id_\w+` stops at the dot, so `/home/bob/.ssh/id_rsa.pub`
+    #     was captured as `/home/bob/.ssh/id_rsa` and a PUBLIC key was
+    #     reported (and pushed to the Credential Store) as a private
+    #     one that may not even exist.
+    # `(?!\w)` before `(?!\.pub)` matters: without it the engine
+    # backtracks to `id_rs` and the .pub exclusion never bites.
     key_paths = []
     for m in re.finditer(
-            r"(/(?:home|root)/[^\s:]+/\.ssh/[^\s:]*id_\w+)", body):
+            r"(/[^\s:]*/\.ssh/id_[A-Za-z0-9_]+)(?!\w)(?!\.pub)", body):
         key_paths.append(m.group(1))
 
     # Dedup preserve order

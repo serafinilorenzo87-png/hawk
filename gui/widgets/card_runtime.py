@@ -46,6 +46,37 @@ from utils.runner import ToolRunner, MultiRunner, MetasploitRunner, GreenBoneRun
 from utils.session import Credential
 from gui.widgets.card_common import *
 
+
+def kerbrute_run_summary(lines: list, rc: int) -> str:
+    """One-line BG-job summary for a kerbrute run.
+
+    kerbrute emits neither hydra-style credentials nor gobuster-style
+    path rows, so the content-discovery regexes used for every other
+    non-hydra tool matched NONE of its output: every run — including a
+    successful spray that had just handed the operator a domain
+    account — was summarised as "No paths found."
+
+    The two markers counted here are the same ones the structured
+    parser (_parse_kerbrute_to_intel) keys on.
+    """
+    import re as _re
+    blob = "\n".join((ln or "") for ln in (lines or []))
+    n_users = len(_re.findall(r"VALID USERNAME", blob, _re.I))
+    n_logins = len(_re.findall(r"VALID LOGIN", blob, _re.I))
+    if n_logins or n_users:
+        bits = []
+        if n_logins:
+            bits.append(f"{n_logins} valid login"
+                        f"{'' if n_logins == 1 else 's'}")
+        if n_users:
+            bits.append(f"{n_users} valid username"
+                        f"{'' if n_users == 1 else 's'}")
+        return " and ".join(bits) + " — see Target Intel for details."
+    if rc == 0:
+        return "No valid usernames or logins found."
+    return f"Exited rc={rc}; nothing captured."
+
+
 class CardRuntimeMixin:
     def _osint_preflight(self, tool) -> bool:
         """
@@ -1123,6 +1154,7 @@ class CardRuntimeMixin:
             # log lines.
             is_hydra = (tool.binary == "hydra"
                         or tool.id.startswith("hydra"))
+            is_kerbrute = (tool.binary == "kerbrute")
             if is_hydra:
                 summary = (f"Found {len(kept)} credential(s)."
                            if kept else
@@ -1131,6 +1163,9 @@ class CardRuntimeMixin:
                             f"false-positive cascade)."
                             if cascade_reason else
                             "No credentials found."))
+            elif is_kerbrute:
+                summary = kerbrute_run_summary(
+                    [ln for _, ln in log], rc)
             else:
                 # Content-discovery tools (gobuster / ffuf / dirb): count
                 # hits using the SAME regex set + noise filter + dedup

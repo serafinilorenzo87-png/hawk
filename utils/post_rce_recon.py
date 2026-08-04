@@ -239,6 +239,32 @@ def _extract_section(blob: str, name: str) -> str:
     return blob[nl + 1:end].rstrip("\n").rstrip()
 
 
+def _trim_to_markers(text: str) -> str:
+    """Cut `text` down to the LAST ``___HAWK_BEGIN___ … ___HAWK_END___``.
+
+    Operators paste terminal scrollback, which starts with the shell's
+    echo of the command they just ran — and that command line contains
+    the literal `echo ___HAWK_BEGIN___` … `echo ___HAWK_END___`.
+    Cutting at the FIRST BEGIN and the FIRST END therefore kept exactly
+    the echoed command and threw away every line of real output: zero
+    findings, reported as a clean parse.
+
+    Working from the end fixes that and also does the right thing when
+    a paste holds two runs — the newest wins.
+    """
+    blob = text or ""
+    end = blob.rfind("___HAWK_END___")
+    begin = blob.rfind("___HAWK_BEGIN___",
+                       0, end if end != -1 else len(blob))
+    if begin != -1:
+        blob = blob[begin:]
+        if end != -1:
+            end -= begin
+    if end != -1:
+        blob = blob[:end]
+    return blob
+
+
 def _parse_id_groups(id_line: str) -> list[str]:
     """``id`` output: ``uid=1001(ben) gid=1001(ben) groups=1001(ben),
     37(operator)``.  Returns ['ben', 'operator']."""
@@ -271,13 +297,7 @@ def analyze_output(text: str) -> dict:
     """
     # Trim to the BEGIN/END markers if present.  Operators often paste
     # extra prompt noise before or after.
-    blob = text
-    b = blob.find("___HAWK_BEGIN___")
-    if b != -1:
-        blob = blob[b:]
-    e = blob.find("___HAWK_END___")
-    if e != -1:
-        blob = blob[:e]
+    blob = _trim_to_markers(text)
 
     out = {
         "user":          "",
@@ -302,6 +322,17 @@ def analyze_output(text: str) -> dict:
         "findings":      [],
         "parse_warnings": [],
     }
+
+    # Nothing to parse at all: say so loudly instead of returning an
+    # empty-but-successful-looking result.  The marker has to start a
+    # LINE — the echoed command line contains every marker literally
+    # (`echo '<<<SECTION:WHOAMI>>>'`), so a substring test would call a
+    # paste of the command alone a successful parse.
+    if not re.search(r"^[^\S\n]*<<<SECTION:", blob, re.M):
+        out["parse_warnings"].append(
+            "No <<<SECTION:...>>> markers in the pasted text — this "
+            "is not snippet output. Re-run the snippet on the target "
+            "and paste everything from ___HAWK_BEGIN___ onwards.")
 
     # WHOAMI
     who = _extract_section(blob, "WHOAMI")

@@ -313,6 +313,27 @@ def _extract_section(blob: str, name: str) -> str:
     return blob[nl + 1:end].rstrip("\n").rstrip()
 
 
+def _trim_to_markers(text: str) -> str:
+    """Cut `text` down to the LAST ``___HAWK_BEGIN___ … ___HAWK_END___``.
+
+    Same reasoning as the Linux module: a pasted shell transcript opens
+    with the echo of the pasted command, and that command line contains
+    both markers literally.  Cutting at the FIRST of each kept the
+    echoed command and dropped all of the real output.
+    """
+    blob = text or ""
+    end = blob.rfind("___HAWK_END___")
+    begin = blob.rfind("___HAWK_BEGIN___",
+                       0, end if end != -1 else len(blob))
+    if begin != -1:
+        blob = blob[begin:]
+        if end != -1:
+            end -= begin
+    if end != -1:
+        blob = blob[:end]
+    return blob
+
+
 def _aie_hive_is_set(aie_text: str, hive: str) -> bool:
     """True when `hive`'s OWN reg-query block reports 0x1.
 
@@ -347,13 +368,7 @@ def _extract_target_label(out: dict) -> str:
 def analyze_output(text: str) -> dict:
     """Parse the captured snippet output and return a structured
     dict ready for the dialog to push as Target Intel findings."""
-    blob = text or ""
-    s = blob.find("___HAWK_BEGIN___")
-    if s != -1:
-        blob = blob[s:]
-    e = blob.find("___HAWK_END___")
-    if e != -1:
-        blob = blob[:e]
+    blob = _trim_to_markers(text)
 
     out = {
         "user":           "",
@@ -367,6 +382,17 @@ def analyze_output(text: str) -> dict:
         "findings":       [],
         "parse_warnings": [],
     }
+
+    # Nothing to parse at all: say so loudly instead of returning an
+    # empty-but-successful-looking result.  The marker has to start a
+    # LINE — the echoed command line contains every marker literally
+    # (`Write-Host '<<<SECTION:WHOAMI>>>'`), so a substring test would
+    # call a paste of the command alone a successful parse.
+    if not re.search(r"^[^\S\n]*<<<SECTION:", blob, re.M):
+        out["parse_warnings"].append(
+            "No <<<SECTION:...>>> markers in the pasted text — this "
+            "is not snippet output. Re-run the snippet on the target "
+            "and paste everything from ___HAWK_BEGIN___ onwards.")
 
     # WHOAMI — first non-empty line is `DOMAIN\user` or just `user`.
     who = _extract_section(blob, "WHOAMI")

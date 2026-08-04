@@ -34,6 +34,55 @@ from datetime import datetime
 
 from gui.widgets.target_intel_common import *
 
+# `Name: value` on its own line.  Same shape as
+# TargetIntelWidget._HTTP_HEADER_RE, kept here so the header extractor
+# below is importable without the widget.
+_HTTP_HEADER_LINE_RE = re.compile(
+    r"^([A-Za-z][A-Za-z0-9\-]*):\s*([^\r\n]+)", re.MULTILINE)
+_HTTP_STATUS_LINE_RE = re.compile(r"^HTTP/[\d.]+\s+\d{3}")
+
+
+def extract_http_headers(text: str) -> dict:
+    """Return {lowercased header name: value} from an HTTP transcript.
+
+    Only the HEADER BLOCKS are read.  The old code ran the header
+    regex over the whole captured text, body included, so any body line
+    shaped like `Name: value` became a header — a page that merely
+    TALKS about `Strict-Transport-Security: max-age=...` (a docs page,
+    a <pre> block, a security.txt) made HAWK report the security header
+    as PRESENT on a server that never sent it.
+
+    A block runs from an `HTTP/x.y NNN` status line to the first blank
+    line.  A redirect chain has several; the last one wins, matching
+    what curl -v prints and what the operator cares about.
+
+    When the text has no HTTP status line at all (a whatweb report, a
+    raw nc transcript) there is nothing to scope to, so the legacy
+    whole-text scan is used rather than losing the data outright.
+    """
+    headers = {}
+    in_headers = False
+    saw_status = False
+    for line in (text or "").splitlines():
+        if _HTTP_STATUS_LINE_RE.match(line):
+            in_headers = True
+            saw_status = True
+            continue
+        if not in_headers:
+            continue
+        if not line.strip():
+            in_headers = False
+            continue
+        m = _HTTP_HEADER_LINE_RE.match(line)
+        if m:
+            headers[m.group(1).strip().lower()] = m.group(2).strip()
+    if not saw_status:
+        for m in _HTTP_HEADER_LINE_RE.finditer(text or ""):
+            headers.setdefault(m.group(1).strip().lower(),
+                               m.group(2).strip())
+    return headers
+
+
 class TargetIntelParserMixin:
     def _sess(self):
         try:
@@ -1324,11 +1373,9 @@ class TargetIntelParserMixin:
         # Build a normalised header dict (last wins on dup keys — matches
         # how curl -v / curl -I dump headers, last response in a redirect
         # chain is what the user cares about).
-        header_dict = {}
-        for hm in self._HTTP_HEADER_RE.finditer(text):
-            name = hm.group(1).strip().lower()
-            val  = hm.group(2).strip()
-            header_dict[name] = val
+        # Header BLOCKS only — see extract_http_headers() for why the
+        # body must not be scanned.
+        header_dict = extract_http_headers(text)
 
         def _h(name: str) -> str:
             return header_dict.get(name.lower(), "")

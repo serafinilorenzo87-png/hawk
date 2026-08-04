@@ -46,6 +46,57 @@ from utils.runner import ToolRunner, MultiRunner, MetasploitRunner, GreenBoneRun
 from utils.session import Credential
 from gui.widgets.card_common import *
 
+
+def parse_html_forms(html: str, base_url: str) -> list:
+    """Extract {action, method, fields, has_password, file_inputs}.
+
+    The tag's attributes are read separately instead of positionally.
+    The old pattern was
+
+        <form\\b[^>]*action=[...][^>]*(?:method=[...])?[^>]*>
+
+    where the greedy `[^>]*` after the action swallowed the rest of the
+    tag and the OPTIONAL method group then matched empty.  `method` was
+    therefore None for every form ever crawled, so all of them —
+    including login POSTs — were recorded and reported as GET.  Forms
+    with no action attribute were skipped entirely.
+
+    An absent or empty action submits to the current URL (HTML spec),
+    not to "/".
+    """
+    from urllib.parse import urljoin as _urljoin
+
+    forms = []
+    for form_m in re.finditer(
+            r'<form\b([^>]*)>([\s\S]{0,2000}?)</form>', html, re.I):
+        attrs = form_m.group(1)
+        block = form_m.group(2)
+        action_m = re.search(
+            r'action=["\']([^"\']*)["\']', attrs, re.I)
+        method_m = re.search(
+            r'method=["\']?([A-Za-z]+)', attrs, re.I)
+        action = _urljoin(
+            base_url, (action_m.group(1) if action_m else "") or "")
+        method = (method_m.group(1) if method_m else "GET").upper()
+        fields = re.findall(
+            r'<input[^>]+name=["\']([^"\']+)["\']', block, re.I)
+        has_pwd = bool(re.search(
+            r'type=["\']password["\']', block, re.I))
+        # File upload detection — any input type=file makes this a
+        # candidate for the upload-bypass test in Inject.
+        file_inputs = re.findall(
+            r'<input[^>]+type=["\']file["\'][^>]*name=["\']'
+            r'([^"\']+)["\']', block, re.I) + re.findall(
+            r'<input[^>]+name=["\']([^"\']+)["\'][^>]+'
+            r'type=["\']file["\']', block, re.I)
+        forms.append({
+            "action": action, "method": method,
+            "fields": fields[:10], "has_password": has_pwd,
+            "file_inputs": file_inputs,
+        })
+    return forms
+
+
 class CardOracleRoutesMixin:
     def _route_web_oracle(self, tool):
         """Open the URL-confirmation dialog and launch WebOracleRunner.
@@ -799,29 +850,13 @@ class CardOracleRoutesMixin:
             for ep in endpoints:
                 _harvest_params_from_url(ep)
 
-            for form_m in re.finditer(
-                    r'<form\b[^>]*action=["\']([^"\']*)["\'][^>]*'
-                    r'(?:method=["\'](\w+)["\'])?[^>]*>'
-                    r'([\s\S]{0,2000}?)</form>', html, re.I):
-                action = urljoin(current_url, form_m.group(1) or "/")
-                method = (form_m.group(2) or "GET").upper()
-                block = form_m.group(3)
-                fields = re.findall(
-                    r'<input[^>]+name=["\']([^"\']+)["\']', block, re.I)
-                has_pwd = bool(re.search(
-                    r'type=["\']password["\']', block, re.I))
-                # File upload detection — any input type=file makes
-                # this a candidate for the upload-bypass test in Inject.
-                file_inputs = re.findall(
-                    r'<input[^>]+type=["\']file["\'][^>]*name=["\']'
-                    r'([^"\']+)["\']', block, re.I) + re.findall(
-                    r'<input[^>]+name=["\']([^"\']+)["\'][^>]+'
-                    r'type=["\']file["\']', block, re.I)
-                forms_found.append({
-                    "action": action, "method": method,
-                    "fields": fields[:10], "has_password": has_pwd,
-                    "file_inputs": file_inputs,
-                })
+            for form in parse_html_forms(html, current_url):
+                action = form["action"]
+                method = form["method"]
+                fields = form["fields"]
+                has_pwd = form["has_password"]
+                file_inputs = form["file_inputs"]
+                forms_found.append(form)
 
                 # Push form (and any upload variant) into AssaultState.
                 if state is not None:
