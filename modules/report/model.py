@@ -35,10 +35,12 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from utils.config import REPORT_BRANDING, CONFIGS_DIR, BASE_DIR
+from utils.config import (REPORT_BRANDING, CONFIGS_DIR, BASE_DIR,
+                          is_within_base)
 
 
 # ─── Block vocabulary ──────────────────────────────────────────────────────
@@ -90,6 +92,12 @@ _LOGO_MIME = {
     ".gif": "image/gif", ".svg": "image/svg+xml", ".webp": "image/webp",
 }
 
+# A logo is a logo.  The cap is what stops a mistyped logo_path pointing
+# at a capture or a disk image from being base64-inflated (+33%) into RAM
+# and into the deliverable — generation runs on the Tk main thread, so a
+# large read freezes the GUI as well.
+_LOGO_MAX_BYTES = 2 * 1024 * 1024
+
 
 def load_branding(override: "dict | None" = None) -> dict:
     """Merge branding from three layers (later wins): config defaults ->
@@ -112,23 +120,56 @@ def load_branding(override: "dict | None" = None) -> dict:
     return data
 
 
+def _reject_logo(path, reason: str) -> str:
+    """One diagnostic line per refusal, then the documented failure mode
+    ("" — the template renders no logo).  Silence here is how a wrong
+    logo_path went unnoticed until it was already in the client's HTML."""
+    print(f"[HAWK] report branding: logo refused ({reason}): {path}",
+          file=sys.stderr)
+    return ""
+
+
 def _logo_data_uri(logo_path: str) -> str:
     """Read ``logo_path`` (abs or BASE_DIR-relative) and return a base64
-    data URI, or "" when absent/unreadable.  Self-contained embedding."""
-    if not logo_path:
+    data URI, or "" when absent/unreadable/refused.
+
+    This is the one place in the report pipeline that opens a path the
+    operator chose, and its content is embedded verbatim in the file
+    handed to the client — so the path is validated like every other
+    HAWK path instead of being trusted:
+
+      * it must resolve INSIDE the HAWK tree (``is_within_base``) — a
+        typo or a copy-pasted config must not be able to inline
+        ``~/.ssh/id_rsa`` into the deliverable;
+      * its extension must be one we actually know a MIME type for (no
+        "image/png by default" for arbitrary bytes);
+      * its size is checked BEFORE the read, not after.
+
+    Never raises: a non-string logo_path (a stray list/number in
+    report_branding.json) returns "" like any other unusable value —
+    load_branding() documents that it never raises."""
+    if not isinstance(logo_path, str) or not logo_path:
         return ""
     path = logo_path
     if not os.path.isabs(path):
         path = os.path.join(BASE_DIR, logo_path)
     try:
+        if not is_within_base(path):
+            return _reject_logo(path, "outside the HAWK folder")
+        mime = _LOGO_MIME.get(os.path.splitext(path)[1].lower())
+        if mime is None:
+            return _reject_logo(path, "unsupported extension")
         if not os.path.isfile(path):
             return ""
-        mime = _LOGO_MIME.get(os.path.splitext(path)[1].lower(), "image/png")
+        size = os.path.getsize(path)
+        if size > _LOGO_MAX_BYTES:
+            return _reject_logo(
+                path, f"{size} bytes > {_LOGO_MAX_BYTES} byte cap")
         with open(path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("ascii")
         return f"data:{mime};base64,{b64}"
-    except Exception:
-        return ""
+    except Exception as e:
+        return _reject_logo(path, f"unreadable: {e}")
 
 
 # ─── Report context (curation applied once, shared by all targets) ─────────
