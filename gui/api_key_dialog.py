@@ -47,6 +47,11 @@ class ApiKeyDialog(ctk.CTkToplevel):
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         self.geometry(f"620x560+{(sw-620)//2}+{(sh-560)//2}")
 
+        # The X must take the SKIP path: this dialog runs at startup with
+        # the root window withdrawn, and `_on_done` is what deiconifies
+        # it.  A plain destroy() left HAWK running with no window at all.
+        self.protocol("WM_DELETE_WINDOW", self._skip)
+
         self._build()
         self.after(80, self._autosize)
         self.after(250, self._autosize)

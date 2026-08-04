@@ -58,7 +58,18 @@ def _autosize_window(win, min_w=400, min_h=220, pad_w=40, pad_h=40, max_ratio=0.
         pass
 
 
-def _make_win(parent, title, w, h):
+def _make_win(parent, title, w, h, on_close=None):
+    """Build a HAWK dialog Toplevel.
+
+    `on_close` is invoked when the dialog goes away through the window
+    manager's X button.  Tk's default for WM_DELETE_WINDOW is a bare
+    destroy(), so without this every one of the dialogs built here could
+    be dismissed with the X while the caller kept waiting for a callback
+    it would never get.  Callers that only need "the window disappears"
+    can keep ignoring the parameter — the default handler still routes
+    through _safe_destroy (grab_release + destroy), which is what the
+    CLOSE/CANCEL buttons do.
+    """
     win = ctk.CTkToplevel(parent)
     # Hide immediately — CTkToplevel flashes onto the screen at its
     # native small size the instant it's created, then jumps to the real
@@ -77,6 +88,17 @@ def _make_win(parent, title, w, h):
     win_h = min(max(h, 300), int(sh * 0.9))
     win.geometry(f"{win_w}x{win_h}+{(sw-win_w)//2}+{(sh-win_h)//2}")
     win.minsize(min(w, 480), 280)
+
+    # Closing with the X must take the same route as the dialog's own
+    # CLOSE button, callback included.
+    def _on_wm_delete():
+        _safe_destroy(win)
+        if on_close is not None:
+            try:
+                on_close()
+            except Exception:
+                pass
+    win.protocol("WM_DELETE_WINDOW", _on_wm_delete)
 
     ctk.CTkFrame(win, fg_color=COLORS["border_green"],
                  height=2, corner_radius=0).pack(fill="x")
