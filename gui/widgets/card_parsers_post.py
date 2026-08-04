@@ -419,6 +419,14 @@ class CardPostParserMixin:
                 "enumerated, no finding added.", "dim")
             return
 
+        # Anonymous access is what the parse actually observed: no
+        # credential on the command line, and the server still answered
+        # with a share list (or smbclient's explicit "Anonymous login
+        # successful").  Steps 4b and 5 both key off it.
+        anon_access = ((not is_authenticated)
+                       and bool(anon_success or shares)
+                       and not connect_failed)
+
         # ── Step 4a: authenticated run + success → push cred to store
         pushed_cred = False
         if is_authenticated and (shares or pwn3d) and not connect_failed:
@@ -463,8 +471,7 @@ class CardPostParserMixin:
                 print(f"[HAWK] smb cred push failed: {e}")
 
         # ── Step 4b: anonymous run + success → anon cred placeholder
-        if not is_authenticated and (anon_success or shares) \
-                and not connect_failed:
+        if anon_access:
             try:
                 sess = self.app.session_manager.current
                 if sess is not None:
