@@ -633,14 +633,27 @@ class CardRuntimeMixin:
                 win.clipboard_clear()
                 win.clipboard_append(cmd)
                 copy_btn.configure(text="✓  COPIED")
-                win.after(1500, lambda: copy_btn.configure(text="📋  COPY"))
+                # The dialog may be gone by the time this fires.
+                def _reset():
+                    if copy_btn.winfo_exists():
+                        copy_btn.configure(text="📋  COPY")
+                win.after(1500, _reset)
             except Exception:
                 pass
 
         row = _btn_row(win)
-        copy_btn = _btn(row, "📋  COPY", _copy,
-                        border=COLORS.get("text_cyan", "#7EC8E3"),
-                        text_color=COLORS.get("text_cyan", "#7EC8E3"), w=120)
+        # Built directly instead of via `_btn`: that helper takes no colour
+        # kwargs and returns None (it packs in place), so the "COPIED"
+        # feedback needs a handle of its own.  Same pattern as
+        # card_routes_access.py's COPY SNIPPET button.
+        cyan = COLORS.get("text_cyan", "#7EC8E3")
+        copy_btn = ctk.CTkButton(
+            row, text="📋  COPY", width=120, height=34,
+            font=_f("md"),
+            fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
+            border_color=cyan, border_width=1, text_color=cyan,
+            corner_radius=4, command=_copy)
+        copy_btn.pack(side="left", padx=6)
         _btn(row, "CLOSE", lambda: _safe_destroy(win), primary=True, w=100)
 
     def _show_install_dialog(self, tool):

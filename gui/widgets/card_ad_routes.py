@@ -819,8 +819,11 @@ class CardADRoutesMixin:
                 win.clipboard_append(cmd)
                 win.update()
                 copy_btn.configure(text="✓  COPIED")
-                win.after(1500, lambda: copy_btn.configure(
-                    text="📋  COPY ADD CMD"))
+                # The dialog may be gone by the time this fires.
+                def _reset():
+                    if copy_btn.winfo_exists():
+                        copy_btn.configure(text="📋  COPY ADD CMD")
+                win.after(1500, _reset)
             except Exception:
                 pass
             self.app.terminal.write(
@@ -829,8 +832,17 @@ class CardADRoutesMixin:
                 f"Kali → {target}:{lp} → {ca}:{cp}", "success")
 
         btn_row = _btn_row(win)
-        copy_btn = _btn(btn_row, "📋  COPY ADD CMD", _copy_add,
-                        primary=True, w=180)
+        # Built directly instead of via `_btn`: that helper packs in place
+        # and returns None, so the "COPIED" feedback above needs its own
+        # handle.  Colours match `_btn(primary=True)`.
+        copy_btn = ctk.CTkButton(
+            btn_row, text="📋  COPY ADD CMD", width=180, height=34,
+            font=_f("md", True),
+            fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
+            border_color=COLORS["border_green"], border_width=1,
+            text_color=COLORS["text_green"], corner_radius=4,
+            command=_copy_add)
+        copy_btn.pack(side="left", padx=6)
         _btn(btn_row, "CLOSE", lambda: _safe_destroy(win), w=100)
 
     def _route_certipy_req(self, tool):
