@@ -16,10 +16,20 @@ Defines the tool structure and check-availability logic.
 """
 
 import os
+import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
 from typing import Optional, Callable
+
+
+# A command template placeholder.  Restricted to lowercase snake_case on
+# purpose: every placeholder HAWK defines is lowercase, while the shell
+# constructs that legitimately appear in templates are not — `${VER}`,
+# `${VER#v}`, `awk '{print $1}'`.  Matching those as placeholders is what
+# made `build_command()` raise (see Tool.build_command).
+_PLACEHOLDER_RE = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
 
 
 # Extra directories HAWK scans when a tool isn't on $PATH. We have no
@@ -305,9 +315,24 @@ class Tool:
         specific dialog (AD pentesting dialog prompts the user for
         them).  We never raise KeyError on unresolved placeholders
         so the command still displays sensibly in UI previews.
+
+        Substitution is one `re.sub` pass, NOT `str.format`.  format()
+        chokes on the shell's own braces and its KeyError names a single
+        key at a time: a template with two unknown ones (chisel's
+        `${VER}` + `${VER#v}`) escaped the old one-shot fallback and the
+        exception surfaced inside a Tk callback — the operator clicked
+        RUN and HAWK appeared to do nothing.
         """
         fmt = {
-            "target":         target,
+            # The target reaches a shell=True command line and comes
+            # from a free-text field, so quote it here.  shlex.quote is
+            # a no-op for IPs, hostnames, CIDRs and URLs without shell
+            # metacharacters, i.e. for every normal run.
+            "target":         shlex.quote(target) if target else "",
+            # `extra` is a command FRAGMENT, not a single argument:
+            # templates use it for a port, a `user@host` pair, or a whole
+            # remote command already wrapped in the template's own
+            # quotes.  Quoting it here would turn those into literals.
             "extra":          extra_args or self.custom_args,
             # AD placeholders default to literal `<field>` labels so
             # the user can see at a glance what's missing before the
@@ -317,17 +342,18 @@ class Tool:
             "domain":          "<DOMAIN>",
             "target_computer": "<TARGET_COMPUTER>",
         }
-        try:
-            cmd = self.cmd_template.format(**fmt)
-        except KeyError as e:
+
+        def _resolve(m):
+            name = m.group(1)
+            if name in fmt:
+                return fmt[name]
             # Unknown placeholder → preserve the literal so the
             # downstream dialog can show the user what still needs
-            # filling rather than crashing.
-            import re
-            missing = str(e).strip("'\"")
-            cmd = re.sub(r"\{" + re.escape(missing) + r"\}",
-                         f"<{missing}>", self.cmd_template)
-            cmd = cmd.format(**fmt)
+            # filling rather than crashing.  `<...>` is the form the
+            # AD dialog fills in and `_run_raw`'s guard recognises.
+            return f"<{name}>"
+
+        cmd = _PLACEHOLDER_RE.sub(_resolve, self.cmd_template)
         # If command starts with the bare binary name and it's not on PATH,
         # rewrite with absolute path.
         if shutil.which(self.binary) is None:
