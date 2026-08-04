@@ -132,27 +132,43 @@ class TargetIntelConnectRuntimeMixin:
                 except Exception:
                     pass
 
-            # Findings + credential verification — only when an action
-            # was supplied (i.e. the connect originated from the dialog
-            # with a known action profile).
-            if action is not None:
-                try:
-                    self._parse_connect_result(
-                        svc_key, action.get("id", ""), target, port,
-                        lines, rc, used_creds=used_creds, cmd=cmd)
-                except Exception as e:
+            def _finish():
+                # Findings + credential verification — only when an action
+                # was supplied (i.e. the connect originated from the dialog
+                # with a known action profile).
+                if action is not None:
                     try:
-                        self.app.terminal.write(
-                            f"  [!] Connect parse error: {e}", "dim")
-                    except Exception:
-                        pass
+                        self._parse_connect_result(
+                            svc_key, action.get("id", ""), target, port,
+                            lines, rc, used_creds=used_creds, cmd=cmd)
+                    except Exception as e:
+                        try:
+                            self.app.terminal.write(
+                                f"  [!] Connect parse error: {e}", "dim")
+                        except Exception:
+                            pass
 
-            # Tail marker so the user sees the session boundary in the
-            # HAWK terminal even when the xterm was closed manually.
+                # Tail marker so the user sees the session boundary in the
+                # HAWK terminal even when the xterm was closed manually.
+                try:
+                    color = "success" if rc == 0 else "warn"
+                    self.app.terminal.write(
+                        f"  [+] CONNECT terminal closed (rc={rc})", color)
+                except Exception:
+                    pass
+
+            # Every parser reached from _parse_connect_result mutates Tk
+            # widgets (auto-findings rerender, credential store refresh)
+            # and we are on the xterm watcher thread — must hop to the UI
+            # thread first, exactly like _inspect_connect_session above.
+            # The tail marker rides along so it stays ordered after the
+            # parser's own terminal output.
             try:
-                color = "success" if rc == 0 else "warn"
-                self.app.terminal.write(
-                    f"  [+] CONNECT terminal closed (rc={rc})", color)
+                ui = getattr(self.app, "ui_call", None)
+                if ui:
+                    ui(_finish)
+                else:
+                    _finish()
             except Exception:
                 pass
 

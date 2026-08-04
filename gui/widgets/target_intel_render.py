@@ -2263,7 +2263,20 @@ class TargetIntelRenderMixin:
         ``_raw_description`` (underscore-prefixed → stripped at
         session-save time, never written to disk).  The Info dialog's
         SHOW RAW toggle uses it to swap the EVIDENCE block locally.
+
+        Thread-safe by construction: pushing a finding rerenders Tk
+        widgets, so a call arriving from a worker thread (tool job,
+        xterm watcher) is re-dispatched to the UI thread and returns.
         """
+        if threading.current_thread() is not threading.main_thread():
+            ui = getattr(getattr(self, "app", None), "ui_call", None)
+            if ui:
+                ui(self.add_auto_finding, title, description,
+                   severity=severity, source=source,
+                   linked_run_id=linked_run_id, port=port,
+                   raw_description=raw_description)
+                return
+
         from utils.session import Finding
 
         sev_rank = {"critical": 0, "high": 1, "medium": 2,
