@@ -2156,6 +2156,26 @@ class TargetIntelRenderMixin:
         ansi = re.compile(r'\[[0-9;]*[mGKHF]|\[[0-9;]*[A-Za-z]|\[[0-9;]*m')
         return ansi.sub('', text)
 
+    @staticmethod
+    def _normalize_finding_port(port) -> "int | None":
+        """Coerce an optional port hint to an int in 1..65535, else None.
+
+        Used on BOTH sides of the auto-finding merge key: on the
+        caller's `port` argument and on the port read back off an
+        already-stored finding (session-restored findings come straight
+        from JSON), so the two are always compared in the same domain.
+        """
+        if isinstance(port, int) and 1 <= port <= 65535:
+            return port
+        if isinstance(port, str) and port.isdigit():
+            try:
+                _p = int(port)
+            except ValueError:
+                return None
+            if 1 <= _p <= 65535:
+                return _p
+        return None
+
     def _make_finding_occurrence(self, run_no: int, source: str,
                                  linked_run_id: str,
                                  description: str) -> dict:
@@ -2239,12 +2259,17 @@ class TargetIntelRenderMixin:
                          raw_description: str = ""):
         """Add or UPDATE an auto-finding in Target Intel.
 
-        If a finding with the same title already exists (e.g. user runs
-        gobuster a second time with a different wordlist), we MERGE the
-        new description lines into the existing one and records every
-        run, including identical reruns.  The finding is marked as
-        recently modified so `_render_auto_findings_section` can draw it
-        with a bright border until the user reads it.
+        If a finding with the same title AND the same port already
+        exists (e.g. user runs gobuster a second time with a different
+        wordlist), we MERGE the new description lines into the existing
+        one and records every run, including identical reruns.  The
+        finding is marked as recently modified so
+        `_render_auto_findings_section` can draw it with a bright
+        border until the user reads it.
+
+        The port is part of the merge key on purpose: the same title on
+        two different ports describes two different facts and must stay
+        two findings (see the comment on the merge loop below).
 
         ``linked_run_id`` ties this finding to credentials pushed by the
         same tool parser — see _run_id_new() for the convention and
@@ -2292,16 +2317,7 @@ class TargetIntelRenderMixin:
                            .strip())
 
         # Normalise the optional port hint
-        port_int = None
-        if isinstance(port, int) and 1 <= port <= 65535:
-            port_int = port
-        elif isinstance(port, str) and port.isdigit():
-            try:
-                _p = int(port)
-                if 1 <= _p <= 65535:
-                    port_int = _p
-            except ValueError:
-                pass
+        port_int = self._normalize_finding_port(port)
 
         # Merge path: title already exists -> append new lines and keep
         # a per-run history for repeated scans.
@@ -2311,7 +2327,19 @@ class TargetIntelRenderMixin:
             pass
 
         for existing in self._auto_findings:
-            if existing["title"].lower() == title.lower():
+            # Merge key is (title, port), NOT title alone.  Two findings
+            # that share a title but sit on different ports are two
+            # distinct facts about the target — "Directory listing
+            # enabled" on 80 and on 8080 are two cards and two report
+            # rows, not one.  Collapsing them lost data all the way
+            # into the client deliverable.
+            # The documented merge case is unaffected: re-running the
+            # same tool against the same port yields the same `port`,
+            # and a parser that supplies no port keeps merging on
+            # (title, None) exactly as before.
+            if (existing["title"].lower() == title.lower()
+                    and self._normalize_finding_port(
+                        existing.get("port")) == port_int):
                 occs = self._ensure_finding_occurrences(existing)
                 run_no = len(occs) + 1
                 occs.append(self._make_finding_occurrence(
@@ -2359,11 +2387,9 @@ class TargetIntelRenderMixin:
                 # to.  Empty new id doesn't clobber a pre-existing one.
                 if linked_run_id:
                     existing["linked_run_id"] = linked_run_id
-                # Authoritative port hint — set if the new caller has
-                # it and the existing finding lacked it (don't clobber
-                # an already-known port).
-                if port_int is not None and not existing.get("port"):
-                    existing["port"] = port_int
+                # No port bookkeeping here: the port is part of the
+                # merge key above, so a match already means the two
+                # findings agree on it.
                 # Mark as freshly updated — stays highlighted until the
                 # user actually reads it (see _mark_finding_read).
                 # When `added == 0` there's nothing genuinely new

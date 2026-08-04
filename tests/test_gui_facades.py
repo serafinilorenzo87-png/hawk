@@ -31,6 +31,47 @@ def _install_customtkinter_stub():
     sys.modules["customtkinter"] = module
 
 
+def _build_dummy_intel():
+    """Minimal TargetIntelRenderMixin host: no Tk, no session, no KB.
+
+    customtkinter must already be stubbed by the caller.
+    """
+    from gui.widgets.target_intel_render import TargetIntelRenderMixin
+
+    class Terminal:
+        def __init__(self):
+            self.messages = []
+
+        def write(self, message, style=None):
+            self.messages.append((message, style))
+
+    class DummyIntel(TargetIntelRenderMixin):
+        def __init__(self):
+            self._auto_findings = []
+            self._collapsed = {"vulns": True}
+            self.render_count = 0
+            self.blink_count = 0
+            self.app = types.SimpleNamespace(terminal=Terminal())
+
+        def _render_auto_findings(self):
+            self.render_count += 1
+
+        def _blink_start(self, count_as_new: bool = True):
+            self.blink_count += 1
+            self.last_count_as_new = count_as_new
+
+        # The two correlation hooks fire on every push; they are not
+        # under test here and would otherwise raise AttributeError
+        # into the caller's try/except and spam stderr.
+        def _kb_correlate(self, *a, **kw):
+            return None
+
+        def _aiops_correlate(self, *a, **kw):
+            return None
+
+    return DummyIntel()
+
+
 class GuiFacadeTests(unittest.TestCase):
     def test_public_gui_facades_still_import(self):
         old_ctk = sys.modules.get("customtkinter")
@@ -61,33 +102,7 @@ class GuiFacadeTests(unittest.TestCase):
         old_ctk = sys.modules.get("customtkinter")
         _install_customtkinter_stub()
         try:
-            from gui.widgets.target_intel_render import (
-                TargetIntelRenderMixin,
-            )
-
-            class Terminal:
-                def __init__(self):
-                    self.messages = []
-
-                def write(self, message, style=None):
-                    self.messages.append((message, style))
-
-            class DummyIntel(TargetIntelRenderMixin):
-                def __init__(self):
-                    self._auto_findings = []
-                    self._collapsed = {"vulns": True}
-                    self.render_count = 0
-                    self.blink_count = 0
-                    self.app = types.SimpleNamespace(terminal=Terminal())
-
-                def _render_auto_findings(self):
-                    self.render_count += 1
-
-                def _blink_start(self, count_as_new: bool = True):
-                    self.blink_count += 1
-                    self.last_count_as_new = count_as_new
-
-            intel = DummyIntel()
+            intel = _build_dummy_intel()
             intel.add_auto_finding(
                 "FTP anonymous login",
                 "Anonymous FTP is enabled",
@@ -127,6 +142,103 @@ class GuiFacadeTests(unittest.TestCase):
             # First blink counted as new, second one didn't.
             self.assertFalse(intel.last_count_as_new)
             self.assertFalse(intel._collapsed["vulns"])
+        finally:
+            if old_ctk is None:
+                sys.modules.pop("customtkinter", None)
+            else:
+                sys.modules["customtkinter"] = old_ctk
+
+    def test_auto_findings_are_keyed_on_title_and_port(self):
+        """Same title on two ports = two findings (M18).
+
+        Real emitter this reproduces: `_kb_correlate` builds its title
+        from the KB entry alone (`▶ <id>  ·  <title>`) and passes the
+        triggering finding's port.  A host running Apache 2.4.49 on
+        both 80 and 8080 hits the same KB entry twice, so before this
+        fix the two services collapsed into ONE card and ONE report
+        row — the operator never saw the second listener.
+        """
+        old_ctk = sys.modules.get("customtkinter")
+        _install_customtkinter_stub()
+        try:
+            kb_title = ("▶ CVE-2021-41773  ·  Apache httpd 2.4.49 "
+                        "path traversal / RCE")
+            intel = _build_dummy_intel()
+            intel.add_auto_finding(
+                title=kb_title,
+                description="http://10.10.10.5:80/ — Apache/2.4.49 (Unix)",
+                severity="critical",
+                source="CVE KB (CVE-2021-41773)",
+                port=80,
+            )
+            intel.add_auto_finding(
+                title=kb_title,
+                description="http://10.10.10.5:8080/ — Apache/2.4.49 (Unix)",
+                severity="critical",
+                source="CVE KB (CVE-2021-41773)",
+                port=8080,
+            )
+
+            self.assertEqual(len(intel._auto_findings), 2)
+            self.assertEqual(
+                sorted(f.get("port") for f in intel._auto_findings),
+                [80, 8080],
+            )
+            for f in intel._auto_findings:
+                self.assertEqual(f["run_count"], 1)
+            # Each card keeps only its own evidence.
+            by_port = {f["port"]: f for f in intel._auto_findings}
+            self.assertIn(":80/", by_port[80]["description"])
+            self.assertNotIn(":8080/", by_port[80]["description"])
+            self.assertIn(":8080/", by_port[8080]["description"])
+
+            # Same title AND same port -> still merges, run_count bumps.
+            intel.add_auto_finding(
+                title=kb_title,
+                description="http://10.10.10.5:80/ — confirmed via curl",
+                severity="critical",
+                source="CVE KB (CVE-2021-41773)",
+                port=80,
+            )
+            self.assertEqual(len(intel._auto_findings), 2)
+            self.assertEqual(by_port[80]["run_count"], 2)
+            self.assertEqual(by_port[8080]["run_count"], 1)
+            self.assertIn("confirmed via curl", by_port[80]["description"])
+            self.assertNotIn("confirmed via curl",
+                             by_port[8080]["description"])
+        finally:
+            if old_ctk is None:
+                sys.modules.pop("customtkinter", None)
+            else:
+                sys.modules["customtkinter"] = old_ctk
+
+    def test_auto_findings_without_port_still_merge(self):
+        """The documented rerun case: no port on either side -> merge.
+
+        gobuster's parser pushes no port hint, so both runs carry
+        `port=None` and must land in the same card.
+        """
+        old_ctk = sys.modules.get("customtkinter")
+        _install_customtkinter_stub()
+        try:
+            intel = _build_dummy_intel()
+            intel.add_auto_finding(
+                "Gobuster — 3 path(s) on http://10.10.10.5/",
+                "/admin (Status: 301)",
+                severity="info", source="gobuster",
+            )
+            intel.add_auto_finding(
+                "Gobuster — 3 path(s) on http://10.10.10.5/",
+                "/backup (Status: 200)",
+                severity="info", source="gobuster",
+            )
+
+            self.assertEqual(len(intel._auto_findings), 1)
+            finding = intel._auto_findings[0]
+            self.assertEqual(finding["run_count"], 2)
+            self.assertIsNone(finding.get("port"))
+            self.assertIn("/admin", finding["description"])
+            self.assertIn("/backup", finding["description"])
         finally:
             if old_ctk is None:
                 sys.modules.pop("customtkinter", None)
