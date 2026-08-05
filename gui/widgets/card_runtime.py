@@ -945,7 +945,11 @@ class CardRuntimeMixin:
         self._set_tool_status(tool.id, "running")
         self.set_status(STATUS_RUNNING)
         self._toggle_run_btn(tool, True)
-        self._raw_log = []
+        # Per-tool buffer: a concurrent run on the same card must not
+        # wipe the output another tool is still waiting to have parsed.
+        raw_log = []
+        self._raw_logs[tool.id] = raw_log
+        self._raw_log = raw_log
         # Stash the command on the tool's widget dict so per-tool
         # parsers (e.g. _parse_smb_output) can inspect the actual
         # invocation — knowing whether the run was anonymous (-N)
@@ -968,9 +972,14 @@ class CardRuntimeMixin:
                     phase_id=self.phase_id, command=cmd)
         except Exception as e:
             print(f"[HAWK] start_tool_execution failed: {e}")
-        # Stash exec_id on the tool widget dict so _on_done can retrieve it
+        # Stash exec_id on the tool widget dict so _on_done can retrieve it,
+        # together with the identity of the session this run belongs to —
+        # a tool that outlives a session switch must not write the old
+        # target's output into the session that is current when it ends.
         if tool.id in self._tool_widgets:
             self._tool_widgets[tool.id]["_exec_id"] = exec_id
+            self._tool_widgets[tool.id]["_session_token"] = (
+                self.app.session_token())
 
         # Show initial progress bar at 0% for scan tools so the user
         # sees immediate feedback even on fast scans.
@@ -982,7 +991,7 @@ class CardRuntimeMixin:
                     0.0, "Starting scan", "", tn))
 
         def _out(line, name, level):
-            self._raw_log.append(line)
+            raw_log.append(line)
             self.app.terminal.output_callback(line, name, level)
 
         runner = ToolRunner(
@@ -1041,7 +1050,29 @@ class CardRuntimeMixin:
         if tool.id in self._tool_widgets:
             self._tool_widgets[tool.id]["_last_cmd"] = cmd
 
+        # Identity of the session this job belongs to.  Background jobs
+        # are the longest-lived thing HAWK starts (hydra runs for hours),
+        # so they are the most likely to finish after the operator has
+        # switched target — at which point their credentials and output
+        # would be filed under the wrong session, or dropped silently
+        # while the popup still said "completed".
+        session_token = self.app.session_token()
+        if tool.id in self._tool_widgets:
+            self._tool_widgets[tool.id]["_session_token"] = session_token
+
         def _done(name, rc, log):
+            if not self.app.session_token_valid(
+                    session_token, f"{tool.name} background job"):
+                # Drop the job from the bar so it doesn't linger as a
+                # phantom row, but write nothing into the new session.
+                try:
+                    self.app.bg_jobs_bar.finish_job(
+                        job_id,
+                        f"Aborted by session switch — results belong to "
+                        f"the previous target and were NOT saved.")
+                except Exception as e:
+                    print(f"[HAWK] bg job discard failed: {e}")
+                return
             cred_lines = [l for _, l in log
                           if "login:" in l.lower()
                           and "password:" in l.lower()]
@@ -1501,6 +1532,20 @@ class CardRuntimeMixin:
 
     def _on_done(self, tool, tool_name, returncode, log):
         def _update():
+            # Session guard: the run may have outlived a NEW SESSION /
+            # LOAD (session switch aborts runners, but a kill takes up
+            # to ~3 s to close the loop, and the xterm/background paths
+            # can outrun it).  Everything below writes into the ACTIVE
+            # session — parsers, Target Intel, credential store, the
+            # execution record — so a stale run stops here and says so.
+            w0 = self._tool_widgets.get(tool.id) or {}
+            token = w0.get("_session_token")
+            if token is not None and not self.app.session_token_valid(
+                    token, f"{tool.name} output"):
+                self._set_tool_status(tool.id, "ready")
+                self._toggle_run_btn(tool, False)
+                self._raw_logs.pop(tool.id, None)
+                return
             # nmap exit code 1 is normal; nc banner grabs exit non-zero
             # after timeout (124 from `timeout`, or 1 from nc EOF).
             is_nmap = tool.binary in ("nmap", "masscan", "rustscan")
@@ -1548,27 +1593,30 @@ class CardRuntimeMixin:
             self._toggle_run_btn(tool, False)
             self.app.terminal.flush_tool_output(tool_name, tool.binary)
 
-            # Feed nmap to Target Intel
-            if tool.binary in ("nmap", "masscan", "rustscan") and self._raw_log:
+            # Feed nmap to Target Intel.  Read THIS tool's buffer —
+            # falling back to the shared one for the callers that reach
+            # _on_done without going through _run_raw.
+            raw_log = self._raw_logs.get(tool.id, self._raw_log)
+            if tool.binary in ("nmap", "masscan", "rustscan") and raw_log:
                 if hasattr(self.app, "target_intel"):
-                    self.app.target_intel.update_from_nmap(self._raw_log)
+                    self.app.target_intel.update_from_nmap(raw_log)
                     # No open ports → terminal message only, no popup.
                     # Accept both "/tcp" and "/udp", and tolerate whitespace
                     # between the port number and the 'open' column.
                     import re as _re
                     open_found = any(
                         _re.search(r"^\s*\d+/(tcp|udp)\s+open\b", l)
-                        for l in self._raw_log)
+                        for l in raw_log)
                     if not open_found and tool.binary == "nmap":
-                        self._explain_no_open_ports(self._raw_log)
+                        self._explain_no_open_ports(raw_log)
 
                     if open_found:
-                        self._check_cleartext_protocols(self._raw_log)
+                        self._check_cleartext_protocols(raw_log)
 
                     # Vuln scripts → parse to intel
                     if tool.id == "nmap_vuln" and hasattr(self.app, "target_intel"):
                         self.app.target_intel.update_from_vuln_scripts(
-                            self._raw_log)
+                            raw_log)
                     sess = None
                     try:
                         sess = self.app.session_manager.current

@@ -1001,6 +1001,17 @@ class TargetBar(ctk.CTkFrame):
         self._ip_entry.configure(border_color=COLORS["border_green"])
         platform = self._platform_var.get()
 
+        # Abort every tool still running against the PREVIOUS target
+        # before the session is swapped.  Resetting the card dots (done
+        # further down) only hides those runs — it doesn't stop them,
+        # and their results would land in this brand-new session when
+        # they finish.
+        aborted = 0
+        try:
+            aborted = self.app.abort_running_tools("NEW SESSION")
+        except Exception as e:
+            print(f"[HAWK] new session: abort running tools failed: {e}")
+
         session = self.app.session_manager.new_session(target, platform)
         # New sessions start with stealth OFF (transparent mode is
         # the didactic default); the operator can flip the toggle
@@ -1015,6 +1026,13 @@ class TargetBar(ctk.CTkFrame):
         self._reset_all_panels()
 
         self.app.terminal.section(f"NEW SESSION — {platform}  |  {target}")
+        # The abort ran before the terminal was cleared, so restate the
+        # outcome here — otherwise the operator never sees it.
+        if aborted:
+            self.app.terminal.write(
+                f"[*] {aborted} tool(s) from the previous target were "
+                f"aborted — their output is not part of this session.",
+                "warn")
         self.app.terminal.write(f"[+] Session started: {target}", "success")
         self.app.terminal.write(f"    Platform : {platform}", "info")
         self.app.terminal.write(f"    Session  : {session.session_id[:8]}", "info")
@@ -2469,6 +2487,32 @@ class TargetBar(ctk.CTkFrame):
             except Exception as e:
                 print(f"[HAWK] load: autosave pause failed: {e}")
 
+        # Abort tools still running against the outgoing target.  They
+        # would otherwise keep streaming into the session we are about
+        # to make current and write their results there on completion.
+        aborted = 0
+        try:
+            aborted = self.app.abort_running_tools("SESSION LOAD")
+        except Exception as e:
+            print(f"[HAWK] load: abort running tools failed: {e}")
+
+        # Snapshot the incoming terminal history BEFORE the reset:
+        # `_reset_all_panels()` clears the terminal, and clearing wipes
+        # `session.terminal_lines` on the CURRENT session — which is
+        # this very object when the operator reloads the session that
+        # is already active.
+        incoming_lines = list(getattr(session, "terminal_lines", []) or [])
+
+        # Full panel reset — the previous target's Target Intel,
+        # kill-chain dots, credential rows and findings must not
+        # survive into the loaded session (they would be written
+        # straight into its file by the next save).  Same helper
+        # `_new_session` uses, so the two paths cannot disagree.
+        try:
+            self._reset_all_panels()
+        except Exception as e:
+            print(f"[HAWK] load: panel reset failed: {e}")
+
         self.app.session_manager.set_current(session)
 
         # Target + domain
@@ -2491,10 +2535,29 @@ class TargetBar(ctk.CTkFrame):
 
         # Restore terminal history BEFORE writing any new lines — so the
         # new "session loaded" banner appears at the end of the replay.
+        # Replays the pre-reset snapshot, not `session.terminal_lines`,
+        # which the reset emptied when reloading the active session.
         try:
-            self.app.terminal.restore_lines(session.terminal_lines)
+            session.terminal_lines = incoming_lines
+            self.app.terminal.restore_lines(incoming_lines)
         except Exception as e:
             print(f"[HAWK] terminal restore failed: {e}")
+
+        # Repoint the Credential Store at the loaded session.  Without
+        # this the rows still belong to the previous session AND still
+        # carry its list indices, so EDIT/DELETE address the wrong
+        # entry in the newly current session.
+        try:
+            self.app.cred_store.refresh()
+        except Exception as e:
+            print(f"[HAWK] cred store refresh failed: {e}")
+
+        # Repaint the FINDINGS panel from the loaded session — it is
+        # append-only from the UI side, so nothing else ever corrects it.
+        try:
+            self.app.rehydrate_findings_panel()
+        except Exception as e:
+            print(f"[HAWK] findings rehydrate failed: {e}")
 
         # Restore tool status icons across all kill-chain cards
         try:
@@ -2552,6 +2615,12 @@ class TargetBar(ctk.CTkFrame):
         self.app.terminal.write(
             f"[+] Loaded {_os.path.basename(session.file_path or '?')}",
             "success")
+        # Restated after the reset cleared the terminal (see NEW SESSION).
+        if aborted:
+            self.app.terminal.write(
+                f"[*] {aborted} tool(s) from the previous target were "
+                f"aborted — their output is not part of this session.",
+                "warn")
         if s.get("last_saved"):
             self.app.terminal.write(
                 f"    Snapshot time  : {s['last_saved']}", "dim")

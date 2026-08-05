@@ -1006,6 +1006,153 @@ class HawkApp(ctk.CTk):
             return None
         return lambda *a, **k: self.ui_call(fn, *a, **k)
 
+    # ─── Tool lifecycle — one enumeration point for every live runner ────────
+    #
+    # Three independent places own a runner: the background-jobs bar
+    # (BgJobsBar._jobs[].runner), each kill-chain card
+    # (CardWidget._tool_runners) and the credential store's crack slots
+    # (CredentialStoreWidget._active_cracks).  Session switch and
+    # shutdown both need the full set, so they read it from here
+    # instead of each growing their own partial copy.
+
+    def collect_active_runners(self) -> list:
+        """Return ``[(label, runner)]`` for every tool still running.
+
+        A card keeps its finished runners in ``_tool_runners`` forever,
+        so entries are filtered on ``runner.running``.  Runners that
+        don't expose ``running`` (MetasploitRunner — the work lives in
+        an xterm HAWK doesn't own) are skipped: HAWK cannot stop them
+        and must not claim otherwise.
+        """
+        out = []
+        try:
+            bar = getattr(self, "bg_jobs_bar", None)
+            if bar is not None:
+                with bar._lock:
+                    jobs = list(bar._jobs.values())
+                for job in jobs:
+                    if job.runner is not None:
+                        out.append((job.label, job.runner))
+        except Exception as e:
+            print(f"[HAWK] bg job enumeration failed: {e}")
+        try:
+            kc = getattr(self, "kill_chain_panel", None)
+            for card in list(getattr(kc, "_cards", {}).values()):
+                for tid, runner in list(
+                        getattr(card, "_tool_runners", {}).items()):
+                    if runner is not None and getattr(runner, "running", False):
+                        out.append((tid, runner))
+        except Exception as e:
+            print(f"[HAWK] card runner enumeration failed: {e}")
+        try:
+            cs = getattr(self, "cred_store", None)
+            for idx, entry in list(getattr(cs, "_active_cracks", {}).items()):
+                runner = (entry or {}).get("runner")
+                if runner is not None:
+                    out.append((f"crack (credential #{idx})", runner))
+        except Exception as e:
+            print(f"[HAWK] crack enumeration failed: {e}")
+        return out
+
+    def abort_running_tools(self, reason: str) -> int:
+        """Kill every live tool and tell the operator what happened.
+
+        Called on every session switch: a tool started against the
+        previous target must not keep running — and above all must not
+        land its results in the session the operator just opened.  The
+        design choice is ABORT, not "let it finish": the operator has
+        to know what HAWK is doing at any moment, and a scan whose
+        results have nowhere valid to go is pure noise on the wire.
+
+        ``kill()`` returns True when a stop was really initiated,
+        False when the runner had nothing to stop.  Anything that
+        could not be stopped is named explicitly.
+        """
+        runners = self.collect_active_runners()
+        if not runners:
+            return 0
+        self.terminal.write(
+            f"  [*] {reason} — aborting {len(runners)} running tool(s).",
+            "warn")
+        aborted = 0
+        for label, runner in runners:
+            try:
+                ok = runner.kill()
+            except Exception as e:
+                ok = False
+                print(f"[HAWK] kill({label}) raised: {e}")
+            if ok is False:
+                self.terminal.write(
+                    f"      ! {label} — could not be stopped by HAWK; "
+                    f"it may still be running against the previous "
+                    f"target.", "error")
+            else:
+                aborted += 1
+                self.terminal.write(f"      - {label} — stop requested.",
+                                    "dim")
+        return aborted
+
+    # ─── Session identity guard ──────────────────────────────────────────────
+
+    def session_token(self):
+        """Identity of the session a job is being launched into.
+
+        Captured at launch and re-checked before the job writes
+        anything back: a tool that outlives a session switch must not
+        write the old target's output into the newly active session.
+        """
+        return getattr(self.session_manager.current, "session_id", None)
+
+    def session_token_valid(self, token, what: str = "Result") -> bool:
+        """True when `token` still matches the active session.
+
+        On mismatch the result is dropped and the operator is told —
+        silently discarding a finished scan would be the same lie the
+        wrong-session write is.
+        """
+        current = getattr(self.session_manager.current, "session_id", None)
+        if token is None or token == current:
+            return True
+
+        def _short(t):
+            return str(t)[:8] if t else "none"
+
+        self.terminal.write(
+            f"  [!] {what} discarded — it belongs to session "
+            f"{_short(token)}, the active session is {_short(current)}. "
+            f"Output from the previous target is NOT written into this "
+            f"session.", "warn")
+        return False
+
+    def rehydrate_findings_panel(self) -> None:
+        """Repaint the FINDINGS box from the active session.
+
+        LOAD used to leave the previous target's findings on screen —
+        and the box is write-only from the user's side, so nothing ever
+        corrected it.
+        """
+        sess = self.session_manager.current
+        prefixes = {
+            "info":     "[INFO]    ", "low":      "[LOW]     ",
+            "medium":   "[MEDIUM]  ", "high":     "[HIGH]    ",
+            "critical": "[CRITICAL]",
+        }
+        try:
+            self._findings_box.configure(state="normal")
+            self._findings_box._textbox.delete("1.0", "end")
+            for f in (sess.get_all_findings() if sess else []):
+                sev = getattr(f, "severity", "info") or "info"
+                title = getattr(f, "title", "") or ""
+                if not title:
+                    continue
+                self._findings_box._textbox.insert(
+                    "end", f"{prefixes.get(sev, prefixes['info'])}  "
+                           f"{title}\n", sev)
+            self._findings_box.configure(state="disabled")
+            self._findings_box._textbox.see("end")
+        except Exception as e:
+            print(f"[HAWK] findings rehydrate failed: {e}")
+
     def show(self):
         self.deiconify()
         self.lift()

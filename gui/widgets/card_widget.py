@@ -68,6 +68,12 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
         self._tool_runners = {}
         self._tool_widgets = {}
         self._multi_runner = None
+        # Raw tool output, keyed by tool id.  Card-scoped before: every
+        # `_run_raw` zeroed a single shared list, so a second tool on
+        # the same card destroyed the first one's intel before it was
+        # parsed.  `_raw_log` stays as the *current* tool's list for
+        # the existing readers.
+        self._raw_logs     = {}
         self._raw_log      = []
         # Blink-alert state — set by _notify_activity() when a tool
         # inside this card finishes WHILE the card is collapsed.  Two
