@@ -90,6 +90,11 @@ class HawkApp(ctk.CTk):
         # / kill -9 that never got to run the exit handler).
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._hosts_cleanup_done = False
+        # Shutdown is not reentrant: clicking the X again while the
+        # /etc/hosts dialog is up used to stack a second pkexec prompt,
+        # and a signal arriving mid-teardown re-ran the whole path.
+        self._closing = False
+        self._close_finished = False
         self.after(600, self._startup_hosts_cleanup_check)
 
         # SIGINT (Ctrl-C from launching shell) + SIGTERM (systemd stop
@@ -121,6 +126,13 @@ class HawkApp(ctk.CTk):
         exist, show a dialog asking whether to remove them.  Then
         destroy the window regardless of the answer."""
         import sys as _sys
+        if self._closing:
+            # Second X click while the cleanup dialog is up.  Ignoring
+            # it is the whole point: the previous path is already
+            # waiting on a pkexec prompt, and a second one would stack
+            # on top of it.
+            return
+        self._closing = True
         try:
             from utils.hosts_helper import list_hawk_entries
             entries = list_hawk_entries()
@@ -210,10 +222,35 @@ class HawkApp(ctk.CTk):
 
             def _on_done(ok, msg):
                 def _finish():
-                    self._hosts_cleanup_done = True
                     print(f"[HAWK] /etc/hosts cleanup: "
                           f"{'OK' if ok else 'FAILED'} — {msg}",
                           file=_sys.stderr)
+                    if not ok:
+                        # The write failed (pkexec dismissed, sudo
+                        # fallback refused, /etc/hosts not writable).
+                        # Closing here would leave HAWK's entries behind
+                        # while the only report went to stderr.  Say so
+                        # and let the operator decide.
+                        try:
+                            waiting_lbl.configure(
+                                text=f"Cleanup FAILED — {msg}\n"
+                                     f"Entries are still in /etc/hosts. "
+                                     f"Remove them manually, or retry.",
+                                text_color=COLORS.get("text_red",
+                                                      "#FF4444"))
+                        except Exception:
+                            pass
+                        for child in btn_frame.winfo_children():
+                            try:
+                                child.configure(state="normal")
+                            except Exception:
+                                pass
+                        # Re-arm the close path: the operator did not
+                        # get what they asked for, so this is not a
+                        # completed shutdown.
+                        self._closing = False
+                        return
+                    self._hosts_cleanup_done = True
                     try:
                         win.destroy()
                     except Exception:
@@ -256,19 +293,214 @@ class HawkApp(ctk.CTk):
             command=_no,
         ).pack(side="left", padx=8)
 
+    @staticmethod
+    def _runner_child_alive(runner) -> bool:
+        """True while the runner's child process is still on the system.
+
+        `runner.running` is not proof: kill() clears it immediately so
+        the UI can repaint, while the SIGTERM → SIGKILL escalation is
+        still in flight.  The only honest signal is the process itself.
+        """
+        for attr in ("process", "_proc"):
+            proc = getattr(runner, attr, None)
+            if proc is None:
+                continue
+            try:
+                if proc.poll() is None:
+                    return True
+            except Exception:
+                pass
+        return False
+
     def _finish_close(self):
-        """Final shutdown — kill crack processes and destroy."""
+        """Final shutdown — stop everything HAWK started, then destroy.
+
+        Every tool is spawned with ``preexec_fn=os.setsid``, so closing
+        the window sends it no SIGHUP: the GUI vanished and hydra kept
+        hammering the target for hours.  Killing was not enough either —
+        ``ToolRunner.kill()`` escalates to SIGKILL from a daemon thread
+        after 2 s, and destroying the root and returning let the
+        interpreter finalize and kill that daemon long before it ran, so
+        even the initial SIGTERM was a race.  We now kill, WAIT for the
+        children to actually go, and tell the operator about anything
+        that survived instead of exiting quietly.
+        """
         import sys as _sys
+        import time as _time
+        if self._close_finished:
+            return
+        self._close_finished = True
+        self._closing = True
+
+        runners = []
+        try:
+            runners = self.collect_active_runners()
+        except Exception as e:
+            print(f"[HAWK] shutdown enumeration error: {e}", file=_sys.stderr)
+
         try:
             cs = getattr(self, "cred_store", None)
             if cs is not None and hasattr(cs, "stop_all_active_cracks"):
                 cs.stop_all_active_cracks()
         except Exception as e:
             print(f"[HAWK] crack teardown error: {e}", file=_sys.stderr)
+
+        for label, runner in runners:
+            try:
+                runner.kill()
+            except Exception as e:
+                print(f"[HAWK] shutdown kill({label}) error: {e}",
+                      file=_sys.stderr)
+
+        # Wait for the escalation to finish.  The main thread blocking
+        # here is what keeps the daemon threads alive long enough to do
+        # their job; update() keeps the window repainting meanwhile.
+        survivors = []
+        if runners:
+            try:
+                self.terminal.write(
+                    f"  [*] Shutting down — waiting for "
+                    f"{len(runners)} tool(s) to stop…", "warn")
+            except Exception:
+                pass
+            deadline = _time.monotonic() + self._SHUTDOWN_GRACE_SECS
+            while _time.monotonic() < deadline:
+                survivors = [(lbl, r) for lbl, r in runners
+                             if self._runner_child_alive(r)]
+                if not survivors:
+                    break
+                try:
+                    self.update()
+                except Exception:
+                    pass
+                _time.sleep(0.1)
+            else:
+                survivors = [(lbl, r) for lbl, r in runners
+                             if self._runner_child_alive(r)]
+
+        if survivors:
+            self._warn_surviving_processes(survivors)
+            return
+
         try:
             self.destroy()
         except Exception:
             pass
+
+    # Seconds to wait for children to die before telling the operator
+    # they survived.  kill() needs ~3 s worst case (2 s to SIGKILL plus
+    # 1 s for the direct-PID fallback), so this leaves real headroom.
+    _SHUTDOWN_GRACE_SECS = 6.0
+
+    def _warn_surviving_processes(self, survivors: list) -> None:
+        """Last dialog before exit: name what HAWK could not stop.
+
+        Closing silently here is the worst case in the whole app — a
+        brute-force that keeps hitting the target with no UI left to
+        stop it.  The operator gets the PIDs and the exact command.
+        """
+        import sys as _sys
+        import customtkinter as ctk
+        from utils.config import COLORS
+
+        lines = []
+        for label, runner in survivors:
+            pid = ""
+            for attr in ("process", "_proc"):
+                proc = getattr(runner, attr, None)
+                if proc is not None and getattr(proc, "pid", None):
+                    pid = str(proc.pid)
+                    break
+            lines.append(f"  • {label}" + (f"   (pid {pid})" if pid else ""))
+        report = "\n".join(lines)
+        print(f"[HAWK] processes survived shutdown:\n{report}",
+              file=_sys.stderr)
+
+        pids = " ".join(
+            str(getattr(getattr(r, "process", None), "pid", "") or
+                getattr(getattr(r, "_proc", None), "pid", ""))
+            for _, r in survivors).strip()
+        manual = f"sudo kill -9 {pids}" if pids else "sudo pkill -f <tool>"
+
+        try:
+            win = ctk.CTkToplevel(self)
+            win.title("HAWK — processes still running")
+            win.geometry("620x360")
+            win.transient(self)
+            win.grab_set()
+            win.protocol("WM_DELETE_WINDOW", lambda: None)
+
+            ctk.CTkLabel(
+                win, text="⚠  HAWK could not stop everything it started",
+                font=ctk.CTkFont(family="Courier New", size=15,
+                                 weight="bold"),
+                text_color=COLORS.get("text_red", "#FF4444"),
+            ).pack(padx=16, pady=(16, 6))
+            ctk.CTkLabel(
+                win,
+                text=("These processes are STILL RUNNING against the "
+                      "target and will keep running after HAWK exits:"),
+                font=ctk.CTkFont(family="Courier New", size=12),
+                text_color=COLORS.get("text_bright", "#E0E0E0"),
+                wraplength=580, justify="left",
+            ).pack(padx=16, pady=(0, 6))
+            box = ctk.CTkTextbox(
+                win, height=110, font=ctk.CTkFont(
+                    family="Courier New", size=12),
+                fg_color=COLORS.get("bg_card", "#0A0A0A"),
+                text_color=COLORS.get("text_yellow", "#FFCC00"))
+            box.pack(fill="x", padx=16)
+            box.insert("1.0", f"{report}\n\nKill them with:\n  {manual}")
+            box.configure(state="disabled")
+
+            row = ctk.CTkFrame(win, fg_color="transparent")
+            row.pack(pady=12)
+
+            def _force_close():
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+                try:
+                    self.destroy()
+                except Exception:
+                    pass
+
+            def _stay():
+                self._closing = False
+                self._close_finished = False
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+
+            ctk.CTkButton(
+                row, text="CLOSE ANYWAY", width=200, height=32,
+                font=ctk.CTkFont(family="Courier New", size=13,
+                                 weight="bold"),
+                fg_color="#220000", hover_color="#330000",
+                border_color=COLORS.get("text_red", "#FF4444"),
+                border_width=1,
+                text_color=COLORS.get("text_red", "#FF4444"),
+                corner_radius=3, command=_force_close).pack(side="left",
+                                                            padx=8)
+            ctk.CTkButton(
+                row, text="KEEP HAWK OPEN", width=200, height=32,
+                font=ctk.CTkFont(family="Courier New", size=13),
+                fg_color=COLORS.get("bg_card", "#0A0A0A"),
+                hover_color="#1A1A1A",
+                border_color=COLORS.get("border_dim", "#333333"),
+                border_width=1,
+                text_color=COLORS.get("text_dim", "#808080"),
+                corner_radius=3, command=_stay).pack(side="left", padx=8)
+        except Exception as e:
+            # No UI left to warn through — the stderr report above is
+            # the record.  Don't trap the operator in a dead window.
+            print(f"[HAWK] survivor dialog failed: {e}", file=_sys.stderr)
+            try:
+                self.destroy()
+            except Exception:
+                pass
 
     def _startup_hosts_cleanup_check(self):
         """On startup, check /etc/hosts for stale HAWK-tagged entries.

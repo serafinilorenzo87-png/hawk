@@ -669,5 +669,115 @@ class OutputIsCappedHonestlyTests(unittest.TestCase):
         self.assertIn("truncated", line)
 
 
+# ── Shutdown kills what HAWK started ────────────────────────────────
+
+class _FakeProc:
+    def __init__(self, alive=True, pid=4242):
+        self.alive = alive
+        self.pid = pid
+
+    def poll(self):
+        return None if self.alive else 0
+
+
+class _ProcRunner(_FakeRunner):
+    """Runner whose child really does go away when killed."""
+
+    def __init__(self, dies=True, pid=4242):
+        super().__init__()
+        self.process = _FakeProc(pid=pid)
+        self._dies = dies
+
+    def kill(self):
+        self.killed = True
+        self.running = False
+        if self._dies:
+            self.process.alive = False
+        return True
+
+
+class ShutdownTests(unittest.TestCase):
+    """W1: _finish_close only stopped the credential cracks. Every tool
+    is spawned with preexec_fn=os.setsid so it gets no SIGHUP — the GUI
+    vanished and hydra kept hammering the target."""
+
+    def _app(self, runners):
+        _install_customtkinter_stub()
+        from gui.app import HawkApp
+        import threading
+
+        app = _app_host()
+        app._closing = False
+        app._close_finished = False
+        app._SHUTDOWN_GRACE_SECS = 0.5
+        app.destroyed = []
+        app.warned = []
+        app.destroy = lambda: app.destroyed.append(True)
+        app.update = lambda: None
+        app._warn_surviving_processes = lambda s: app.warned.append(s)
+        app.cred_store = types.SimpleNamespace(
+            stop_all_active_cracks=lambda: app.warned.append("cracks"),
+            _active_cracks={})
+        jobs = {f"j{i}": types.SimpleNamespace(label=f"job{i}", runner=r)
+                for i, r in enumerate(runners)}
+        app.bg_jobs_bar = types.SimpleNamespace(_jobs=jobs,
+                                                _lock=threading.Lock())
+        app.kill_chain_panel = types.SimpleNamespace(_cards={})
+        # `_runner_child_alive` is a staticmethod: bind the plain
+        # function, `_finish_close` needs self.
+        app._runner_child_alive = HawkApp._runner_child_alive
+        app._finish_close = HawkApp._finish_close.__get__(app, type(app))
+        return app
+
+    def test_every_running_tool_is_killed_before_destroy(self):
+        runners = [_ProcRunner(), _ProcRunner()]
+        app = self._app(runners)
+        app._finish_close()
+        self.assertTrue(all(r.killed for r in runners),
+                        "a tool survived the window closing")
+        self.assertEqual(app.destroyed, [True])
+
+    def test_shutdown_waits_for_the_children_to_actually_go(self):
+        """kill() clears `running` immediately so the UI can repaint,
+        while SIGKILL escalation is still in flight. The wait must key
+        off the process, not the flag."""
+        runner = _ProcRunner()
+        app = self._app([runner])
+        app._finish_close()
+        self.assertFalse(app._runner_child_alive(runner))
+        self.assertEqual(app.destroyed, [True])
+
+    def test_a_survivor_blocks_the_silent_exit(self):
+        runner = _ProcRunner(dies=False)
+        app = self._app([runner])
+        app._finish_close()
+        self.assertEqual(app.destroyed, [],
+                         "HAWK exited while a tool was still running")
+        self.assertTrue(any(isinstance(w, list) for w in app.warned))
+
+    def test_shutdown_is_not_reentrant(self):
+        runners = [_ProcRunner()]
+        app = self._app(runners)
+        app._finish_close()
+        app._finish_close()
+        self.assertEqual(app.destroyed, [True])
+
+    def test_on_close_ignores_a_second_x_click(self):
+        _install_customtkinter_stub()
+        from gui.app import HawkApp
+
+        app = _app_host()
+        app._closing = False
+        app._hosts_cleanup_done = False
+        calls = []
+        app._finish_close = lambda: calls.append("finish")
+        app._on_close = HawkApp._on_close.__get__(app, type(app))
+
+        app._on_close()
+        app._on_close()
+        self.assertEqual(calls, ["finish"],
+                         "a second X click stacked another teardown")
+
+
 if __name__ == "__main__":
     unittest.main()
