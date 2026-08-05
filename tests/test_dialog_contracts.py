@@ -133,14 +133,12 @@ class BtnHelperContractTests(unittest.TestCase):
 _TOOL_ID_SETS = ("WEB_TOOLS", "SMB_TOOLS")
 
 # Ids the GUI still routes for although no module registers them.
-# Keeping them listed here (rather than silently allowing any unknown
-# id) means a NEW mismatch fails the build while these known ones stay
-# documented:
-#   dirb     — `_route_dirb` and the WEB_TOOLS entry exist, but no
-#              module ships a dirb tool, so the route is unreachable.
-#   gobuster — WEB_TOOLS alias; the real ids are gobuster_dir /
-#              gobuster_dns and both are present.
-_UNREGISTERED_GUI_TOOL_IDS = {"dirb", "gobuster"}
+# MUST STAY EMPTY: every exception here is a GUI branch that cannot
+# run.  The two it used to hold were closed by registering `dirb` in
+# modules/enumeration.py (its `_route_dirb` dialog was complete but
+# unreachable) and by dropping the bare `gobuster` alias in favour of
+# the registered gobuster_dir / gobuster_dns ids.
+_UNREGISTERED_GUI_TOOL_IDS = set()
 
 
 def _registry_tool_ids():

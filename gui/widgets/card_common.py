@@ -53,7 +53,11 @@ TOOL_STATUS_ICONS = {
 ACCESS_GATED_PHASES = {"lateral", "post_exploit"}
 
 WEB_TOOLS = {
-    "gobuster", "gobuster_dir", "gobuster_dns",
+    # TOOL IDS, like SMB_TOOLS below — tests/test_dialog_contracts
+    # asserts every one of them exists in the module registry.  A bare
+    # "gobuster" alias used to sit here; the registered ids are
+    # gobuster_dir and gobuster_dns.
+    "gobuster_dir", "gobuster_dns",
     "ffuf", "nikto", "nikto_ssl",
     "nuclei", "wpscan", "sqlmap", "wafw00f", "whatweb", "dirb",
 }

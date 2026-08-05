@@ -43,6 +43,25 @@ class EnumerationModule(BaseModule):
             requires_sudo=False,
         ),
         Tool(
+            # The GUI has always shipped a full DIRB route
+            # (card_routes_web._route_dirb: wordlist picker, base-path
+            # field, wildcard advisory) but no module registered the id,
+            # so the branch was unreachable and the card never appeared.
+            # dirb is stock on Kali and stays useful where gobuster's
+            # HTTP/2 handling or TLS strictness gets in the way, so the
+            # tool is registered rather than the route deleted.
+            id="dirb",
+            name="DIRB",
+            desc=("Classic recursive web directory scanner.  No "
+                  "response-length filter — prefer GOBUSTER Dir or FFUF "
+                  "on SPA / catch-all targets."),
+            cmd_template=("dirb http://{target} "
+                          "/usr/share/wordlists/dirb/common.txt"),
+            binary="dirb",
+            category="web",
+            requires_sudo=False,
+        ),
+        Tool(
             id="ffuf",
             name="FFUF",
             desc="Fast web fuzzer. Requires HTTP/HTTPS on target.",

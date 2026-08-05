@@ -617,7 +617,7 @@ class CardWebRoutesMixin:
         _btn(row, "CANCEL", lambda: _safe_destroy(win))
 
     def _dispatch_web_tool(self, tool, target, port, scheme, base_url, fp):
-        if tool.id in ("gobuster", "gobuster_dir"):
+        if tool.id == "gobuster_dir":
             self._route_gobuster_dir(tool, base_url)
             return
         elif tool.id == "ffuf":
