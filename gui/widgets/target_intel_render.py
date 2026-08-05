@@ -4128,10 +4128,17 @@ class TargetIntelRenderMixin:
             try:
                 from utils.runner import _hawk_env
                 if action == "copy":
+                    # `searchsploit -m` copies into the process working
+                    # directory, so run it FROM the HAWK exploits folder
+                    # instead of wherever the operator launched HAWK.
+                    import os as _os
+                    from utils.config import OUTPUTS_DIR
+                    dest_dir = _os.path.join(OUTPUTS_DIR, "exploits")
+                    _os.makedirs(dest_dir, exist_ok=True)
                     r = subprocess.run(
                         ["searchsploit", "-m", edb_path],
                         capture_output=True, text=True, timeout=15,
-                        env=_hawk_env())
+                        cwd=dest_dir, env=_hawk_env())
                     self.app.terminal.write(
                         f"  $ searchsploit -m {edb_path}", "cmd")
                     for line in (r.stdout or "").splitlines():
@@ -4140,7 +4147,7 @@ class TargetIntelRenderMixin:
                                 f"  {line}", "success")
                     if r.returncode == 0:
                         self.app.terminal.write(
-                            f"  [+] Exploit copied to current directory",
+                            f"  [+] Exploit copied to {dest_dir}",
                             "success")
                 elif action == "view":
                     r = subprocess.run(

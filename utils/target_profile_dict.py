@@ -196,7 +196,11 @@ def build_dict(
     if len(final) > max_lines:
         final = final[:max_lines]
 
-    # Write.
+    # Write.  `out_path` is a parameter, so the containment rule is
+    # enforced here rather than trusted: the single caller builds it
+    # from DICTS_DIR and catches the ValueError.
+    from utils.config import require_writable
+    out_path = require_writable(out_path, "target dict")
     try:
         os.makedirs(os.path.dirname(os.path.abspath(out_path)),
                     exist_ok=True)

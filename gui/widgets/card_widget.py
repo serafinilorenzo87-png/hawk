@@ -2515,13 +2515,16 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
         else:
             local_name = script_name
 
-        # The curl command in post_exploit.py runs from HAWK's CWD,
-        # so that's where the file lands.  We look for `local_name`
-        # (the name curl saved via -o) rather than `script_name`
-        # because the winpeas.exe preflight may have downloaded a
-        # .ps1 that we want the workflow dialog to treat AS a ps1
-        # while the file on disk is just winpeas.ps1.
-        local_path = os.path.join(os.getcwd(), local_name)
+        # The curl commands in post_exploit.py save into `{payloads}`,
+        # i.e. <HAWK>/payloads/ — they used to write to HAWK's CWD,
+        # which put the artefacts outside the tree (and made the PEAS
+        # workflow's HTTP server serve whatever else was in there).
+        # We look for `local_name` (the name curl saved via -o) rather
+        # than `script_name` because the winpeas.exe preflight may have
+        # downloaded a .ps1 that we want the workflow dialog to treat AS
+        # a ps1 while the file on disk is just winpeas.ps1.
+        from utils.config import PAYLOADS_DIR
+        local_path = os.path.join(PAYLOADS_DIR, local_name)
         if not os.path.isfile(local_path):
             self.app.terminal.write(
                 f"  [!] {local_name} not found at {local_path} — "

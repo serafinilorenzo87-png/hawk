@@ -252,6 +252,10 @@ def scramble_binary(src_path: str, dst_path: str,
         # blobs, may break strict-format parsers.
         out = data + secrets.token_bytes(random.randint(512, 2048))
 
+    # `dst_path` comes from the caller's `dicts_dir`; the scrambled copy
+    # is served over HTTP to the target, so keep it inside the tree.
+    from utils.config import require_writable
+    dst_path = require_writable(dst_path, "scrambled payload")
     with open(dst_path, "wb") as fh:
         fh.write(out)
     new_sha = hashlib.sha256(out).hexdigest()

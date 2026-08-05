@@ -2152,15 +2152,21 @@ class PostExploitGuideDialog:
             # ── Strip ANSI → write sibling .txt ───────────────────────
             # winpeas / linpeas output is dense with ANSI color codes
             # that render as garbage in text editors.  We write a
-            # sibling `.txt` (same basename, same directory) with all
-            # escape sequences stripped so the user can open it in
-            # any editor and actually read it.  The raw `.out` is left
-            # in place for debugging.
+            # `.txt` (same basename, all escape sequences stripped) so
+            # the user can open it in any editor and actually read it.
+            # The raw `.out` is left in place for debugging.
+            #
+            # The picker above starts in $HOME, so the file the operator
+            # chose may live anywhere; contained_sibling writes next to
+            # it only when that is inside the HAWK tree, and falls back
+            # to <HAWK>/outputs/ otherwise.  HAWK never writes into the
+            # operator's home directory.
             import re as _re
+            from utils.config import contained_sibling as _sibling
             _ansi_re = _re.compile(
                 r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
             clean = _ansi_re.sub("", content)
-            txt_path = _os.path.splitext(path)[0] + ".txt"
+            txt_path = _sibling(path, ".txt")
             try:
                 # Structured header with TOC — the winpeas/linpeas
                 # parsers (step B/D) overwrite this file with a fully

@@ -14,6 +14,7 @@ env/
 # ── HAWK runtime data (engagement data — NEVER commit) ──────
 sessions/*
 outputs/*
+payloads/*
 reports/*
 dicts/*
 tmp/*
@@ -24,6 +25,7 @@ configs/*
 # Keep empty runtime dirs in the tree
 !sessions/.gitkeep
 !outputs/.gitkeep
+!payloads/.gitkeep
 !reports/.gitkeep
 !dicts/.gitkeep
 !tmp/.gitkeep

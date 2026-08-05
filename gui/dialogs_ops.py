@@ -961,7 +961,9 @@ def show_proxychains_config_dialog(parent, app=None, on_save=None):
         "proxychains4 routes any TCP tool's traffic through this SOCKS proxy.\n"
         "The tunnel MUST already be running before you click SET PROXY — "
         "see the HOW TO CREATE A TUNNEL section below for setup commands.\n"
-        "The original file is backed up before every write.",
+        "The original file is backed up before every write — when there "
+        "is no readable original, the status line says so instead of "
+        "naming a backup that was never taken.",
         COLORS["text_yellow"])
 
     # ── Current proxy ─────────────────────────────────────────────────
@@ -1149,13 +1151,15 @@ def show_proxychains_config_dialog(parent, app=None, on_save=None):
             "# chisel.exe must be uploaded to the target first",
             "KALI_IP = your tun0/VPN IP visible from the pivot (run: ip a show tun0).\n"
             "chisel R:socks creates SOCKS5 automatically on Kali 127.0.0.1:1080.\n"
-            "Download chisel.exe from LATERAL MOVEMENT → Chisel (Windows, download).\n"
+            "Download chisel.exe from LATERAL MOVEMENT → Chisel (Windows, download)\n"
+            "— it lands in <HAWK>/payloads/chisel.exe.\n"
             "Then set proxy above → socks5  127.0.0.1  1080",
         ),
         (
             "3 · ligolo-ng  —  transparent TUN routing; tools work WITHOUT proxychains after setup",
             "# ── Step 1 — On Kali, start the proxy listener:\n"
-            "sudo ./ligolo-proxy -selfcert -laddr 0.0.0.0:11601\n\n"
+            "sudo <HAWK>/payloads/ligolo-proxy -selfcert "
+            "-laddr 0.0.0.0:11601\n\n"
             "# ── Step 2 — On the pivot, connect the agent:\n"
             "./ligolo-agent -connect KALI_IP:11601 -ignore-cert\n"
             "# KALI_IP = your tun0 address (ip a show tun0)\n\n"
@@ -1351,22 +1355,44 @@ def show_proxychains_config_dialog(parent, app=None, on_save=None):
         new_content = _build_new_content(conf_content, ptype, ip, port)
         backup = conf_path + ".hawk_backup"
 
+        # ── External-write gate ───────────────────────────────────────
+        # /etc/proxychains4.conf is one of the two files HAWK may write
+        # outside its own tree (utils.config.ALLOWED_EXTERNAL_WRITES).
+        # It cannot move under BASE_DIR: proxychains4 reads its config
+        # from a fixed system path, and so do the operator's own
+        # `proxychains4 <tool>` commands.
+        from utils.config import require_writable
+        try:
+            require_writable(conf_path, "proxychains config")
+            require_writable(backup, "proxychains config backup")
+        except ValueError as ve:
+            status_lbl.configure(text=f"  ⚠  {ve}",
+                                 text_color=COLORS["text_red"])
+            return
+
         # ── Direct write (Kali is typically run as root) ───────────────
         try:
+            # No backup when there was nothing to back up — say so
+            # instead of naming a file that was never created.
+            backed_up = False
             if conf_content:
                 with open(backup, "w", encoding="utf-8") as fh:
                     fh.write(conf_content)
+                backed_up = True
             with open(conf_path, "w", encoding="utf-8") as fh:
                 fh.write(new_content)
+            backup_note = (f"Backup: {backup}" if backed_up else
+                           "No backup — the original was empty or "
+                           "unreadable.")
             status_lbl.configure(
-                text=f"  ✓  Saved.  Backup: {backup}",
+                text=f"  ✓  Saved.  {backup_note}",
                 text_color=COLORS["text_green"])
             try:
                 if app:
                     app.terminal.write(
                         f"  [+] proxychains4.conf updated → "
                         f"{ptype} {ip}:{port}  "
-                        f"(backup: {backup})", "success")
+                        f"({backup_note.lower()})", "success")
             except Exception:
                 pass
             if on_save:
@@ -1395,9 +1421,15 @@ def show_proxychains_config_dialog(parent, app=None, on_save=None):
                 text_color=COLORS["text_red"])
             return
 
+        # `cp` needs sudo too: we only reach this path because the
+        # direct write hit PermissionError, so an unprivileged cp into
+        # /etc silently failed and the dialog promised a backup that was
+        # never taken.  The || branch reports the truth instead.
         cmd = (
             f"echo '[HAWK] Applying proxychains config (sudo required)...'; "
-            f"cp {_shlex.quote(conf_path)} {_shlex.quote(backup)} 2>/dev/null; "
+            f"sudo cp {_shlex.quote(conf_path)} {_shlex.quote(backup)} && "
+            f"echo '[HAWK] ✓ Backup: {backup}' || "
+            f"echo '[HAWK] ! No backup taken (no readable original?)'; "
             f"sudo mv {_shlex.quote(tmp_path)} {_shlex.quote(conf_path)} && "
             f"echo '[HAWK] ✓ Config written to {conf_path}' || "
             f"echo '[HAWK] ✗ sudo mv failed — check permissions'; "

@@ -44,11 +44,27 @@ import shutil
 import subprocess
 import tempfile
 from typing import Iterable, Optional, Tuple
-from utils.config import TMP_DIR
+from utils.config import TMP_DIR, require_writable
 
 
 HOSTS_PATH = "/etc/hosts"
 HAWK_MARKER = "# HAWK-ad-dns"
+
+
+def _check_allowed() -> Optional[str]:
+    """Assert /etc/hosts is still on the external-write allowlist.
+
+    Both write paths below hand the file to pkexec/sudo, so nothing
+    stops them from targeting any path HOSTS_PATH happens to hold.  The
+    check makes the policy in utils.config the single source of truth
+    instead of a comment.  Returns an error message, or None when the
+    write may proceed.
+    """
+    try:
+        require_writable(HOSTS_PATH, "hosts entry")
+        return None
+    except ValueError as e:
+        return str(e)
 
 
 def _mk_hawk_temp(prefix: str) -> Tuple[int, str]:
@@ -140,6 +156,10 @@ def add_entries(entries: Iterable[Tuple[str, Iterable[str]]],
     auth prompt or cancels.  That's fine in the context of a small
     dialog triggered by a button click.
     """
+    denied = _check_allowed()
+    if denied:
+        return False, denied
+
     block = _build_append_lines(entries)
     if not block.strip():
         return False, "no valid entries to add"
@@ -225,6 +245,10 @@ def add_entries(entries: Iterable[Tuple[str, Iterable[str]]],
 def remove_hawk_entries() -> Tuple[bool, str]:
     """Remove every line tagged with the HAWK marker from /etc/hosts.
     Returns (ok, message).  Idempotent — safe to call on clean files."""
+    denied = _check_allowed()
+    if denied:
+        return False, denied
+
     entries = list_hawk_entries()
     if not entries:
         return True, "no HAWK entries to remove"

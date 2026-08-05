@@ -23,6 +23,8 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
+from utils.config import OUTPUTS_DIR, PAYLOADS_DIR
+
 
 # A command template placeholder.  Restricted to lowercase snake_case on
 # purpose: every placeholder HAWK defines is lowercase, while the shell
@@ -334,6 +336,13 @@ class Tool:
             # remote command already wrapped in the template's own
             # quotes.  Quoting it here would turn those into literals.
             "extra":          extra_args or self.custom_args,
+            # Directory placeholders.  A template that saves something
+            # MUST use one of these: a bare `-o name.sh` lands in the
+            # process working directory, i.e. wherever the operator
+            # started HAWK from, which breaks the "everything under the
+            # HAWK tree" contract (tests/test_containment_static.py).
+            "payloads":       PAYLOADS_DIR,
+            "outputs":        OUTPUTS_DIR,
             # AD placeholders default to literal `<field>` labels so
             # the user can see at a glance what's missing before the
             # dialog fills them in.

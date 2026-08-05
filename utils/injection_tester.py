@@ -49,6 +49,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 from urllib.parse import urlparse, urlencode, parse_qsl, urlunparse
 
+from utils.config import OUTPUTS_DIR, TMP_DIR
+
 
 # ── Target type ─────────────────────────────────────────────────────
 
@@ -157,6 +159,18 @@ UPLOAD_TESTS = [
     ("hawk_test.jpg",   "<?php echo 'hawk'; ?>",
      "image/jpeg"),
 ]
+
+
+def _tool_output_dir(tool_name: str) -> str:
+    """Per-tool artefact directory under <HAWK>/outputs/.
+
+    sqlmap and commix keep session state, logs and dumps in a directory
+    of their own choosing ($HOME by default).  Pointing them here keeps
+    everything HAWK causes to be written inside the HAWK tree.
+    """
+    path = os.path.join(OUTPUTS_DIR, tool_name)
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 # ── Curl wrappers ───────────────────────────────────────────────────
@@ -621,7 +635,8 @@ class InjectionTesterJob:
                 return
             self._stats["tested"] += 1
             try:
-                tmp = os.path.join("/tmp",
+                os.makedirs(TMP_DIR, exist_ok=True)
+                tmp = os.path.join(TMP_DIR,
                                    f"hawk_upload_{uuid.uuid4().hex}_{fname}")
                 with open(tmp, "wb") as f:
                     f.write(body.encode("utf-8"))
@@ -673,13 +688,18 @@ class InjectionTesterJob:
 
     # ── Aggressive shell-outs ───────────────────────────────────
     def _aggr_sqlmap(self, target: InjectTarget, param: str):
+        """sqlmap on one parameter.  Artefacts go under OUTPUTS_DIR."""
         if not shutil.which("sqlmap"):
             self.on_log(
                 "    [sqlmap] not installed — apt install -y sqlmap",
                 "dim")
             return
+        # --output-dir keeps sqlmap's session/log/dump tree inside the
+        # HAWK folder; without it sqlmap writes to ~/.local/share/sqlmap
+        # and the engagement artefacts scatter outside the tree.
         cmd = ["sqlmap", "--batch", "--level=1", "--risk=1",
                "--smart", "--random-agent",
+               "--output-dir", _tool_output_dir("sqlmap"),
                "-u", target.url, "-p", param]
         if target.method.upper() == "POST":
             cmd += ["--method=POST",
@@ -713,7 +733,9 @@ class InjectionTesterJob:
                 "    [commix] not installed — apt install -y commix",
                 "dim")
             return
+        # Same reasoning as sqlmap: commix defaults to ~/.commix.
         cmd = ["commix", "--batch", "--level=1",
+               "--output-dir", _tool_output_dir("commix"),
                "-u", target.url]
         if target.method.upper() == "POST":
             cmd += ["--data", _post_body(

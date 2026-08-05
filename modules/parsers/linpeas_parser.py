@@ -45,6 +45,8 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+from utils.config import contained_sibling
+
 
 # ─── GTFOBins shortlist ─────────────────────────────────────────────
 # Curated subset of binaries whose SUID (or sudo-able) presence is a
@@ -267,7 +269,7 @@ def parse_linpeas(text: str,
         f"Sections processed:    {len(section_reports)}",
     ]
     if source_file:
-        txt_sibling = os.path.splitext(source_file)[0] + ".txt"
+        txt_sibling = contained_sibling(source_file, ".txt")
         summary_desc_lines.append("")
         summary_desc_lines.append(f"Readable copy: {txt_sibling}")
 
@@ -1036,7 +1038,7 @@ def _write_structured_txt(source_file: str,
     """Same layout as winpeas_parser._write_structured_txt — header,
     severity tally, TOC with line numbers, findings/creds preview,
     per-section body, raw dump at the end."""
-    txt_path = os.path.splitext(source_file)[0] + ".txt"
+    txt_path = contained_sibling(source_file, ".txt")
 
     rule = "═" * 67
     dash = "─" * 67

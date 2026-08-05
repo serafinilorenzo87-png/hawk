@@ -136,10 +136,23 @@ class BuildCommandSubstitutionTests(unittest.TestCase):
             cmd, "impacket-x <DOMAIN>/<user>:<password>@10.10.10.10")
 
     def test_unknown_placeholder_becomes_a_label(self):
-        """`{outputs}` is resolved later by the AD dialog; until then it
-        must read as a `<...>` label, which _run_raw refuses to launch."""
-        cmd = self._tool("tool -o {outputs}/x").build_command("1.2.3.4")
-        self.assertEqual(cmd, "tool -o <outputs>/x")
+        """`{share}` is filled by the dialog that owns the tool; until
+        then it must read as a `<...>` label, which _run_raw refuses to
+        launch."""
+        cmd = self._tool("tool -o {share}/x").build_command("1.2.3.4")
+        self.assertEqual(cmd, "tool -o <share>/x")
+
+    def test_directory_placeholders_resolve_inside_the_tree(self):
+        """`{outputs}` / `{payloads}` are the only way a template can
+        save a file without dropping it in the working directory."""
+        from utils.config import is_within_base
+
+        for name in ("outputs", "payloads"):
+            cmd = self._tool(f"curl -L http://x -o {{{name}}}/f.sh"
+                             ).build_command("1.2.3.4")
+            path = cmd.rsplit(" ", 1)[-1]
+            self.assertTrue(is_within_base(path), path)
+            self.assertTrue(os.path.isabs(path), path)
 
     def test_shell_braces_survive_untouched(self):
         """Two shell expansions in one template used to escape the

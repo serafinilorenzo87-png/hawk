@@ -43,6 +43,8 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+from utils.config import contained_sibling
+
 
 # ─── Known dangerous privileges (token_privs section) ────────────────
 # Keyed on the privilege name as it appears in `whoami /priv` output,
@@ -251,7 +253,7 @@ def parse_winpeas(text: str,
         f"Sections processed:    {len(section_reports)}",
     ]
     if source_file:
-        txt_sibling = os.path.splitext(source_file)[0] + ".txt"
+        txt_sibling = contained_sibling(source_file, ".txt")
         summary_desc_lines.append("")
         summary_desc_lines.append(f"Readable copy: {txt_sibling}")
 
@@ -1061,7 +1063,7 @@ def _write_structured_txt(source_file: str,
     The TOC line numbers are computed by walking the assembled body
     once we know its final layout, so they actually work when the
     user opens the file in vim / less and jumps to a line."""
-    txt_path = os.path.splitext(source_file)[0] + ".txt"
+    txt_path = contained_sibling(source_file, ".txt")
 
     rule = "═" * 67
     dash = "─" * 67

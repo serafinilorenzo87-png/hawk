@@ -471,9 +471,12 @@ class CardAccessRoutesMixin:
                 # (winpeas.exe for the 6 exe variants, winpeas.ps1
                 # for the PowerShell port).
                 try:
+                    # `{payloads}` keeps the download inside the HAWK
+                    # tree — the same place _open_peas_workflow looks
+                    # for it afterwards.
                     tool.cmd_template = (
                         f"curl -L {variant['url']} "
-                        f"-o {variant['local_name']}")
+                        f"-o {{payloads}}/{variant['local_name']}")
                 except Exception as e:
                     print(f"[HAWK] winpeas_exe cmd override "
                           f"failed: {e}")

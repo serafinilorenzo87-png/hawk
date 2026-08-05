@@ -51,6 +51,8 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
+from utils.config import contained_sibling
+
 
 _ANSI_RE = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
@@ -172,7 +174,7 @@ def parse_privesccheck(text: str,
         f"Checks parsed:         {len(unique_blocks)}",
     ]
     if source_file:
-        txt_sibling = os.path.splitext(source_file)[0] + ".txt"
+        txt_sibling = contained_sibling(source_file, ".txt")
         summary_desc_lines.append("")
         summary_desc_lines.append(f"Readable copy: {txt_sibling}")
 
@@ -392,7 +394,7 @@ def _write_structured_txt(source_file: str,
                            creds: list,
                            sev_counts: dict,
                            target: str) -> None:
-    txt_path = os.path.splitext(source_file)[0] + ".txt"
+    txt_path = contained_sibling(source_file, ".txt")
 
     rule = "═" * 67
     dash = "─" * 67

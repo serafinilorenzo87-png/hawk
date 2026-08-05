@@ -105,11 +105,16 @@ class LateralModule(BaseModule):
             id="ligolo_download",
             name="LIGOLO-NG (download)",
             desc="Download ligolo-ng proxy + agent — modern alternative to chisel",
+            # `{payloads}` resolves to <HAWK>/payloads/ — a bare `-o name`
+            # would drop both binaries in whatever directory HAWK was
+            # started from.
             cmd_template=(
                 "curl -L https://github.com/nicocha30/ligolo-ng/"
-                "releases/latest/download/proxy_linux_amd64 -o ligolo-proxy && chmod +x ligolo-proxy && "
+                "releases/latest/download/proxy_linux_amd64 "
+                "-o {payloads}/ligolo-proxy && chmod +x {payloads}/ligolo-proxy && "
                 "curl -L https://github.com/nicocha30/ligolo-ng/"
-                "releases/latest/download/agent_linux_amd64 -o ligolo-agent && chmod +x ligolo-agent"
+                "releases/latest/download/agent_linux_amd64 "
+                "-o {payloads}/ligolo-agent && chmod +x {payloads}/ligolo-agent"
             ),
             binary="curl",
             category="tunnel",
@@ -119,7 +124,8 @@ class LateralModule(BaseModule):
             id="ligolo_proxy",
             name="LIGOLO-NG Proxy",
             desc="Start ligolo-ng proxy listener — selfcert, port 11601",
-            cmd_template="sudo ./ligolo-proxy -selfcert -laddr 0.0.0.0:11601",
+            cmd_template=("sudo {payloads}/ligolo-proxy -selfcert "
+                          "-laddr 0.0.0.0:11601"),
             binary="ligolo-proxy",
             category="tunnel",
             requires_sudo=True,
@@ -207,7 +213,8 @@ class LateralModule(BaseModule):
                 "releases/latest | grep -o '\"tag_name\":\"[^\"]*\"' | grep -o 'v[^\"]*') "
                 "&& curl -L \"https://github.com/jpillora/chisel/releases/download/"
                 "${VER}/chisel_${VER#v}_windows_amd64.gz\" "
-                "-o chisel.gz && gunzip chisel.gz && mv chisel chisel.exe"
+                "-o {payloads}/chisel.gz && gunzip -f {payloads}/chisel.gz "
+                "&& mv {payloads}/chisel {payloads}/chisel.exe"
             ),
             binary="curl",
             category="tunnel",

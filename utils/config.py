@@ -502,11 +502,21 @@ DICTS_DIR    = os.path.join(BASE_DIR, "dicts")
 # the source they cloned.  Path-substitution in cmd_templates uses
 # the `{outputs}` placeholder which resolves to this directory.
 OUTPUTS_DIR  = os.path.join(BASE_DIR, "outputs")
+# Third-party scripts HAWK downloads for on-target execution (linpeas,
+# winPEAS, PrivescCheck, pspy, chisel, ligolo) and the output exfiltrated
+# back from the target.  A DEDICATED directory, not OUTPUTS_DIR: the PEAS
+# workflow serves this directory over HTTP to the target, so it must never
+# hold session state, credentials or AD loot.  Before this existed the
+# downloads landed in the process working directory — normally BASE_DIR
+# itself, which is exactly what that HTTP server must not expose.
+PAYLOADS_DIR = os.path.join(BASE_DIR, "payloads")
 # Runtime-only directories.  HAWK is intentionally portable: a user can
 # copy the whole hawkc folder into ~/hawkc, run `python3 hawk.py`, and all
 # persistent files produced by the app stay under this tree.  The only
-# allowed persistent external writes are explicit system integrations such
-# as the temporary HAWK-marked entries in /etc/hosts.
+# persistent writes outside it are the system files listed in
+# ALLOWED_EXTERNAL_WRITES below, each written with operator consent
+# through a privilege prompt; `require_writable()` is the gate and
+# tests/test_containment_static.py holds the whole policy to the code.
 TMP_DIR      = os.path.join(BASE_DIR, "tmp")
 CACHE_DIR    = os.path.join(BASE_DIR, "cache")
 LOGS_DIR     = os.path.join(BASE_DIR, "logs")
@@ -524,6 +534,7 @@ RUNTIME_DIRS = (
     SESSIONS_DIR,
     DICTS_DIR,
     OUTPUTS_DIR,
+    PAYLOADS_DIR,
     TMP_DIR,
     CACHE_DIR,
     LOGS_DIR,
@@ -535,7 +546,27 @@ for _dir in RUNTIME_DIRS:
     os.makedirs(_dir, exist_ok=True)
 
 _BASE_DIR_REAL = os.path.realpath(os.path.abspath(BASE_DIR))
-ALLOWED_EXTERNAL_WRITES = {"/etc/hosts"}
+
+# The complete list of files HAWK may write outside its own tree.  Every
+# one of them is a system-integration file that only works at a fixed
+# path, is written through a privilege prompt the operator answers, and
+# is reversible from the GUI.  Nothing may be added here without the
+# same three properties.
+#   /etc/hosts               AD/CTF name resolution — HAWK-tagged lines
+#                            only, added and removed by utils/hosts_helper.
+#   /etc/proxychains4.conf   pivot configuration.  proxychains4 reads its
+#   /etc/proxychains.conf    config from a fixed system path, and the
+#                            operator's own `proxychains4 <tool>` commands
+#                            read the same file, so a copy inside the HAWK
+#                            tree would configure nothing.  The .hawk_backup
+#                            twin is the pre-write copy of the original.
+ALLOWED_EXTERNAL_WRITES = {
+    "/etc/hosts",
+    "/etc/proxychains4.conf",
+    "/etc/proxychains4.conf.hawk_backup",
+    "/etc/proxychains.conf",
+    "/etc/proxychains.conf.hawk_backup",
+}
 
 
 def is_within_base(path: str) -> bool:
@@ -559,6 +590,40 @@ def require_within_base(path: str, purpose: str = "path") -> str:
     if not is_within_base(real):
         raise ValueError(f"Refusing {purpose} outside HAWK folder: {real}")
     return real
+
+
+def require_writable(path: str, purpose: str = "write") -> str:
+    """Gate for a persistent write: inside the tree, or explicitly allowed.
+
+    This is the one place `ALLOWED_EXTERNAL_WRITES` is consulted.  Call it
+    before writing any path that is not built from one of the constants
+    above — the caller keeps the ValueError, which is always a bug in
+    HAWK, not an operator mistake.
+    """
+    real = os.path.realpath(os.path.abspath(path))
+    if is_within_base(real) or is_allowed_external_write(real):
+        return real
+    raise ValueError(
+        f"Refusing {purpose}: {real} is outside the HAWK folder and is "
+        f"not one of the allowed system files "
+        f"({', '.join(sorted(ALLOWED_EXTERNAL_WRITES))})")
+
+
+def contained_sibling(source_path: str, suffix: str,
+                      fallback_dir: str = OUTPUTS_DIR) -> str:
+    """Where to write a HAWK-generated file derived from `source_path`.
+
+    Next to the source when the source already lives inside the HAWK tree
+    (the normal case — PEAS output exfiltrated into payloads/), otherwise
+    inside `fallback_dir`.  The operator can point a file picker at
+    anything in $HOME; what HAWK writes back never leaves the tree.
+
+    `suffix` replaces the source extension, e.g. ".txt".
+    """
+    stem = os.path.splitext(os.path.abspath(source_path))[0]
+    if is_within_base(stem):
+        return stem + suffix
+    return os.path.join(fallback_dir, os.path.basename(stem) + suffix)
 
 
 def hawk_path(*parts: str, create_parent: bool = False) -> str:
