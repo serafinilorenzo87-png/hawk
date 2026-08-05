@@ -122,6 +122,7 @@ class BgJobsBar(ctk.CTkFrame):
         self._lock = threading.Lock()
         self._row_widgets: dict[str, dict] = {}  # job_id → {frame, labels…}
         self._collapsed = False  # user-toggle: forces compact mode when True
+        self._tick_id = None
         self.grid_propagate(False)
         self._build_ui()
         self._tick()
@@ -216,7 +217,22 @@ class BgJobsBar(ctk.CTkFrame):
 
     def _tick(self):
         self._update_display()
-        self.after(1000, self._tick)
+        self._tick_id = self.after(1000, self._tick)
+
+    # ─── Teardown ──────────────────────────────────────────────────────────
+    def destroy(self):
+        """Cancel the 1 Hz refresh before the widget goes away.
+
+        Same shape as StatusBar.destroy() — an uncancelled after() fires
+        against a destroyed widget and raises out of the Tk callback.
+        """
+        try:
+            tid = getattr(self, "_tick_id", None)
+            if tid is not None:
+                self.after_cancel(tid)
+        except Exception:
+            pass
+        super().destroy()
 
     def _update_display(self):
         with self._lock:

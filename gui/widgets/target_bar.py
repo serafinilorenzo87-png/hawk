@@ -2336,6 +2336,15 @@ class TargetBar(ctk.CTkFrame):
             f"    Terminal lines   : {len(sess.terminal_lines)}", "dim")
         self.app.terminal.write(
             f"    Credentials      : {len(sess.credentials)}", "dim")
+        # State the caps out loud — a snapshot that quietly lost its
+        # first hour would look complete and wouldn't be.
+        _s = sess.summary()
+        if _s.get("lines_dropped") or _s.get("tools_dropped"):
+            self.app.terminal.write(
+                f"    [!] Capped: {_s.get('lines_dropped', 0)} terminal "
+                f"line(s) and {_s.get('tools_dropped', 0)} tool record(s) "
+                f"were dropped from this snapshot — full output is in "
+                f"outputs/.", "warn")
 
     # ── Autosave ───────────────────────────────────────────────────────────
 
@@ -2882,6 +2891,23 @@ class TargetBar(ctk.CTkFrame):
 
     def get_target(self) -> str:
         return self._ip_entry.get().strip()
+
+    # ─── Teardown ──────────────────────────────────────────────────────────
+    def destroy(self):
+        """Cancel the autosave timer before the widget goes away.
+
+        Same shape as StatusBar.destroy().  _autosave_disable() cancels
+        it on the button path, but nothing did on teardown — the timer
+        outlived the widget and fired against destroyed children.
+        """
+        try:
+            tid = getattr(self, "_autosave_after_id", None)
+            if tid is not None:
+                self.after_cancel(tid)
+                self._autosave_after_id = None
+        except Exception:
+            pass
+        super().destroy()
 
 
 class _SessionPickerDialog(ctk.CTkToplevel):

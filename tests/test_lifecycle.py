@@ -779,5 +779,155 @@ class ShutdownTests(unittest.TestCase):
                          "a second X click stacked another teardown")
 
 
+# ── Timers and unbounded growth ─────────────────────────────────────
+
+class _TimerHost:
+    """Records after()/after_cancel() the way Tk would."""
+
+    def __init__(self):
+        self.pending = {}
+        self._next = 0
+
+    def after(self, _delay, fn=None):
+        self._next += 1
+        tid = f"after#{self._next}"
+        self.pending[tid] = fn
+        return tid
+
+    def after_cancel(self, tid):
+        self.pending.pop(tid, None)
+
+    def after_idle(self, fn):
+        fn()
+        return "idle"
+
+
+class NetHealthTimerTests(unittest.TestCase):
+    """RE-CHECK NOW called _tick() with the previous timer still armed,
+    forking a second permanent polling chain. Every click added one;
+    destroy() cancelled only the last."""
+
+    def _widget(self):
+        _install_customtkinter_stub()
+        from gui.widgets.net_health import NetHealthIndicator
+
+        class Widget(_TimerHost):
+            NET_CHECK_INTERVAL_MS = 15000
+
+            def __init__(self):
+                _TimerHost.__init__(self)
+                self._check_id = None
+                self._net_probe_inflight = True   # skip the probe thread
+
+        w = Widget()
+        for name in ("_cancel_check", "_schedule_check", "_tick"):
+            setattr(w, name,
+                    getattr(NetHealthIndicator, name).__get__(w, Widget))
+        return w
+
+    def test_only_one_timer_is_ever_armed(self):
+        w = self._widget()
+        w._schedule_check(15000)
+        for _ in range(5):
+            w._cancel_check()
+            w._tick()
+        self.assertEqual(len(w.pending), 1,
+                         "RE-CHECK NOW forked extra polling chains")
+
+    def test_cancel_clears_the_pending_timer(self):
+        w = self._widget()
+        w._schedule_check(15000)
+        w._cancel_check()
+        self.assertEqual(w.pending, {})
+        self.assertIsNone(w._check_id)
+
+
+class DestroyCancelsTimersTests(unittest.TestCase):
+    """After destroy() no after() may remain pending — the model is
+    StatusBar.destroy(), which saves the id and cancels it."""
+
+    def _check(self, module_name, class_name, arm):
+        _install_customtkinter_stub()
+        import importlib
+        cls = getattr(importlib.import_module(module_name), class_name)
+
+        destroyed = []
+        # Sits last in the MRO so the widget's `super().destroy()` has
+        # somewhere harmless to land.
+        Base = type("Base", (),
+                    {"destroy": lambda self: destroyed.append(True)})
+        Host = type("Host", (cls, _TimerHost, Base),
+                    {"__init__": lambda self: _TimerHost.__init__(self)})
+
+        w = Host()
+        arm(w)
+        self.assertTrue(w.pending, "test did not arm a timer")
+        w.destroy()
+        self.assertEqual(w.pending, {},
+                         f"{class_name}.destroy() left a timer pending")
+        self.assertEqual(destroyed, [True])
+
+    def test_status_bar_is_the_model(self):
+        self._check("gui.widgets.status_bar", "StatusBar",
+                    lambda w: setattr(w, "_tick_id", w.after(1000, None)))
+
+    def test_bg_jobs_bar_cancels_its_1hz_tick(self):
+        self._check("gui.widgets.bg_jobs_bar", "BgJobsBar",
+                    lambda w: setattr(w, "_tick_id", w.after(1000, None)))
+
+    def test_target_bar_cancels_the_autosave_timer(self):
+        self._check("gui.widgets.target_bar", "TargetBar",
+                    lambda w: setattr(w, "_autosave_after_id",
+                                      w.after(300000, None)))
+
+    def test_net_health_cancels_its_poll(self):
+        self._check("gui.widgets.net_health", "NetHealthIndicator",
+                    lambda w: setattr(w, "_check_id", w.after(15000, None)))
+
+
+class SessionGrowthIsCappedTests(unittest.TestCase):
+    """M7: terminal_lines and executed_tools grew without limit and were
+    rewritten and copied WHOLE on every autosave, on the Tk thread."""
+
+    def _session(self):
+        from utils.session import Session
+        sess = Session("10.10.10.1")
+        sess.save = lambda **_k: ""
+        return sess
+
+    def test_terminal_lines_are_capped_and_the_loss_is_recorded(self):
+        sess = self._session()
+        sess.MAX_TERMINAL_LINES = 100
+        for i in range(400):
+            sess.append_terminal_line(f"line {i}")
+        self.assertLessEqual(len(sess.terminal_lines), 101)
+        self.assertGreater(sess.summary()["lines_dropped"], 0)
+        self.assertIn("dropped", sess.terminal_lines[0]["text"])
+
+    def test_the_newest_lines_are_the_ones_kept(self):
+        sess = self._session()
+        sess.MAX_TERMINAL_LINES = 100
+        for i in range(400):
+            sess.append_terminal_line(f"line {i}")
+        texts = [e["text"] for e in sess.terminal_lines]
+        self.assertIn("line 399", texts)
+        self.assertNotIn("line 0", texts)
+
+    def test_execution_records_are_capped(self):
+        sess = self._session()
+        sess.MAX_EXECUTED_TOOLS = 20
+        for i in range(100):
+            sess.start_tool_execution(f"t{i}", f"Tool {i}", "recon", "cmd")
+        self.assertLessEqual(len(sess.executed_tools), 20)
+        self.assertGreater(sess.summary()["tools_dropped"], 0)
+
+    def test_an_uncapped_session_reports_no_loss(self):
+        sess = self._session()
+        for i in range(10):
+            sess.append_terminal_line(f"line {i}")
+        self.assertEqual(sess.summary()["lines_dropped"], 0)
+        self.assertEqual(sess.summary()["tools_dropped"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

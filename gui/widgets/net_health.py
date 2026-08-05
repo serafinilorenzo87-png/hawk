@@ -176,12 +176,34 @@ class NetHealthIndicator(ctk.CTkFrame):
         self._info_lbl.pack(side="left", padx=(8, 0))
 
         # Kick off the first probe after the main window is drawn.
-        self._check_id = self.after(self.NET_CHECK_INITIAL_MS, self._tick)
+        self._check_id = None
+        self._schedule_check(self.NET_CHECK_INITIAL_MS)
 
     # ─── Probe loop ────────────────────────────────────────────────────────
+    #
+    # Exactly ONE pending timer at any moment.  RE-CHECK NOW used to
+    # call _tick() while the previous timer was still armed, forking a
+    # second permanent polling chain — every click added another, and
+    # destroy() cancelled only the last id.  Everything that arms the
+    # timer goes through _schedule_check, which cancels first.
+
+    def _cancel_check(self):
+        tid = self._check_id
+        self._check_id = None
+        if tid is not None:
+            try:
+                self.after_cancel(tid)
+            except Exception:
+                pass
+
+    def _schedule_check(self, delay_ms: int):
+        self._cancel_check()
+        self._check_id = self.after(delay_ms, self._tick)
+
     def _tick(self):
+        self._check_id = None          # this one has fired
         if self._net_probe_inflight:
-            self._check_id = self.after(self.NET_CHECK_INTERVAL_MS, self._tick)
+            self._schedule_check(self.NET_CHECK_INTERVAL_MS)
             return
         self._net_probe_inflight = True
 
@@ -190,8 +212,7 @@ class NetHealthIndicator(ctk.CTkFrame):
             def _apply():
                 self._net_probe_inflight = False
                 self._apply_result(result)
-                self._check_id = self.after(self.NET_CHECK_INTERVAL_MS,
-                                             self._tick)
+                self._schedule_check(self.NET_CHECK_INTERVAL_MS)
             try:
                 self.after(0, _apply)
             except Exception:
@@ -489,6 +510,9 @@ class NetHealthIndicator(ctk.CTkFrame):
             except Exception:
                 pass
             self._net_probe_inflight = False
+            # Drop the armed timer before probing by hand — otherwise
+            # this click leaves a second polling chain running forever.
+            self._cancel_check()
             self._tick()
             _safe_destroy(win)
 
@@ -552,10 +576,5 @@ class NetHealthIndicator(ctk.CTkFrame):
 
     # ─── Teardown ──────────────────────────────────────────────────────────
     def destroy(self):
-        try:
-            tid = getattr(self, "_check_id", None)
-            if tid is not None:
-                self.after_cancel(tid)
-        except Exception:
-            pass
+        self._cancel_check()
         super().destroy()

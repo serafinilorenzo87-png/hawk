@@ -578,6 +578,8 @@ class Session:
             "status":       "running",
             "output_lines": [],
         })
+        if len(self.executed_tools) > self.MAX_EXECUTED_TOOLS:
+            self._trim_executed_tools()
         self._touch()
         return exec_id
 
@@ -615,6 +617,15 @@ class Session:
 
     # ─── Terminal persistence ────────────────────────────────────────────────
 
+    # Caps on the two lists the autosave rewrites and copies WHOLE on
+    # every tick, on the Tk thread.  Unbounded, a long verbose engagement
+    # turned each autosave into a growing freeze and each snapshot into
+    # a file nobody could open.  When the cap is hit the OLDEST entries
+    # go and a marker records how many — a snapshot that silently lost
+    # its first hour would be worse than one that says so.
+    MAX_TERMINAL_LINES = 20000
+    MAX_EXECUTED_TOOLS = 500
+
     def append_terminal_line(self, text: str, level: str = "info",
                               ts: str = ""):
         """Append a line emitted by the terminal widget. Called from
@@ -624,8 +635,37 @@ class Session:
             "level": level,
             "text":  text,
         })
+        if len(self.terminal_lines) > self.MAX_TERMINAL_LINES:
+            self._trim_terminal_lines()
         # No _touch() here — terminal is extremely chatty; the save button
         # is the commit point.
+
+    def _trim_terminal_lines(self):
+        """Drop the oldest quarter and leave a marker saying so."""
+        drop = len(self.terminal_lines) - (self.MAX_TERMINAL_LINES * 3 // 4)
+        if drop <= 0:
+            return
+        del self.terminal_lines[:drop]
+        self._terminal_lines_dropped = (
+            getattr(self, "_terminal_lines_dropped", 0) + drop)
+        self.terminal_lines.insert(0, {
+            "ts":    datetime.now().isoformat(),
+            "level": "warn",
+            "text":  (f"[!] {self._terminal_lines_dropped} earlier "
+                      f"terminal line(s) were dropped from this session "
+                      f"snapshot (cap: {self.MAX_TERMINAL_LINES}). Full "
+                      f"tool output is in outputs/."),
+        })
+
+    def _trim_executed_tools(self):
+        """Same for the execution records — each carries its tool's full
+        output, so this is the heavier of the two lists."""
+        drop = len(self.executed_tools) - (self.MAX_EXECUTED_TOOLS * 3 // 4)
+        if drop <= 0:
+            return
+        del self.executed_tools[:drop]
+        self._executed_tools_dropped = (
+            getattr(self, "_executed_tools_dropped", 0) + drop)
 
     def set_target_intel(self, intel: dict):
         """Snapshot the Target Intel widget state at save-time."""
@@ -1079,6 +1119,10 @@ class Session:
             "alerts":         len(self.defense_alerts),
             "tools_run":      len(self.executed_tools),
             "terminal_lines": len(self.terminal_lines),
+            # What the caps dropped, so SAVE/LOAD can say it out loud
+            # instead of showing a count that quietly stopped growing.
+            "tools_dropped":  getattr(self, "_executed_tools_dropped", 0),
+            "lines_dropped":  getattr(self, "_terminal_lines_dropped", 0),
             "created_at":     self.created_at[:16].replace("T", " "),
             "updated_at":     self.updated_at[:16].replace("T", " "),
             "last_saved":     last_save[:19].replace("T", " ") if last_save else "",

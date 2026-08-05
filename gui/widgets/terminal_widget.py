@@ -584,6 +584,12 @@ class TerminalWidget(ctk.CTkFrame):
             **kwargs)
         self.app         = app
         self._lines      = []
+        # Autoscroll coalescing: `see("end")` used to run once PER LINE,
+        # from an after(0) also scheduled per line.  A verbose scan
+        # emitting thousands of lines a second turned that into
+        # thousands of forced scrolls and saturated the event loop.
+        self._scroll_pending = False
+        self._trim_announced = False
         self._smart_mode = self._load_smart_pref()
         self._pending    = {}   # tool_name → [raw lines]
         self._progress_labels = {}  # tool_name → (tk.Label, tk.StringVar)
@@ -1041,14 +1047,23 @@ class TerminalWidget(ctk.CTkFrame):
 
     # ─── Internal ────────────────────────────────────────────────────────────
 
+    # Retained scrollback.  Beyond this the OLDEST lines are dropped
+    # from both the widget and the in-memory buffer — and the operator
+    # is told once, in the terminal itself.  Silent truncation would
+    # leave a log that looks complete and isn't.
+    _MAX_LINES  = 20000
+    _TRIM_CHUNK = 5000
+
     def _append(self, text: str, level: str = "info"):
         tw = self._textbox._textbox
         self._textbox.configure(state="normal")
         tw.insert("end", text + "\n", level)
         self._textbox.configure(state="disabled")
-        tw.see("end")
         now = datetime.now()
         self._lines.append((level, text, now))
+        if len(self._lines) > self._MAX_LINES:
+            self._trim_scrollback()
+        self._request_scroll()
         # Persist every visible line into the active session so SAVE
         # captures the full terminal history without any extra work.
         try:
@@ -1057,6 +1072,48 @@ class TerminalWidget(ctk.CTkFrame):
                 sess.append_terminal_line(text, level, now.isoformat())
         except Exception:
             pass
+
+    def _request_scroll(self):
+        """Coalesce autoscroll into one idle callback per burst."""
+        if self._scroll_pending:
+            return
+        self._scroll_pending = True
+
+        def _do():
+            self._scroll_pending = False
+            try:
+                self._textbox._textbox.see("end")
+            except Exception:
+                pass
+
+        try:
+            self.after_idle(_do)
+        except Exception:
+            self._scroll_pending = False
+
+    def _trim_scrollback(self):
+        """Drop the oldest chunk of scrollback, once it is over the cap."""
+        drop = self._TRIM_CHUNK
+        del self._lines[:drop]
+        tw = self._textbox._textbox
+        try:
+            self._textbox.configure(state="normal")
+            tw.delete("1.0", f"{drop + 1}.0")
+            self._textbox.configure(state="disabled")
+        except Exception:
+            pass
+        if not self._trim_announced:
+            self._trim_announced = True
+            note = (f"[!] Terminal scrollback capped at "
+                    f"{self._MAX_LINES} lines — older output is being "
+                    f"dropped from this view and from the session "
+                    f"snapshot. Full tool output stays in outputs/.")
+            try:
+                self._textbox.configure(state="normal")
+                tw.insert("1.0", note + "\n", "warn")
+                self._textbox.configure(state="disabled")
+            except Exception:
+                pass
 
     # ─── Per-scan progress bars (embedded tk.Label + StringVar) ────────────
     #
