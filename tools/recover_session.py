@@ -45,19 +45,30 @@ _WIDGET_REF_KEYS = ("_frame_ref", "_badge_ref", "_mark_btn_ref")
 
 
 def _strip_widget_ref_lines(text: str) -> str:
-    """First pass — remove dangling widget-ref lines by regex."""
+    """First pass — remove dangling widget-ref lines by regex.
+
+    Only the TRAILING comma is part of the match.  Matching an optional
+    comma on both ends looks symmetric but destroys the normal case: a
+    widget-ref key sitting between two other keys had both its
+    separators eaten (`"a":1,"_frame_ref":"x","b":2` → `"a":1"b":2`),
+    which made the file unparseable and the tool declared a fully
+    recoverable session unrecoverable.  A leftover comma before a
+    closing brace/bracket — the case a leading `,?` was meant to
+    handle — is cleaned up by the `,(\\s*[}\\]])` pass below; a MISSING
+    comma cannot be cleaned up by anything.
+    """
     # Each pattern matches a different flavour of the broken line:
     patterns = [
         # Value is a properly-quoted string
-        r',?\s*"_(?:frame|badge|mark_btn)_ref"\s*:\s*"[^"]*"\s*,?',
+        r'\s*"_(?:frame|badge|mark_btn)_ref"\s*:\s*"[^"]*"\s*,?',
         # Value is null
-        r',?\s*"_(?:frame|badge|mark_btn)_ref"\s*:\s*null\s*,?',
+        r'\s*"_(?:frame|badge|mark_btn)_ref"\s*:\s*null\s*,?',
         # Value is a python-repr angle-bracket <Widget ...>
-        r',?\s*"_(?:frame|badge|mark_btn)_ref"\s*:\s*<[^>]*>\s*,?',
+        r'\s*"_(?:frame|badge|mark_btn)_ref"\s*:\s*<[^>]*>\s*,?',
         # Value is truncated (colon followed by nothing)
-        r',?\s*"_(?:frame|badge|mark_btn)_ref"\s*:\s*(?=[\r\n]|$)',
+        r'\s*"_(?:frame|badge|mark_btn)_ref"\s*:\s*(?=[\r\n]|$)',
         # Value is truncated mid-literal (no closing quote before EOL)
-        r',?\s*"_(?:frame|badge|mark_btn)_ref"\s*:\s*[^,}\n\r]*(?=[\r\n]|$)',
+        r'\s*"_(?:frame|badge|mark_btn)_ref"\s*:\s*[^,}\n\r]*(?=[\r\n]|$)',
     ]
     for p in patterns:
         text = re.sub(p, '', text, flags=re.MULTILINE)
