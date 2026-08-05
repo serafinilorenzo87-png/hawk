@@ -2689,9 +2689,35 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                           command=lambda t=tool: self._gate_check(t))
 
     def _stop_tool(self, tool):
-        r = self._tool_runners.get(tool.id)
-        if r:
-            r.kill()
+        """STOP on a tool row.
+
+        Only claims the tool was stopped when a runner actually
+        acknowledged the kill.  Previously the button flipped back to
+        RUN and the dot went red no matter what — including when no
+        runner was registered at all (the PING path), so the tool kept
+        running while the UI said it had been aborted.
+        """
+        runner = self._tool_runners.get(tool.id)
+        if runner is None:
+            self.app.terminal.write(
+                f"  [!] STOP: HAWK holds no runner for {tool.name} — "
+                f"it cannot stop this run. If the tool is still active "
+                f"it is running outside HAWK's control (check with "
+                f"`pgrep -af {tool.binary}`).", "error")
+            return
+        try:
+            stopped = runner.kill()
+        except Exception as e:
+            self.app.terminal.write(
+                f"  [!] STOP failed for {tool.name}: {e}", "error")
+            return
+        if stopped is False:
+            self.app.terminal.write(
+                f"  [!] STOP: {tool.name} could not be stopped by HAWK "
+                f"(nothing left to signal, or the work runs in a window "
+                f"HAWK does not own). It may still be running.", "error")
+            return
+        self.app.terminal.write(f"  [*] Stopping {tool.name} …", "warn")
         self._set_tool_status(tool.id, "error")
         self._toggle_run_btn(tool, False)
 

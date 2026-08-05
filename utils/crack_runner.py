@@ -400,11 +400,16 @@ class CrackRunner:
         users staring at the 'stopping…' label in the progress dialog
         for minutes).  We always schedule the SIGKILL fallback in a
         daemon thread so kill() returns instantly to the UI.
+
+        Returns True when a stop was really initiated, False when there
+        was no process to signal — the same contract as
+        ToolRunner.kill(), so the shared teardown paths can report the
+        truth instead of assuming success.
         """
         self._cancelled = True
         p = self._proc
         if not p:
-            return
+            return False
         try:
             p.terminate()
         except Exception:
@@ -419,6 +424,7 @@ class CrackRunner:
             except Exception:
                 pass
         threading.Thread(target=_escalate, daemon=True).start()
+        return True
 
     # ── Strategy dispatchers ──────────────────────────────────────────
     # Every run_* is thread-wrapped so the UI thread doesn't block.

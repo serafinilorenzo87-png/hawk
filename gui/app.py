@@ -1023,16 +1023,27 @@ class HawkApp(ctk.CTk):
         don't expose ``running`` (MetasploitRunner — the work lives in
         an xterm HAWK doesn't own) are skipped: HAWK cannot stop them
         and must not claim otherwise.
+
+        Deduplicated by runner identity: a background job is registered
+        BOTH on the bar and on its card, and killing it twice would
+        make the second call report "could not be stopped".
         """
         out = []
+        seen = set()
+
+        def _add(label, runner):
+            if runner is None or id(runner) in seen:
+                return
+            seen.add(id(runner))
+            out.append((label, runner))
+
         try:
             bar = getattr(self, "bg_jobs_bar", None)
             if bar is not None:
                 with bar._lock:
                     jobs = list(bar._jobs.values())
                 for job in jobs:
-                    if job.runner is not None:
-                        out.append((job.label, job.runner))
+                    _add(job.label, job.runner)
         except Exception as e:
             print(f"[HAWK] bg job enumeration failed: {e}")
         try:
@@ -1040,16 +1051,14 @@ class HawkApp(ctk.CTk):
             for card in list(getattr(kc, "_cards", {}).values()):
                 for tid, runner in list(
                         getattr(card, "_tool_runners", {}).items()):
-                    if runner is not None and getattr(runner, "running", False):
-                        out.append((tid, runner))
+                    if getattr(runner, "running", False):
+                        _add(tid, runner)
         except Exception as e:
             print(f"[HAWK] card runner enumeration failed: {e}")
         try:
             cs = getattr(self, "cred_store", None)
             for idx, entry in list(getattr(cs, "_active_cracks", {}).items()):
-                runner = (entry or {}).get("runner")
-                if runner is not None:
-                    out.append((f"crack (credential #{idx})", runner))
+                _add(f"crack (credential #{idx})", (entry or {}).get("runner"))
         except Exception as e:
             print(f"[HAWK] crack enumeration failed: {e}")
         return out

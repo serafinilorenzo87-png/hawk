@@ -435,9 +435,22 @@ class BgJobsBar(ctk.CTkFrame):
                 f"cannot stop.", "warn")
             return
         try:
+            # kill() returns False when there is nothing to signal — the
+            # job is still in pre-flight (the runner hasn't reached Popen
+            # yet) or the work lives outside HAWK.  Announcing
+            # "Stopping…" regardless was the GUI twin of the runner's
+            # pre-flight no-op: the operator read "stopped" and the tool
+            # started anyway a moment later.
+            stopped = runner.kill()
+            if stopped is False:
+                self.app.terminal.write(
+                    f"  [!] STOP: '{job.label}' could not be stopped by "
+                    f"HAWK — nothing to signal yet. Try again in a "
+                    f"moment; if the job is already on the wire, stop it "
+                    f"from a shell.", "error")
+                return
             self.app.terminal.write(
                 f"  [*] Stopping BG job: {job.label} …", "warn")
-            runner.kill()
             # The job will be removed from the bar by finish_job() once
             # the runner's done_callback fires after the process exits.
             # Don't pop it here — would cause double-removal races.

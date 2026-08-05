@@ -1035,7 +1035,10 @@ class CardRuntimeMixin:
                 print(f"[HAWK] bloodhound cwd setup failed: {e}")
                 cwd = None
 
-        runner.run(cmd, tool.name, cwd=cwd)
+        # Tool.timeout has existed in modules/base.py since day one and
+        # was never read — a hung tool held the reader thread forever.
+        runner.run(cmd, tool.name, cwd=cwd,
+                   timeout=getattr(tool, "timeout", None))
 
     def _run_in_background(self, tool, cmd: str, estimated_secs: int):
         import uuid
@@ -1072,6 +1075,8 @@ class CardRuntimeMixin:
                         f"the previous target and were NOT saved.")
                 except Exception as e:
                     print(f"[HAWK] bg job discard failed: {e}")
+                self._toggle_run_btn(tool, False)
+                self._set_tool_status(tool.id, "ready")
                 return
             cred_lines = [l for _, l in log
                           if "login:" in l.lower()
@@ -1415,9 +1420,15 @@ class CardRuntimeMixin:
             self.app.bg_jobs_bar.update_idletasks()
         except Exception:
             pass
-        runner.run(cmd, tool.name)
+        # Register the runner and flip the row to STOP.  Without this the
+        # row still said RUN while the job was on the wire, so the same
+        # background job could be launched twice — and the row's STOP
+        # had no runner to reach even once it appeared.
+        self._tool_runners[tool.id] = runner
+        runner.run(cmd, tool.name, timeout=getattr(tool, "timeout", None))
         self._set_tool_status(tool.id, "running")
         self.set_status(STATUS_RUNNING)
+        self._toggle_run_btn(tool, True)
 
     def _extract_hydra_cred(self, line: str, tool):
         # NOTE: kept for backward compat / external callers that
@@ -1454,6 +1465,7 @@ class CardRuntimeMixin:
             done_callback=lambda n, rc, log: self._on_done(tool, n, rc, log),
             ui_dispatcher=getattr(self.app, "ui_call", None))
         self._tool_runners[tool.id] = runner
+        self._toggle_run_btn(tool, True)
         runner.run(target, scan_config)
 
     def _run_msf(self, tool, commands: list, lhost: str, lport: str):
@@ -1512,6 +1524,11 @@ class CardRuntimeMixin:
                 done_callback=lambda n, rc, log: self._on_done(tool, n, rc, log),
                 shell_callback=_shell)
             self._tool_runners[tool.id] = runner
+            # Flip to STOP so the row can't launch the same exploit
+            # twice.  MetasploitRunner.kill() reports False (the work
+            # lives in an xterm HAWK does not own), so pressing STOP
+            # says so instead of pretending.
+            self._toggle_run_btn(tool, True)
             runner.run(commands, target, lhost, lport)
 
         def _cancelled():

@@ -333,6 +333,16 @@ class AbortRunningToolsTests(unittest.TestCase):
         self.assertIn("Hydra SSH", labels)
         self.assertIn("nmap_full", labels)
 
+    def test_a_runner_registered_twice_is_killed_once(self):
+        """A background job lives on the bar AND on its card. Killing it
+        twice would make the second call report 'could not be stopped'."""
+        app, (bg, _card, _crack) = self._app_with_jobs()
+        app.kill_chain_panel._cards["recon"]._tool_runners["gobuster"] = bg
+        labels = [lbl for lbl, _ in app.collect_active_runners()]
+        self.assertEqual(len(labels), 3)
+        app.abort_running_tools("NEW SESSION")
+        self.assertNotIn("could not be stopped", app.terminal.text())
+
     def test_finished_card_runners_are_not_reported_as_active(self):
         app, _ = self._app_with_jobs()
         app.kill_chain_panel._cards["recon"]._tool_runners["old"] = \
@@ -455,6 +465,208 @@ class ApplySessionResetsPanelsTests(unittest.TestCase):
         self.assertLess(calls.index("bar._reset_all_panels"),
                         calls.index("app.terminal.restore_lines"))
         self.assertEqual(len(sess.terminal_lines), 1)
+
+
+# ── STOP tells the truth ────────────────────────────────────────────
+
+class KillBeforeRunTests(unittest.TestCase):
+    """H4: between run() and the Popen there is a window of seconds
+    (_strip_sudo_if_caps, _preflight_nxc — both do I/O). STOP used to
+    be a silent no-op there: the button went back to RUN and the tool
+    started anyway a moment later."""
+
+    def _runner(self):
+        from utils.runner import ToolRunner
+        return ToolRunner()
+
+    def test_kill_before_run_reports_nothing_to_stop(self):
+        runner = self._runner()
+        self.assertFalse(runner.kill())
+
+    def test_kill_during_preflight_aborts_the_spawn(self):
+        import utils.runner as runner_mod
+
+        runner = self._runner()
+        emitted = []
+        runner.output_callback = lambda line, *a: emitted.append(line)
+        done = []
+        runner.done_callback = lambda *a: done.append(a)
+
+        # Stand in for the pre-flight I/O: STOP arrives while the runner
+        # is still deciding what to exec.
+        def _preflight(_cmd):
+            runner.kill()
+
+        original = runner_mod._preflight_nxc
+        spawned = []
+        original_popen = runner_mod.subprocess.Popen
+        runner_mod._preflight_nxc = _preflight
+        runner_mod.subprocess.Popen = lambda *a, **k: spawned.append(a)
+        try:
+            runner._run_process("nmap -sV 10.10.10.1", "nmap", None)
+        finally:
+            runner_mod._preflight_nxc = original
+            runner_mod.subprocess.Popen = original_popen
+
+        self.assertEqual(spawned, [], "the tool was spawned after STOP")
+        self.assertIsNone(runner.process)
+        self.assertFalse(runner.running)
+        self.assertTrue(any("Aborted before launch" in l for l in emitted))
+        self.assertEqual(len(done), 1, "the run must still report an end")
+
+    def test_kill_in_the_window_reports_success_not_a_shrug(self):
+        """run() marks the runner live synchronously, so a STOP landing
+        before the worker thread starts is not reported as 'nothing to
+        stop' — the spawn guard does abort it."""
+        runner = self._runner()
+        runner._run_process = lambda *a, **k: None   # keep the test cheap
+        runner.run("nmap 10.10.10.1", "nmap")
+        self.assertTrue(runner.kill())
+        self.assertTrue(runner._kill_requested)
+
+
+class StopReportsFailureTests(unittest.TestCase):
+    """W2/W3: STOP used to flip the button back to RUN and print
+    'Stopping…' even when there was nothing it could stop."""
+
+    def test_metasploit_kill_admits_it_cannot_stop_an_xterm(self):
+        from utils.runner import MetasploitRunner
+        self.assertIs(MetasploitRunner().kill(), False)
+
+    def test_greenbone_kill_is_not_a_permanent_no_op(self):
+        from utils.runner import GreenBoneRunner
+        runner = GreenBoneRunner()
+        self.assertFalse(runner.kill())          # not started
+        runner.running = True
+        self.assertTrue(runner.kill())           # started → real stop
+        self.assertFalse(runner.running)
+        self.assertTrue(runner._stop.is_set())
+
+    def test_msf_scanner_is_cancellable(self):
+        from utils.runner import MsfScannerRunner
+        runner = MsfScannerRunner()
+        self.assertFalse(runner.kill())
+        self.assertTrue(runner._stop.is_set())
+
+    def test_multirunner_kill_reports_the_inner_result(self):
+        from utils.runner import MultiRunner
+        runner = MultiRunner()
+        self.assertFalse(runner.kill())
+
+    def test_card_stop_without_a_runner_does_not_claim_success(self):
+        _install_customtkinter_stub()
+        from gui.widgets.card_widget import KillChainCard
+
+        class Card:
+            def __init__(self):
+                self.app = types.SimpleNamespace(terminal=_Terminal())
+                self._tool_runners = {}
+                self.toggles = []
+                self.statuses = []
+
+            def _toggle_run_btn(self, tool, running):
+                self.toggles.append((tool.id, running))
+
+            def _set_tool_status(self, tid, status):
+                self.statuses.append((tid, status))
+
+        card = Card()
+        card._stop_tool = KillChainCard._stop_tool.__get__(card, Card)
+        tool = types.SimpleNamespace(id="ping", name="Ping", binary="ping")
+        card._stop_tool(tool)
+
+        self.assertIn("cannot stop", card.app.terminal.text())
+        self.assertEqual(card.toggles, [],
+                         "the row went back to RUN on a STOP that did nothing")
+        self.assertEqual(card.statuses, [])
+
+    def test_card_stop_relays_a_refused_kill(self):
+        _install_customtkinter_stub()
+        from gui.widgets.card_widget import KillChainCard
+
+        class Card:
+            def __init__(self):
+                self.app = types.SimpleNamespace(terminal=_Terminal())
+                self._tool_runners = {"msf": _FakeRunner(kill_result=False)}
+                self.toggles = []
+                self.statuses = []
+
+            def _toggle_run_btn(self, tool, running):
+                self.toggles.append((tool.id, running))
+
+            def _set_tool_status(self, tid, status):
+                self.statuses.append((tid, status))
+
+        card = Card()
+        card._stop_tool = KillChainCard._stop_tool.__get__(card, Card)
+        card._stop_tool(types.SimpleNamespace(
+            id="msf", name="MSF", binary="msfconsole"))
+
+        self.assertIn("could not be stopped", card.app.terminal.text())
+        self.assertEqual(card.toggles, [])
+
+    def test_bg_bar_stop_does_not_announce_a_refused_kill(self):
+        _install_customtkinter_stub()
+        from gui.widgets.bg_jobs_bar import BgJobsBar
+
+        class Bar:
+            def __init__(self):
+                self.app = types.SimpleNamespace(terminal=_Terminal())
+
+        bar = Bar()
+        bar._stop_job = BgJobsBar._stop_job.__get__(bar, Bar)
+        job = types.SimpleNamespace(label="Hydra SSH",
+                                    runner=_FakeRunner(kill_result=False))
+        bar._stop_job(job)
+
+        text = bar.app.terminal.text()
+        self.assertIn("could not be stopped", text)
+        self.assertNotIn("Stopping BG job", text)
+
+
+class MsfRunReportsCompletionOnceTests(unittest.TestCase):
+    """W5: the xterm-exit hook and the read-only background capture
+    each fired done_callback, so the card said 'completed' ~2 s after
+    launch while the exploit was still running."""
+
+    def test_done_fires_once(self):
+        from utils.runner import MetasploitRunner
+        fired = []
+        runner = MetasploitRunner(done_callback=lambda *a: fired.append(a))
+        runner._fire_done("msfconsole", 0, [])
+        runner._fire_done("msfconsole", 0, [])
+        self.assertEqual(len(fired), 1)
+
+    def test_the_background_capture_does_not_report_completion(self):
+        import inspect
+        from utils.runner import MetasploitRunner
+        source = inspect.getsource(MetasploitRunner._bg_capture)
+        self.assertNotIn("done_callback", source,
+                         "the setup mirror still reports the run as done")
+
+
+class OutputIsCappedHonestlyTests(unittest.TestCase):
+    """M2: _log grew without limit and every line was copied into the
+    session JSON."""
+
+    def test_log_is_capped_and_the_operator_is_told(self):
+        from utils.runner import ToolRunner
+        runner = ToolRunner()
+        runner._LOG_CAP = 100
+        for i in range(400):
+            runner._emit(f"line {i}", "nmap")
+        log = runner.get_log()
+        self.assertLessEqual(len(log), 100)
+        self.assertTrue(any("capped" in line for _, line in log),
+                        "output was truncated silently")
+
+    def test_a_single_huge_line_is_clipped(self):
+        from utils.runner import ToolRunner
+        runner = ToolRunner()
+        runner._emit("A" * 50000, "nmap")
+        _, line = runner.get_log()[0]
+        self.assertLess(len(line), 20000)
+        self.assertIn("truncated", line)
 
 
 if __name__ == "__main__":

@@ -795,23 +795,64 @@ class BruteForceEstimator:
         return {"total_attempts":total,"estimated_secs":int(secs),"human":human,"wordlist_lines":lines}
 
 
+class _SpawnAborted(Exception):
+    """STOP arrived before the child process existed — see
+    ToolRunner.kill() / the guard right before Popen."""
+
+
 class ToolRunner:
-    def __init__(self, output_callback=None, done_callback=None, ui_dispatcher=None):
+    # Hard cap on the retained output buffer.  Every line also goes to
+    # the terminal widget and, from there, into the session JSON, so an
+    # unbounded `-p-` verbose scan used to grow RAM and the snapshot
+    # without limit.  When the cap is hit the OLDEST lines are dropped
+    # and the operator is told once — silent truncation would be the
+    # same lie as a silent failure.
+    _LOG_CAP = 20000
+    # Hard cap on a single line.  A binary blob read from a pty has no
+    # newline for megabytes.
+    _LINE_CAP = 16384
+
+    def __init__(self, output_callback=None, done_callback=None,
+                 ui_dispatcher=None):
         self.output_callback = output_callback or (lambda *a: None)
         self.done_callback   = done_callback   or (lambda *a: None)
         self.ui_dispatcher   = ui_dispatcher
         self.process = None; self.running = False; self._log = []
+        # Set by kill() so a STOP issued in the window between run()
+        # and Popen aborts the spawn instead of doing nothing (H4).
+        self._kill_requested = False
+        self._log_truncated = False
 
-    def run(self, command, tool_name="tool", cwd=None):
+    def run(self, command, tool_name="tool", cwd=None, timeout=None):
+        """Start `command`.
+
+        `timeout` is seconds; None means no limit.  Callers pass
+        `Tool.timeout` (declared in modules/base.py and, until now,
+        never read) so a hung tool no longer holds the reader thread
+        for the lifetime of the process.
+        """
         if self.running: return
         self._log = []
-        threading.Thread(target=self._run_process, args=(command,tool_name,cwd), daemon=True).start()
+        self._kill_requested = False
+        self._log_truncated = False
+        # Set synchronously, not inside the worker: otherwise a STOP
+        # landing between run() and the thread's first statement sees
+        # running=False and reports "nothing to stop" — while the
+        # _kill_requested guard does abort the spawn.
+        self.running = True
+        threading.Thread(target=self._run_process,
+                         args=(command, tool_name, cwd, timeout),
+                         daemon=True).start()
 
     def kill(self):
         """Stop the running process.  Never blocks the caller — if the
         TERM path takes too long we escalate to KILL in a background
         thread.  Returns immediately so the UI thread can continue
         flipping the STOP → RUN button and updating the dot colour.
+
+        Returns True when a stop was really initiated, False when there
+        was nothing to stop — callers must not report a successful STOP
+        on a False.
 
         User-reported bug: clicking STOP on a stuck impacket run (pty
         blocked inside sudo wrapper) froze HAWK until xkill.  Root
@@ -822,30 +863,47 @@ class ToolRunner:
         escalates to SIGKILL on the whole group, and finally falls
         back to Popen.kill() on the direct PID — guaranteed to
         terminate in <3 s no matter how deep the pipe is."""
-        if not (self.process and self.running):
-            return
+        # Record the request unconditionally: between run() and the
+        # Popen at the bottom of _run_process there is a window of
+        # seconds (_strip_sudo_if_caps, _preflight_nxc — both do I/O)
+        # in which self.process is still None.  STOP used to be a
+        # silent no-op there: the button went back to RUN and the tool
+        # started anyway a moment later.
+        self._kill_requested = True
+        if not self.process:
+            # Pre-flight: the spawn is aborted at the Popen guard.
+            return bool(self.running)
+        if not self.running:
+            return False
         # Flip the flag FIRST so concurrent readers stop feeding the
         # output callback while the escalation runs.
         self.running = False
         proc = self.process
 
         def _escalate():
-            # 1. SIGTERM to the process group (most tools respect this)
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
-            # 2. Give the child 2 s to exit gracefully
             import time
+            pgid = None
+            try:
+                pgid = os.getpgid(proc.pid)
+            except (ProcessLookupError, PermissionError, OSError):
+                pgid = None
+            # 1. SIGTERM to the process group (most tools respect this)
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
+            # 2. Give the child 2 s to exit gracefully
             for _ in range(20):
                 if proc.poll() is not None:
                     return
                 time.sleep(0.1)
             # 3. Still alive → SIGKILL the group
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                pass
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
             # 4. Final fallback — direct kill on the PID
             for _ in range(10):
                 if proc.poll() is not None:
@@ -855,15 +913,39 @@ class ToolRunner:
                 proc.kill()
             except Exception:
                 pass
+            # 5. Verify.  Under `sudo` the real worker is a root-owned
+            #    child of a process group we don't own: killpg from a
+            #    non-root process returns EPERM, which every branch
+            #    above swallows.  HAWK would then mark the tool DONE
+            #    while nmap kept scanning the target.  Probe the group
+            #    with signal 0 and, if it is still there, say so —
+            #    with the exact command to finish the job.
+            time.sleep(0.5)
+            if pgid is None:
+                return
+            try:
+                os.killpg(pgid, 0)
+            except ProcessLookupError:
+                return                      # group is gone: really stopped
+            except (PermissionError, OSError):
+                pass                        # exists but not ours → survived
+            self._emit(
+                f"[!] STOP could not kill the tool: process group {pgid} "
+                f"is still alive (root-owned child under sudo). "
+                f"HAWK is NOT stopping it — kill it manually:  "
+                f"sudo pkill -g {pgid}",
+                "tool", "error")
 
         threading.Thread(target=_escalate, daemon=True).start()
+        return True
 
     def get_log(self): return list(self._log)
 
-    def _run_process(self, command, tool_name, cwd):
+    def _run_process(self, command, tool_name, cwd, timeout=None):
         self.running = True
         master_fd = slave_fd = None
         using_pty = False
+        deadline = (time.monotonic() + timeout) if timeout else None
 
         # ── Drop sudo when caps are set ────────────────────────────────
         # If nmap/masscan has cap_net_raw (via setup_nmap_caps.sh), we can
@@ -915,6 +997,17 @@ class ToolRunner:
             except Exception:
                 master_fd = slave_fd = None
 
+            # Last gate before the child exists.  Everything above this
+            # point (_strip_sudo_if_caps, _preflight_nxc, pty creation)
+            # can take seconds, and a STOP issued in that window used to
+            # do nothing at all: the button flipped back to RUN and nmap
+            # started anyway.  Abort the spawn instead.
+            if self._kill_requested:
+                self._emit("[*] Aborted before launch — STOP was pressed "
+                           "while the tool was still starting up.",
+                           tool_name, "warn")
+                raise _SpawnAborted()
+
             if using_pty:
                 self.process = subprocess.Popen(
                     command, shell=True,
@@ -931,6 +1024,28 @@ class ToolRunner:
                     preexec_fn=os.setsid, cwd=cwd,
                     env=_hawk_env())
                 master_fd = self.process.stdout.fileno()
+
+            # Deadline watchdog.  `Tool.timeout` has been declared in
+            # modules/base.py since day one and never read, so a tool
+            # that hung held the reader thread for the lifetime of the
+            # process.  The watchdog reuses kill() — same SIGTERM →
+            # SIGKILL escalation, same honest survival check.
+            if deadline is not None:
+                proc = self.process
+
+                def _watchdog():
+                    while self.running and proc.poll() is None:
+                        if time.monotonic() >= deadline:
+                            self._emit(
+                                f"[!] Timeout: no exit after {timeout}s — "
+                                f"stopping {tool_name}. Output above is "
+                                f"everything the tool produced.",
+                                tool_name, "error")
+                            self.kill()
+                            return
+                        time.sleep(0.5)
+
+                threading.Thread(target=_watchdog, daemon=True).start()
 
             buf = b""
             while True:
@@ -980,6 +1095,8 @@ class ToolRunner:
                 except Exception:
                     pass
             self.process.wait(); rc = self.process.returncode
+        except _SpawnAborted:
+            rc = -1
         except FileNotFoundError:
             self._emit(f"[!] Not found: {command.split()[0]}", tool_name, "error"); rc = 127
         except Exception as e:
@@ -998,7 +1115,31 @@ class ToolRunner:
             _dispatch(self.ui_dispatcher, self.done_callback, tool_name, rc, self.get_log())
 
     def _emit(self, line, tool_name, level="info"):
-        self._log.append((level,line)); _dispatch(self.ui_dispatcher, self.output_callback, line, tool_name, level)
+        if len(line) > self._LINE_CAP:
+            line = (line[:self._LINE_CAP]
+                    + f"  … [HAWK truncated this line at "
+                      f"{self._LINE_CAP} chars]")
+        self._log.append((level, line))
+        if len(self._log) > self._LOG_CAP:
+            # Drop the oldest half in one go rather than one line per
+            # append, and say it once.  The lines are still on screen
+            # and in the log file; what is capped is what HAWK keeps in
+            # RAM and copies into the session JSON.
+            drop = len(self._log) - self._LOG_CAP // 2
+            del self._log[:drop]
+            note = (f"[!] Retained output capped at {self._LOG_CAP} "
+                    f"lines — older lines were dropped from the "
+                    f"session record. The full stream is still in "
+                    f"the terminal.")
+            # Re-pin the notice after every trim: it lives at index 0 and
+            # would otherwise be the first thing dropped, leaving a
+            # truncated log that looks complete.
+            self._log.insert(0, ("warn", note))
+            if not self._log_truncated:
+                self._log_truncated = True
+                _dispatch(self.ui_dispatcher, self.output_callback,
+                          note, tool_name, "warn")
+        _dispatch(self.ui_dispatcher, self.output_callback, line, tool_name, level)
 
     def _classify(self, line):
         low = line.lower()
@@ -1034,11 +1175,44 @@ class MsfScannerRunner:
         "mongodb":"auxiliary/scanner/mongodb/mongodb_login",
     }
 
+    # A scanner module that hasn't finished in this long is hung.
+    _DEFAULT_TIMEOUT = 900
+
     def __init__(self, output_callback=None, done_callback=None, ui_dispatcher=None):
         self.output_callback = output_callback or (lambda *a: None)
         self.done_callback   = done_callback   or (lambda *a: None)
         self.ui_dispatcher   = ui_dispatcher
         self._log = []; self.running = False
+        self.process = None
+        self._stop = threading.Event()
+
+    def kill(self):
+        """Stop the msfconsole scanner.  Returns True when a stop was
+        really initiated.  Was absent entirely: the scan could not be
+        cancelled and, if the read loop raised, msfconsole was left
+        orphaned."""
+        self._stop.set()
+        proc = self.process
+        if not (proc and self.running):
+            return False
+        self.running = False
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+
+        def _escalate():
+            for _ in range(20):
+                if proc.poll() is not None:
+                    return
+                time.sleep(0.1)
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+        threading.Thread(target=_escalate, daemon=True).start()
+        return True
 
     @classmethod
     def find_scanner(cls, exploit_name):
@@ -1054,19 +1228,41 @@ class MsfScannerRunner:
         except: pass
         return ""
 
-    def run_scanner(self, scanner, target, extra_opts=None):
-        self._log=[]; self.running=True
-        threading.Thread(target=self._run, args=(scanner,target,extra_opts or {}), daemon=True).start()
+    def run_scanner(self, scanner, target, extra_opts=None, timeout=None):
+        self._log=[]; self.running=True; self._stop.clear()
+        threading.Thread(target=self._run,
+                         args=(scanner, target, extra_opts or {},
+                               timeout or self._DEFAULT_TIMEOUT),
+                         daemon=True).start()
 
-    def _run(self, scanner, target, extra_opts):
+    def _run(self, scanner, target, extra_opts, timeout):
         opts = [f"set {k} {v}" for k,v in extra_opts.items()]
         cmds = [f"use {scanner}", f"set RHOSTS {target}", "set THREADS 4"] + opts + ["run","exit -y"]
         vulnerable = False
+        proc = None
         try:
             proc = subprocess.Popen(["msfconsole","-q","-x",";".join(cmds)],
                                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
                                     env=_hawk_env())
+            self.process = proc
+            deadline = time.monotonic() + timeout
+
+            def _watchdog():
+                while self.running and proc.poll() is None:
+                    if time.monotonic() >= deadline:
+                        _dispatch(self.ui_dispatcher, self.output_callback,
+                                  f"[!] Scanner timeout after {timeout}s — "
+                                  f"stopping msfconsole.",
+                                  "scanner", "error")
+                        self.kill()
+                        return
+                    time.sleep(0.5)
+
+            threading.Thread(target=_watchdog, daemon=True).start()
+
             for raw in proc.stdout:
+                if self._stop.is_set():
+                    break
                 line = strip_ansi(raw.rstrip())
                 level = "success" if "[+]" in line else "error" if "[-]" in line else "info"
                 self._log.append((level,line)); _dispatch(self.ui_dispatcher, self.output_callback, line, "scanner", level)
@@ -1076,7 +1272,15 @@ class MsfScannerRunner:
         except Exception as e:
             _dispatch(self.ui_dispatcher, self.output_callback, f"[!] Scanner error: {e}", "scanner", "error"); rc=-1
         finally:
-            self.running=False; _dispatch(self.ui_dispatcher, self.done_callback, scanner, rc, self._log, vulnerable)
+            # Never leave msfconsole orphaned: if the read loop raised or
+            # was cancelled, the child is still there holding the socket.
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            self.running=False; self.process=None
+            _dispatch(self.ui_dispatcher, self.done_callback, scanner, rc, self._log, vulnerable)
 
 
 class MetasploitRunner:
@@ -1092,6 +1296,21 @@ class MetasploitRunner:
         self.shell_callback  = shell_callback  or (lambda *a: None)
         self.ui_dispatcher   = ui_dispatcher
         self._started=False; self._log=[]
+        # The run has TWO threads that used to each fire done_callback:
+        # the xterm-exit hook (authoritative — the exploit really ended)
+        # and the read-only background capture (finishes ~2 s after
+        # launch).  The card therefore printed "completed" while the
+        # exploit was still running in the xterm, then printed it again
+        # much later.  One shot only, guarded across threads.
+        self._done_lock = threading.Lock()
+        self._done_fired = False
+
+    def _fire_done(self, tool_name, rc, log):
+        with self._done_lock:
+            if self._done_fired:
+                return
+            self._done_fired = True
+        _dispatch(self.ui_dispatcher, self.done_callback, tool_name, rc, log)
 
     def run(self, commands, target, lhost="", lport="4444"):
         # Auto-check LPORT — find free port if occupied
@@ -1328,9 +1547,11 @@ class MetasploitRunner:
 
             # Notify the original done_callback so the rest of HAWK
             # (timeline tracking, cleanup, etc.) sees the run as done.
+            # This is the AUTHORITATIVE completion: the xterm closed, so
+            # the exploit really has ended.
             try:
-                _dispatch(dispatcher, done_cb, "msfconsole",
-                          rc if rc is not None else 0, lines)
+                self._fire_done("msfconsole",
+                                rc if rc is not None else 0, lines)
             except Exception:
                 pass
 
@@ -1343,7 +1564,7 @@ class MetasploitRunner:
                 f"    Install: sudo apt install xterm\n"
                 f"    Then: msfconsole -q -r {script_path}",
                 "msfconsole", "error")
-            _dispatch(self.ui_dispatcher, self.done_callback, "msfconsole", -1, []); return
+            self._fire_done("msfconsole", -1, []); return
 
         # Background capture for HAWK terminal
         threading.Thread(target=self._bg_capture,
@@ -1401,8 +1622,7 @@ class MetasploitRunner:
             bg_path = None
 
         if not bg_path:
-            _dispatch(self.ui_dispatcher, self.done_callback,
-                      tool_name, 0, []); return
+            return
 
         try:
             proc = subprocess.Popen(
@@ -1433,10 +1653,23 @@ class MetasploitRunner:
             try: os.remove(bg_path)
             except: pass
             if shell_found: self.shell_callback(target)
-            _dispatch(self.ui_dispatcher, self.done_callback,
-                      tool_name, rc, self.get_log())
+            # Do NOT report the run as done here.  This process only
+            # mirrors the setup lines into the HAWK terminal and exits
+            # ~2 s after launch; the exploit itself lives in the xterm
+            # and finishes whenever the operator is finished with it.
+            _dispatch(self.ui_dispatcher, self.output_callback,
+                      "  [*] Setup mirror finished — the exploit is still "
+                      "running in the xterm. HAWK will report completion "
+                      "when that window closes.",
+                      tool_name, "dim")
 
-    def kill(self): pass
+    def kill(self):
+        """The exploit runs inside an xterm HAWK does not own — there is
+        no process here to signal.  Return False so callers report the
+        truth instead of flipping the button back to RUN and calling it
+        stopped."""
+        return False
+
     def get_log(self): return list(self._log)
 
 
@@ -1461,11 +1694,20 @@ def _greenbone_creds():
 
 
 class GreenBoneRunner:
+    # A GVM scan that hasn't reported Done in this long is not coming
+    # back — the poll loop used to be `while True: sleep(30)` with no
+    # exit other than a status string, so a stuck task pinned a thread
+    # for the lifetime of the process.
+    _MAX_POLL_SECS = 4 * 3600
+    _POLL_INTERVAL = 30
+
     def __init__(self, output_callback=None, done_callback=None, ui_dispatcher=None):
         self.output_callback=output_callback or (lambda *a:None)
         self.done_callback=done_callback or (lambda *a:None)
         self.ui_dispatcher=ui_dispatcher
         self.process=None; self.running=False; self._log=[]
+        self._stop = threading.Event()
+        self._task_id = None
 
     @staticmethod
     def is_available(): return shutil.which("gvm-cli") is not None
@@ -1481,14 +1723,33 @@ class GreenBoneRunner:
         except: return False
 
     def run(self, target, scan_config="Full and fast"):
-        self._log=[]; self.running=True
+        self._log=[]; self.running=True; self._stop.clear()
         threading.Thread(target=self._run_scan,args=(target,scan_config),daemon=True).start()
 
     def kill(self):
-        if self.process and self.running:
-            try: self.process.kill()
-            except: pass
-            self.running=False
+        """Stop the scan.  `self.process` is never assigned on this
+        runner (every gvm-cli call is a short-lived subprocess.run), so
+        the old guard `if self.process and self.running` made kill() a
+        permanent no-op that didn't even clear `running`.  The poll loop
+        watches the Event instead, and the task is stopped server-side
+        so the scan doesn't keep running inside gvmd."""
+        if not self.running:
+            return False
+        self._stop.set()
+        self.running = False
+        task_id = self._task_id
+        if task_id:
+            def _stop_task():
+                try:
+                    self._gvm(f"<stop_task task_id='{task_id}'/>")
+                except Exception as e:
+                    _dispatch(self.ui_dispatcher, self.output_callback,
+                              f"[!] Could not stop the GVM task "
+                              f"server-side ({e}) — the scan may still be "
+                              f"running in gvmd. Stop it from the "
+                              f"Greenbone web UI.", "greenbone", "error")
+            threading.Thread(target=_stop_task, daemon=True).start()
+        return True
 
     def _run_scan(self, target, scan_config):
         tn="greenbone"
@@ -1503,11 +1764,26 @@ class GreenBoneRunner:
             tx=self._gvm(f"<create_task><n>HAWK-{target}</n><config id='{cid}'/><target id='{tid}'/></create_task>")
             tm=re.search(r'id="([^"]+)"',tx)
             if not tm: self._emit("[!] Task creation failed.",tn,"error"); _dispatch(self.ui_dispatcher, self.done_callback, tn,1,self.get_log()); return
-            task_id=tm.group(1); self._gvm(f"<start_task task_id='{task_id}'/>")
-            self._emit(f"[+] Scan started. Polling every 30s...",tn,"success")
-            import time as _t
+            task_id=tm.group(1); self._task_id=task_id
+            self._gvm(f"<start_task task_id='{task_id}'/>")
+            self._emit(f"[+] Scan started. Polling every "
+                       f"{self._POLL_INTERVAL}s...",tn,"success")
+            deadline = time.monotonic() + self._MAX_POLL_SECS
             while True:
-                _t.sleep(30); sx=self._gvm(f"<get_tasks task_id='{task_id}'/>")
+                # Event-based sleep so STOP interrupts the wait instead
+                # of leaving the operator up to 30 s of "did it work?".
+                if self._stop.wait(self._POLL_INTERVAL):
+                    self._emit("[*] Scan stopped by operator.",tn,"warn")
+                    break
+                if time.monotonic() >= deadline:
+                    self._emit(
+                        f"[!] Giving up after "
+                        f"{self._MAX_POLL_SECS // 3600}h without a Done "
+                        f"status. HAWK stopped polling — the task may "
+                        f"still be running in gvmd; check the Greenbone "
+                        f"web UI.", tn, "error")
+                    break
+                sx=self._gvm(f"<get_tasks task_id='{task_id}'/>")
                 if "<status>Done</status>" in sx: self._emit("[+] Done.",tn,"success"); break
                 if "<status>Stopped</status>" in sx: break
                 pm=re.search(r"<progress>(\d+)</progress>",sx)
@@ -1718,5 +1994,10 @@ class MultiRunner:
         r.run(cmd,name)
 
     def kill(self):
+        """Drop the queue and stop the command in flight.  Returns what
+        the inner runner reported, so a caller can't claim a successful
+        STOP when nothing was actually stopped."""
         with self._lock: self._queue=[]; self._running=False; current=self._current
-        if current: current.kill()
+        if not current:
+            return False
+        return current.kill() is not False
