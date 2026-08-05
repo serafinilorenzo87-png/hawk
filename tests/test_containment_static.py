@@ -100,6 +100,9 @@ ALLOWED_MARKERS = {
         "Read-only: known wordlist locations (rockyou and friends).",
     ("utils/db_profile_loader.py", "expanduser"):
         "Read-only: ~/.config lookup for an existing DB profile.",
+    ("utils/plugin_loader.py", "Path.home()"):
+        "Read-only: default location of the ARGUS licence file the "
+        "operator installs themselves (~/.hawk/argus_license.bin).",
     ("gui/dialogs_privesc.py", "expanduser"):
         "File-picker start directory only — the operator browses to a "
         "PEAS output wherever they left it.  What HAWK then WRITES "
@@ -307,6 +310,8 @@ def _markers(tree):
                         and isinstance(arg.value, str)
                         and arg.value.startswith("~")):
                     yield node.lineno, "expanduser"
+            elif name in ("Path.home", "pathlib.Path.home"):
+                yield node.lineno, "Path.home()"
         elif (isinstance(node, ast.Constant)
               and isinstance(node.value, str)
               and id(node) not in skip
