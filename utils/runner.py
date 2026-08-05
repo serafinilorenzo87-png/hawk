@@ -1755,13 +1755,18 @@ class GreenBoneRunner:
         tn="greenbone"
         try:
             self._emit(f"[*] Creating target {target}...",tn,"info")
-            res=self._gvm(f"<create_target><n>HAWK-{target}</n><hosts>{target}</hosts></create_target>")
+            # GMP element is <name>.  A mass rename left `<n>` here (and
+            # `</r>` in _parse_results): gvmd rejected create_target, the
+            # config lookup never matched and no scan ever started.
+            # Restored, but NOT verifiable headless — needs a Kali box
+            # with gvmd running to validate end to end.
+            res=self._gvm(f"<create_target><name>HAWK-{target}</name><hosts>{target}</hosts></create_target>")
             m=re.search(r'id="([^"]+)"',res)
             if not m: self._emit("[!] Target creation failed.",tn,"error"); _dispatch(self.ui_dispatcher, self.done_callback, tn,1,self.get_log()); return
             tid=m.group(1); cfgs=self._gvm("<get_configs/>")
-            cm=re.search(r'<config id="([^"]+)"[^>]*>.*?<n>'+re.escape(scan_config),cfgs,re.DOTALL)
+            cm=re.search(r'<config id="([^"]+)"[^>]*>.*?<name>'+re.escape(scan_config),cfgs,re.DOTALL)
             cid=cm.group(1) if cm else "daba56c8-73ec-11df-a475-002264764cea"
-            tx=self._gvm(f"<create_task><n>HAWK-{target}</n><config id='{cid}'/><target id='{tid}'/></create_task>")
+            tx=self._gvm(f"<create_task><name>HAWK-{target}</name><config id='{cid}'/><target id='{tid}'/></create_task>")
             tm=re.search(r'id="([^"]+)"',tx)
             if not tm: self._emit("[!] Task creation failed.",tn,"error"); _dispatch(self.ui_dispatcher, self.done_callback, tn,1,self.get_log()); return
             task_id=tm.group(1); self._task_id=task_id
@@ -1801,7 +1806,7 @@ class GreenBoneRunner:
         return r.stdout
 
     def _parse_results(self, xml, tn):
-        results=re.findall(r"<result[^>]*>.*?<n>(.*?)</n>.*?<severity>(.*?)</severity>.*?<description>(.*?)</description>.*?</r>",xml,re.DOTALL)
+        results=re.findall(r"<result[^>]*>.*?<name>(.*?)</name>.*?<severity>(.*?)</severity>.*?<description>(.*?)</description>.*?</result>",xml,re.DOTALL)
         if not results: self._emit("  — No vulnerabilities found.",tn,"info"); return
         for name,sev,desc in results:
             try: sv=float(sev)
