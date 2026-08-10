@@ -254,6 +254,58 @@ class LateJobDoesNotWriteIntoNewSessionTests(unittest.TestCase):
         self.assertIn((tool.id, "done"), card.statuses)
         self.assertNotIn("discarded", app.terminal.text())
 
+    def test_on_done_discards_null_token_output_into_a_new_session(self):
+        """F-02: a run launched with NO active session (token None) must
+        not write into the session that becomes active while it runs.
+        session_token_valid() still lets a bare None through for legacy
+        callers; the leak is closed at this recording caller."""
+        app = _app_host("session-A")
+        app.session_manager.current = None          # no session at launch
+        card = self._card(app)
+        tool = self._tool()
+        # session_token() is None here — recorded as the launch identity.
+        card._tool_widgets[tool.id] = {"_session_token": app.session_token()}
+        self.assertIsNone(card._tool_widgets[tool.id]["_session_token"])
+        card._raw_logs[tool.id] = ["21/tcp open ftp"]
+
+        # A session becomes active while the run is in flight.
+        app.session_manager.current = _Session("session-B", "10.10.10.2")
+
+        touched = []
+        app.target_intel = types.SimpleNamespace(
+            update_from_nmap=lambda log: touched.append(log))
+        card._on_done(tool, "Nmap Quick", 0, [("info", "21/tcp open ftp")])
+
+        self.assertEqual(touched, [],
+                         "null-token output leaked into the new session")
+        self.assertIn("discarded", app.terminal.text())
+        self.assertIn((tool.id, "ready"), card.statuses)
+        self.assertNotIn((tool.id, "done"), card.statuses)
+
+    def test_on_done_skips_post_processing_when_the_run_was_aborted(self):
+        """F-03: a STOPped / aborted run must not run parsers or popups —
+        they would fire on the partial/stale buffer (phantom findings)."""
+        app = _app_host("session-A")
+        card = self._card(app)
+        tool = self._tool()
+        card._tool_widgets[tool.id] = {"_session_token": app.session_token()}
+        card._raw_logs[tool.id] = ["21/tcp open ftp"]
+        # Operator hit STOP: the runner recorded the kill request.
+        card._tool_runners[tool.id] = types.SimpleNamespace(
+            _kill_requested=True)
+
+        touched, popped = [], []
+        app.target_intel = types.SimpleNamespace(
+            update_from_nmap=lambda log: touched.append(log))
+        # Spy on the "no open ports" popup so we can prove it never fires.
+        card._explain_no_open_ports = lambda *a, **k: popped.append(1)
+
+        card._on_done(tool, "Nmap Quick", 0, [("info", "21/tcp open ftp")])
+
+        self.assertEqual(touched, [], "aborted run still parsed its output")
+        self.assertEqual(popped, [], "aborted run still showed a popup")
+        self.assertNotIn((tool.id, "done"), card.statuses)
+
 
 # ── Per-tool raw log (Z6) ───────────────────────────────────────────
 

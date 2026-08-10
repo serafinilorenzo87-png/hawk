@@ -1549,6 +1549,24 @@ class CardRuntimeMixin:
 
     def _on_done(self, tool, tool_name, returncode, log):
         def _update():
+            # Abort guard (F-03): a run the operator STOPped — or that a
+            # session switch aborted — must not post-process.  Parsers
+            # and the "no open ports" popup would otherwise fire on the
+            # partial / stale buffer and surface phantom findings (a
+            # bogus "No open ports", an FTP 2121 carried over from an
+            # earlier run).  Same principle the network sweep already
+            # applies: no parsing on abort.  Only ToolRunner-based runs
+            # carry the flag; other runners fall through unchanged.
+            runner = self._tool_runners.get(tool.id)
+            if getattr(runner, "_kill_requested", False):
+                self._set_tool_status(tool.id, "error")
+                self._toggle_run_btn(tool, False)
+                self.app.terminal.write(
+                    f"  [*] {tool.name} stopped — output not parsed.",
+                    "dim")
+                self._raw_logs.pop(tool.id, None)
+                return
+
             # Session guard: the run may have outlived a NEW SESSION /
             # LOAD (session switch aborts runners, but a kill takes up
             # to ~3 s to close the loop, and the xterm/background paths
@@ -1557,8 +1575,27 @@ class CardRuntimeMixin:
             # execution record — so a stale run stops here and says so.
             w0 = self._tool_widgets.get(tool.id) or {}
             token = w0.get("_session_token")
-            if token is not None and not self.app.session_token_valid(
-                    token, f"{tool.name} output"):
+            current = getattr(
+                self.app.session_manager.current, "session_id", None)
+            stale = False
+            if token is not None:
+                stale = not self.app.session_token_valid(
+                    token, f"{tool.name} output")
+            elif "_session_token" in w0 and current is not None:
+                # Null-token hole (F-02): the run was launched with NO
+                # active session (session_token() returned None), then a
+                # session became active while it ran.  session_token_valid
+                # deliberately lets a None token through for legacy
+                # callers that never recorded one, so the leak is closed
+                # here — at the one caller that DID record the launch
+                # identity — rather than in the shared guard.
+                stale = True
+                self.app.terminal.write(
+                    f"  [!] {tool.name} output discarded — it was "
+                    f"launched with no active session; it is NOT written "
+                    f"into the session that became active while it ran.",
+                    "warn")
+            if stale:
                 self._set_tool_status(tool.id, "ready")
                 self._toggle_run_btn(tool, False)
                 self._raw_logs.pop(tool.id, None)
