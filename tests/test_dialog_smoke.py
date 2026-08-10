@@ -311,6 +311,38 @@ class SmbAnonymousParserTests(_TkTestCase):
         self.assertFalse([t for t in titles if "Anonymous" in t],
                          f"authenticated run reported as anonymous: {titles}")
 
+    def test_pwn3d_login_is_stored_verified(self):
+        """W-06(a): a confirmed SMB login (Pwn3d!) is proof of auth, so
+        the pushed credential must be verified=True."""
+        sess = self._session()
+        card = self._parser(sess)
+        card._tool_widgets["smbclient_list"]["_last_cmd"] = (
+            "netexec smb 10.10.10.10 -u administrator -p Passw0rd")
+        tool = types.SimpleNamespace(id="smbclient_list", name="netexec")
+        log = [
+            ("out", "SMB 10.10.10.10 445 DC01 [+] "
+                    "prova\\administrator:Passw0rd (Pwn3d!)"),
+            ("out", "SMB 10.10.10.10 445 DC01 ADMIN$  READ,WRITE"),
+        ]
+        card._parse_smb_output(tool, log)
+        self.assertEqual(1, len(sess.credentials))
+        self.assertTrue(sess.credentials[0]["verified"],
+                        "a Pwn3d! login was stored UNVERIFIED")
+
+    def test_share_listing_without_pwn3d_stays_unverified(self):
+        """A share list alone can come from a guest mapping — no proof
+        THIS user authenticated, so the cred stays unverified."""
+        sess = self._session()
+        card = self._parser(sess)
+        card._tool_widgets["smbclient_list"]["_last_cmd"] = (
+            "smbclient -L //10.10.10.10 -U 'bob%hunter2'")
+        tool = types.SimpleNamespace(id="smbclient_list", name="SMBCLIENT")
+        log = [("out", "\tShareX           Disk      A share")]
+        card._parse_smb_output(tool, log)
+        self.assertEqual(1, len(sess.credentials))
+        self.assertFalse(sess.credentials[0]["verified"],
+                         "a bare share listing was stored VERIFIED")
+
 
 if __name__ == "__main__":
     unittest.main()

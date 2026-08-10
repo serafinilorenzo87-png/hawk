@@ -451,11 +451,13 @@ class CardPostParserMixin:
                                   if domain else "")
                                + f" — {len(shares)} share(s) "
                                  f"listed."),
-                        # A share list can also come back from a
+                        # A share list alone can come back from a
                         # server that mapped us to guest, so the
-                        # listing alone does not prove THIS user
-                        # authenticated.
-                        verified=False)
+                        # listing does not prove THIS user
+                        # authenticated.  A `Pwn3d!` IS proof of
+                        # authentication (local admin), so verify only
+                        # then; a bare listing stays unverified.
+                        verified=pwn3d)
                     sess.add_credential(cred)
                     sess.save()
                     pushed_cred = True

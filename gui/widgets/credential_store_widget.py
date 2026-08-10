@@ -1825,7 +1825,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
 
     def _add_manual(self):
         from gui.dialogs import _make_win, _safe_destroy, _btn_row, _btn
-        win = _make_win(self, "Add Credential", 520, 440)
+        win = _make_win(self, "Add Credential", 520, 480)
         ctk.CTkLabel(win, text="Add Credential",
             font=_mono(15, True), text_color=COLORS["text_bright"]
             ).pack(pady=(14,8))
@@ -1859,6 +1859,29 @@ class CredentialStoreWidget(ctk.CTkFrame):
             text_color=COLORS["text_bright"],
             border_color=COLORS["border_green"], border_width=1, corner_radius=3)
         user_e.pack(side="left", fill="x", expand=True)
+
+        # Host row (always shown).  A credential without a host cannot
+        # dedup against the same login harvested by an enumeration push
+        # (the store keys dedup on user + host + secret), so a manual
+        # entry used to sit next to its enum-push twin as a second row
+        # (W-06).  Default to the current target so the common case
+        # needs no typing.
+        try:
+            _cur_target = (self.app.target_bar.get_target() or "").strip()
+        except Exception:
+            _cur_target = ""
+        host_row = ctk.CTkFrame(body, fg_color="transparent")
+        host_row.pack(fill="x", padx=24, pady=3)
+        ctk.CTkLabel(host_row, text="Host:", font=_mono(13),
+            text_color=COLORS["text_dim"], width=110, anchor="w").pack(side="left")
+        host_e = ctk.CTkEntry(host_row, height=28,
+            placeholder_text="e.g. 10.10.10.10 (target)",
+            font=_mono(13), fg_color=COLORS["bg_card"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_green"], border_width=1, corner_radius=3)
+        host_e.pack(side="left", fill="x", expand=True)
+        if _cur_target:
+            host_e.insert(0, _cur_target)
 
         # Password row (cleartext mode only)
         pass_row = ctk.CTkFrame(body, fg_color="transparent")
@@ -1924,6 +1947,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
 
         def _save():
             u = user_e.get().strip()
+            host = host_e.get().strip()
             s = [x.strip() for x in svc_e.get().split(",") if x.strip()]
             # Manual entries are operator input: nothing has
             # authenticated them yet.  They get promoted the moment a
@@ -1932,7 +1956,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
                 cred = Credential(username=u,
                     password=pass_e.get().strip(),
                     cred_type="cleartext", services=s,
-                    source_phase="manual", verified=False)
+                    source_phase="manual", host=host, verified=False)
             else:
                 hv = hash_e.get().strip()
                 # If the user pasted a FULL line (pwdump / shadow / user:hash)
@@ -1950,7 +1974,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
                           else detect_hash_type(hv))
                 cred = Credential(username=u, hash_val=hv, hash_type=ht,
                     cred_type="hash", services=s,
-                    source_phase="manual", verified=False)
+                    source_phase="manual", host=host, verified=False)
             _safe_destroy(win)
             self.add_credential(cred)
 

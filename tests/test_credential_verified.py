@@ -505,6 +505,66 @@ class PromotionPathTests(unittest.TestCase):
                        and not sess.credentials[0].get("verified", True))
             self.assertFalse(promote)
 
+    def test_promotion_matches_identity_not_secret(self):
+        """F-05: a manual cred with the right user+host+service but a
+        DIFFERENT typed secret is promoted IN PLACE (not duplicated),
+        and the stored secret is aligned to the proven one."""
+        from utils.session import Credential
+        with self._parser() as (parser, sess, store):
+            sess.add_credential(Credential(
+                username="msfadmin", password="wrongguess",
+                cred_type="cleartext", services=["SSH"],
+                host="10.0.0.9", source_phase="manual", verified=False))
+            sess.save()
+
+            added = parser._mark_creds_verified(
+                ("msfadmin", "msfadmin", ""), "10.0.0.9", "SSH",
+                "SSH login successful")
+
+            self.assertFalse(added, "promotion must not add a second row")
+            self.assertEqual([], store.added)
+            self.assertEqual(1, len(sess.credentials))
+            self.assertTrue(sess.credentials[0]["verified"])
+            self.assertEqual(
+                "msfadmin", sess.credentials[0]["password"],
+                "stored secret was not aligned to the proven one")
+
+    def test_ssh_connect_success_seeds_verified_credential(self):
+        """F-04: a successful SSH CONNECT seeds the store as verified,
+        the same way FTP/telnet connects already do."""
+        with self._parser() as (parser, sess, store):
+            # add_auto_finding lives on the render mixin, not the parser
+            # mixin under test — attach a spy so the success branch runs.
+            findings = []
+            parser.add_auto_finding = (
+                lambda title, desc, severity=None, source=None, **k:
+                findings.append(title))
+            text = ("Linux metasploitable 2.6.24-16-server #1 SMP\n"
+                    "Last login: Tue Aug  5 12:00:00 2026 from 10.0.0.1\n"
+                    "msfadmin@metasploitable:~$ ")
+            parser._parse_ssh_connect(
+                "password", "10.0.0.9", 22, text.splitlines(), text,
+                used_creds=("msfadmin", "msfadmin", ""))
+
+            self.assertEqual(1, len(store.added),
+                             "successful SSH login did not seed the store")
+            self.assertTrue(store.added[0].verified)
+            self.assertIn("SSH", store.added[0].services)
+            self.assertTrue(any("login successful" in t.lower()
+                                for t in findings))
+
+    def test_ssh_connect_failure_seeds_nothing(self):
+        """A rejected SSH login must never seed a credential."""
+        with self._parser() as (parser, sess, store):
+            parser.add_auto_finding = lambda *a, **k: None
+            bad = ("SSH-2.0-OpenSSH_4.7p1 Debian-8ubuntu1\n"
+                   "Permission denied (publickey,password).\n")
+            parser._parse_ssh_connect(
+                "password", "10.0.0.9", 22, bad.splitlines(), bad,
+                used_creds=("root", "toor", ""))
+            self.assertEqual([], store.added)
+            self.assertEqual(0, len(sess.credentials))
+
 
 if __name__ == "__main__":
     unittest.main()

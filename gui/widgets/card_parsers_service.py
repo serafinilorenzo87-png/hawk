@@ -1373,13 +1373,17 @@ class CardServiceParserMixin:
             self._run_raw(tool, cmd)
 
         def _save_to_store():
+            """Save the typed creds.  Returns True only when something
+            was actually stored — a username with no password/hash trips
+            the guard and stores nothing, so callers must not claim a
+            save happened (W-04)."""
             try:
                 from utils.session import Credential
                 u = user_var.get().strip()
                 p = pass_var.get()
                 h = hash_var.get().strip()
                 if not u or (not p and not h):
-                    return
+                    return False
                 svc = ("SMB" if tool.binary in ("netexec", "nxc",
                                                 "crackmapexec", "cme")
                        else "AD")
@@ -1397,14 +1401,20 @@ class CardServiceParserMixin:
                     # runs — a guess until something authenticates.
                     verified=False)
                 self.app.cred_store.add_credential(cred)
+                return True
             except Exception as e:
                 print(f"[HAWK] cred save failed: {e}")
+                return False
 
         def _store_only():
-            _save_to_store()
-            self.app.terminal.write(
-                "  [+] Credentials saved to Credential Store. "
-                "You can re-run any tool now.", "success")
+            if _save_to_store():
+                self.app.terminal.write(
+                    "  [+] Credentials saved to Credential Store. "
+                    "You can re-run any tool now.", "success")
+            else:
+                self.app.terminal.write(
+                    "  [!] Nothing saved — enter a username and a "
+                    "password or hash first.", "warn")
             _safe_destroy(win)
 
         row = _btn_row(win)

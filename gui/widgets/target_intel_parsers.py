@@ -179,7 +179,14 @@ class TargetIntelParserMixin:
         secret = hash_val if cred_type == "hash" else password
         note_verified = f"[verified by {evidence}]"
 
-        # Dedup: matching entry already in store → promote it in place.
+        # Dedup: an entry for the same IDENTITY (user + host + service)
+        # already in the store → promote it in place.  The match is on
+        # identity only, NOT on the secret: the login we just observed
+        # proves the secret, so requiring the stored secret to equal the
+        # proven one added a second, duplicate row whenever the operator
+        # had typed a slightly different (or host-less, see W-06) manual
+        # entry — F-05 observed 2x `msfadmin`.  Align the stored secret
+        # to the proven one so the promoted row is truthful.
         try:
             if sess:
                 for cdict in sess.credentials:
@@ -189,17 +196,22 @@ class TargetIntelParserMixin:
                         continue
                     if service_tag not in (cdict.get("services") or []):
                         continue
-                    if cred_type == "cleartext":
-                        if cdict.get("password") != secret:
-                            continue
-                    else:
-                        if cdict.get("hash_val") != secret:
-                            continue
                     # Already in the store — promote it to verified.
                     # This used to be a silent no-op, which left a
                     # credential the operator had just authenticated
                     # with stuck behind the UNVERIFIED badge.
-                    if self._promote_cred_dict(cdict, note_verified):
+                    changed = self._promote_cred_dict(cdict, note_verified)
+                    if cred_type == "cleartext":
+                        if cdict.get("password") != secret:
+                            cdict["password"] = secret
+                            cdict["cred_type"] = "cleartext"
+                            changed = True
+                    else:
+                        if cdict.get("hash_val") != secret:
+                            cdict["hash_val"] = secret
+                            cdict["cred_type"] = "hash"
+                            changed = True
+                    if changed:
                         sess._touch()
                         self._persist_and_refresh_store()
                         try:
@@ -1089,6 +1101,45 @@ class TargetIntelParserMixin:
                 f"before retrying so the server's MaxStartups "
                 f"counter recovers.",
                 severity="medium", source="CONNECT / SSH")
+
+        # ── Successful login → seed the Credential Store ──────────────
+        # A captured SSH login that reaches a shell prints the server's
+        # POST-AUTH output before EOF closes the non-interactive session:
+        # the "Last login:" record, the Linux kernel banner, the
+        # Debian/Ubuntu MOTD, or a shell prompt.  None of these appear on
+        # a rejected login (Permission denied) or a banner-only probe, so
+        # they are safe proof the supplied cred authenticated.  FTP and
+        # Telnet already seed the store on success; SSH did not, so a
+        # successful `msfadmin` login left no credential behind (F-04).
+        ssh_failed = (
+            "permission denied" in low
+            or "authentication failed" in low
+            or "connection refused" in low
+            or "connection closed" in low
+            or "no route to host" in low
+            or "host key verification failed" in low
+        )
+        ssh_success = (not ssh_failed) and (
+            "last login:" in low
+            or "absolutely no warranty" in low
+            or _re.search(r"^Linux\s+\S+\s+\d+\.\d+",
+                          text, _re.MULTILINE) is not None
+            or _re.search(r"^[\w.\-]+@[\w.\-]+:[~\w./\-]*[#$]\s*$",
+                          text, _re.MULTILINE) is not None
+        )
+        # auth_action is True only when the operator supplied a real
+        # cred (defined above for the silent-failure diagnostic).  The
+        # enum_auth action never logs in (PreferredAuthentications=none)
+        # so it is excluded explicitly as well.
+        if ssh_success and auth_action and aid != "enum_auth":
+            self.add_auto_finding(
+                "SSH login successful",
+                f"{target}:{port} accepted the supplied SSH "
+                f"credentials.",
+                severity="high", source="CONNECT / SSH")
+            self._mark_creds_verified(
+                used_creds, target, "SSH",
+                "SSH login successful (shell / MOTD banner)")
 
     def _parse_ftp_connect(self, aid, target, port, lines, text,
                             used_creds=None):
