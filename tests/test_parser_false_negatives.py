@@ -417,6 +417,107 @@ class WinpeasUnparsedOutputTests(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  winPEAS.bat — ASCII "[*]"/"[+]" section headers (W-07)
+# ═══════════════════════════════════════════════════════════════════
+
+# Real winPEAS.bat (the ASCII batch, the only PEAS that runs on Win
+# 2008 R2 where winPEASany.exe needs a .NET runtime it lacks) has NO
+# box-drawing characters.  Its :ColorLine helper prints "[*] NAME" for
+# major sections and " [+] NAME" for subsections; the section wordings
+# below ("CURRENT USER", "UNQUOTED SERVICE PATHS") are verbatim from
+# PEASS-ng winPEAS/winPEASbat/winPEAS.bat.  ANSI colour is stripped
+# before the parser sees it, so the sample is already plain text.  The
+# CURRENT USER section carries `whoami /all`, privileges table included.
+_WINPEAS_BAT_OUTPUT = """\
+  ADVISORY: winpeas should be used for authorized penetration testing only.
+
+[*] BASIC SYSTEM INFORMATION
+ [+] WINDOWS OS
+   [i] Check the Windows version to look for known exploits
+Host Name:                 WIN-DC01
+OS Name:                   Microsoft Windows Server 2008 R2 Datacenter
+OS Version:                6.1.7601 Service Pack 1 Build 7601
+
+ [+] CURRENT USER
+   [i] https://book.hacktricks.xyz/windows-hardening/windows-local-privilege-escalation
+
+USER INFORMATION
+----------------
+
+User Name  SID
+========== ==============================================
+prova\\bob  S-1-5-21-1770970954-1417151936-2144145714-1105
+
+
+PRIVILEGES INFORMATION
+----------------------
+
+Privilege Name                Description                          State
+============================= ==================================== ========
+SeChangeNotifyPrivilege       Bypass traverse checking             Enabled
+SeImpersonatePrivilege        Impersonate a client after authent.  Enabled
+SeCreateGlobalPrivilege       Create global objects                Enabled
+
+ [+] UNQUOTED SERVICE PATHS
+   [i] https://book.hacktricks.xyz/windows-hardening/windows-local-privilege-escalation
+No unquoted service paths were found
+"""
+
+
+class WinpeasBatAsciiHeaderTests(unittest.TestCase):
+    """W-07: winPEAS.bat output (ASCII headers, no box-drawing) used to
+    fall entirely into `_preamble`, so every section parser returned
+    None and the run yielded ZERO findings — SeImpersonate included."""
+
+    def test_split_recognises_ascii_bat_headers(self):
+        sections = wp._split_into_sections(_WINPEAS_BAT_OUTPUT)
+        # Pre-fix: the only key was "_preamble".
+        self.assertNotEqual(list(sections.keys()), ["_preamble"])
+        self.assertIn("current user", sections)
+        self.assertIn("unquoted service paths", sections)
+        # The privileges table must land inside the CURRENT USER body.
+        self.assertIn("SeImpersonatePrivilege",
+                      sections["current user"])
+
+    def test_seimpersonate_high_finding_is_emitted(self):
+        """The headline claim: a real winPEAS.bat run with SeImpersonate
+        present must produce the HIGH finding (pre-fix it produced
+        nothing)."""
+        findings = []
+        wp._parse_token_privs(
+            wp._split_into_sections(_WINPEAS_BAT_OUTPUT),
+            "192.168.176.173", findings)
+        seimp = [f for f in findings
+                 if f["title"] == "Privilege enabled: SeImpersonatePrivilege"]
+        self.assertEqual(len(seimp), 1, [f["title"] for f in findings])
+        self.assertEqual(seimp[0]["severity"], "high")
+
+    def test_full_parse_finds_seimpersonate_and_no_headerless_warning(self):
+        """End-to-end through parse_winpeas: the HIGH finding reaches the
+        UI push, and the 'no section headers' fallback does NOT fire."""
+        class Intel:
+            def __init__(self):
+                self.pushed = []
+
+            def add_auto_finding(self, **kw):
+                self.pushed.append(kw)
+
+        class Store:
+            def add_credential(self, *a, **kw):
+                pass
+
+        app = types.SimpleNamespace(
+            target_intel=Intel(), cred_store=Store(),
+            terminal=types.SimpleNamespace(write=lambda *a, **k: None))
+
+        wp.parse_winpeas(_WINPEAS_BAT_OUTPUT, app, "192.168.176.173")
+        titles = [p.get("title", "") for p in app.target_intel.pushed]
+        self.assertIn("Privilege enabled: SeImpersonatePrivilege", titles)
+        self.assertFalse(
+            any("no section headers" in t for t in titles), titles)
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  post-RCE recon — pasted terminal scrollback
 # ═══════════════════════════════════════════════════════════════════
 

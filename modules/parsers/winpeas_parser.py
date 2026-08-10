@@ -309,29 +309,65 @@ _SECTION_HEADER_RE = re.compile(
 _SECTION_TITLE_RE = re.compile(
     r"[╣═─¹Í]\s*([^╣═─¹]+?)\s*$")
 
+# Legacy winPEAS.bat (the ASCII batch, e.g. the one that still runs on
+# Windows 2008 R2 where winPEASany.exe needs a .NET runtime it hasn't
+# got) has NO box-drawing at all.  Its :ColorLine helper prints every
+# section with a bracketed marker — "[*] NAME" for a major section and
+# " [+] NAME" for a subsection (leading space, ANSI colour already
+# stripped by the time we see it).  This is the ONLY section structure
+# in .bat output, so unless we recognise it every section parser looks
+# up a section that never got created, the whole run lands in
+# `_preamble`, and winPEAS.bat yields zero findings even with
+# SeImpersonate on screen (live-validation W-07).
+#
+# We deliberately DON'T treat "[i]" / "[?]" (info / hint) lines as
+# headers — those are body annotations — and we only switch to this
+# dialect when the output carries NO box-drawing header (see
+# `_split_into_sections`), because winPEASany.exe reuses "[+]" for
+# inline check banners INSIDE a box-drawing section and must keep
+# splitting on the box chars alone.
+_BAT_SECTION_HEADER_RE = re.compile(r"^\s*\[[*+]\]\s+(\S.*?)\s*$")
+
 
 def _split_into_sections(text: str) -> dict[str, str]:
     """Return {section_title_lower: body_text} for all top-level
     sections found.  Titles are lowercased + whitespace-compressed for
     robust lookup regardless of exact winPEAS casing.
 
-    Handles both UTF-8 (normal) and CP850-read-as-Latin-1 box chars so
-    the parser works whether winpeas.bat ran under chcp 65001 (UTF-8)
-    or the default Windows OEM code page (CP850).
+    Two header dialects are supported, chosen ONCE per parse:
+
+      • box-drawing / CP850 (winPEASany.exe, modern UTF-8 .bat) — the
+        default whenever any box-drawing header is present.  "[+]" stays
+        an inline banner here, never a section boundary.
+      • ASCII "[*]" / "[+]" (legacy winPEAS.bat) — used only when the
+        output has no box-drawing header at all.
+
+    Picking the dialect per-parse keeps .exe parsing byte-for-byte
+    unchanged while making .bat reachable (W-07).
     """
     lines = text.splitlines()
+    # winPEASany.exe reserves "[+]" for inline banners, so we only honour
+    # the ASCII dialect when there is no box-drawing header to anchor on.
+    has_box = any(_SECTION_HEADER_RE.match(ln) for ln in lines)
+
     sections: dict[str, list[str]] = {"_preamble": []}
     current = "_preamble"
 
     for line in lines:
-        if _SECTION_HEADER_RE.match(line):
-            m = _SECTION_TITLE_RE.search(line)
-            if m:
-                title = _normalise(m.group(1))
-                if title:
-                    current = title
-                    sections.setdefault(current, [])
-                    continue
+        title = None
+        if has_box:
+            if _SECTION_HEADER_RE.match(line):
+                m = _SECTION_TITLE_RE.search(line)
+                if m:
+                    title = _normalise(m.group(1))
+        else:
+            mb = _BAT_SECTION_HEADER_RE.match(line)
+            if mb:
+                title = _normalise(mb.group(1))
+        if title:
+            current = title
+            sections.setdefault(current, [])
+            continue
         sections.setdefault(current, []).append(line)
 
     return {k: "\n".join(v) for k, v in sections.items()}
@@ -425,6 +461,10 @@ def _parse_token_privs(sections, target, findings):
     """Detect dangerous privileges in the `whoami /priv` dump."""
     body = (_find_section(sections, "token", "priv")
             or _find_section(sections, "current token")
+            # Legacy winPEAS.bat dumps `whoami /all` (privileges table
+            # included) under its "[+] CURRENT USER" section — the only
+            # place SeImpersonate appears in .bat output (W-07).
+            or _find_section(sections, "current", "user")
             or _find_section(sections, "users", "information"))
     if not body:
         return None
