@@ -1730,6 +1730,152 @@ class TargetIntelRenderMixin:
             for w in profile["warnings"]:
                 self.app.terminal.write(f"  ⚠  {w}", "warn")
 
+        # Version/banner-based CVE detection.  The `-sV` service banners
+        # (Samba smbd 3.0.20, vsftpd 2.3.4, distccd, UnrealIRCd) land in
+        # THIS flow — not in `update_from_vuln_scripts`, which only runs
+        # for the `nmap_vuln` tool.  Running the detectors here is what
+        # makes every version-based CVE reachable (live-validation
+        # F-07 / F-08).  `add_auto_finding` dedups on (title, port), so
+        # the `nmap_vuln` path — which calls `update_from_nmap` too —
+        # cannot double-report.
+        self._detect_version_cves(output_lines)
+
+    def _detect_version_cves(self, output_lines: list):
+        """Emit findings for CVEs identified from nmap `-sV` version
+        banners and open-port service names.
+
+        Shared by the service-scan flow (`update_from_nmap`, the sole
+        caller in production) so the detectors sit on the path that
+        actually carries version data.  Historically this block lived
+        inside `update_from_vuln_scripts`; a plain `-sV` scan never
+        reached it, dropping Samba CVE-2007-2447 and distcc
+        CVE-2004-2687 (live-validation F-07 / F-08).
+
+        Every detector keys off the raw banner text, so it is a no-op on
+        banner-less output (masscan, `--script vuln` without `-sV`).
+        """
+        full_text = "\n".join(output_lines)
+
+        target = getattr(self._fp, "target", "") if self._fp else ""
+        if not target:
+            try:
+                target = self.app.session_manager.current.target
+            except Exception:
+                target = ""
+
+        # vsftpd 2.3.4 backdoor — detected by version banner in nmap -sV
+        m_vsftpd = re.search(r'vsftpd\s+2\.3\.4', full_text, re.I)
+        if m_vsftpd:
+            fp2 = re.search(r'(\d+)/tcp\s+open\s+ftp', full_text)
+            ftp_port2 = int(fp2.group(1)) if fp2 else 21
+            self.add_auto_finding(
+                "vsftpd 2.3.4 backdoor (CVE-2011-2523)",
+                f"{target}:{ftp_port2} is running vsftpd 2.3.4 — "
+                f"this version contains a deliberately planted backdoor.\n\n"
+                f"EXPLOIT: send a username ending in ':)' during login to "
+                f"trigger a bind shell on port 6200 as root (no password needed).\n\n"
+                f"Quick manual test:\n"
+                f"  nc {target} {ftp_port2}  →  USER backdoor:)  →  PASS x\n"
+                f"  nc {target} 6200          →  instant root shell\n\n"
+                f"Use the RUN WITH MSF button to launch the Metasploit module.",
+                severity="critical", source="nmap banner",
+                port=ftp_port2)
+
+        # distcc daemon RCE (CVE-2004-2687).
+        #
+        # Gate on an actual open-port line, not on the bare substring:
+        # `distcc` anywhere in the output (an NSE script name, a
+        # package name echoed by http-* scripts, a page body) used to
+        # emit a CRITICAL RCE hardcoded on port 3632 for a host that
+        # was never running the daemon.  The port now comes from the
+        # match instead of being assumed.  Note (F-08): port 3632 is
+        # outside nmap's top-1000, so this fires only when 3632 is
+        # actually scanned (full scan or explicit port) — when it is,
+        # the finding now reaches the report.
+        m_distcc = re.search(
+            r'^\s*(\d+)/tcp\s+open\s+distcc', full_text, re.I | re.M)
+        if m_distcc:
+            distcc_port = int(m_distcc.group(1))
+            self.add_auto_finding(
+                "DistCC daemon RCE (CVE-2004-2687)",
+                f"{target}:{distcc_port} — DistCC daemon detected.\n\n"
+                f"DistCC is a distributed C compiler that executes compile\n"
+                f"jobs sent over the network. There is no authentication —\n"
+                f"the only access control is the daemon's --allow list.\n\n"
+                f"NOT CONFIRMED — service match only. Exploitable if the daemon\n"
+                f"accepts jobs from your IP (the historic default, and the case\n"
+                f"on Metasploitable2); a daemon started with a restrictive\n"
+                f"--allow will refuse the job.\n\n"
+                f"EXPLOIT: the Metasploit module sends a compile job containing\n"
+                f"a reverse shell payload — returns a shell as the 'daemon' user.\n"
+                f"From there, check for SUID binaries (nmap 5.x is installed on\n"
+                f"Metasploitable and has --interactive → root).\n\n"
+                f"Use the RUN WITH MSF button to launch the Metasploit module.",
+                severity="critical", source="nmap banner",
+                port=distcc_port)
+
+        # UnrealIRCd 3.2.8.1 backdoor (CVE-2010-2075) — port 6667
+        if re.search(r'UnrealIRCd\s+3\.2\.8\.1', full_text, re.I):
+            self.add_auto_finding(
+                "UnrealIRCd 3.2.8.1 backdoor (CVE-2010-2075)",
+                f"{target}:6667 — UnrealIRCd 3.2.8.1 detected.\n\n"
+                f"This version was distributed with a backdoor that opens a\n"
+                f"bind shell on a random port when triggered — root, no creds.\n\n"
+                f"Use the RUN WITH MSF button to launch the Metasploit module.",
+                severity="critical", source="nmap banner",
+                port=6667)
+
+        # Samba usermap_script (CVE-2007-2447) — port 139/445.
+        #
+        # Version gate is 3.0.0–3.0.25rc3, NOT "anything below 3.4".
+        # The wider gate reported every Samba 3.x banner as a confirmed
+        # CRITICAL RCE: `Samba smbd 3.2.5`, the default on Ubuntu
+        # 8.10/9.04 and on plenty of HTB boxes, is not vulnerable at
+        # all.  FINDING_INFO (see the `usermap_script` entry further
+        # down this file) always had the correct range.
+        #
+        # The regex must accept BOTH banner shapes:
+        #   • `-sV` service banner: `Samba smbd 3.0.20-Debian`
+        #     (the `smbd` token sits between "Samba" and the version)
+        #   • `smb-os-discovery` NSE line: `OS: Unix (Samba 3.0.20-Debian)`
+        # The old `Samba\s+(\d+...)` matched only the second — precisely
+        # the format a `-sV` scan (this method's real input) never emits,
+        # which is the other half of F-07.
+        #
+        # It stays `high` and not `critical` because the version alone
+        # does not make the box exploitable: CVE-2007-2447 needs
+        # `username map script` configured in smb.conf, which is NOT a
+        # default.  That precondition is now stated in the description
+        # instead of being implied away.
+        m_samba = re.search(
+            r'Samba\s+(?:smbd\s+)?(\d+\.\d+\.\d+)', full_text, re.I)
+        if m_samba:
+            parts = m_samba.group(1).split(".")
+            try:
+                major, minor = int(parts[0]), int(parts[1])
+                patch = int(parts[2])
+                if major == 3 and minor == 0 and patch <= 25:
+                    # Prefer 445 (modern SMB) when available, fallback 139
+                    smb_p = (445 if re.search(
+                                r'445/tcp\s+open', full_text)
+                             else 139)
+                    self.add_auto_finding(
+                        f"Samba {m_samba.group(1)} — usermap_script RCE (CVE-2007-2447)",
+                        f"{target} — Samba {m_samba.group(1)} detected. This is inside "
+                        f"the vulnerable range for CVE-2007-2447 (3.0.0-3.0.25rc3).\n\n"
+                        f"NOT CONFIRMED — version match only. The bug is a username\n"
+                        f"metacharacter injection in the MS-RPC SamrCreateUser call, and\n"
+                        f"it only reaches a shell when smb.conf defines a\n"
+                        f"`username map script` — which is NOT the default. On a stock\n"
+                        f"configuration the exploit fails against a vulnerable version.\n\n"
+                        f"Confirm before reporting: run the MSF module (it fails cleanly\n"
+                        f"if the option is unset), or read smb.conf if you get a shell.\n\n"
+                        f"Use the RUN WITH MSF button to launch the Metasploit module.",
+                        severity="high", source="nmap banner",
+                        port=smb_p)
+            except (ValueError, IndexError):
+                pass
+
     def update_from_vuln_scripts(self, output_lines: list):
         """
         Parse nmap vuln scripts output and add findings to Target Intel.
@@ -1929,106 +2075,16 @@ class TargetIntelRenderMixin:
                     # script logged in anonymously.
                     verified=True))
 
-        # vsftpd 2.3.4 backdoor — detected by version banner in nmap -sV
-        m_vsftpd = re.search(r'vsftpd\s+2\.3\.4', full_text, re.I)
-        if m_vsftpd:
-            fp2 = re.search(r'(\d+)/tcp\s+open\s+ftp', full_text)
-            ftp_port2 = int(fp2.group(1)) if fp2 else 21
-            self.add_auto_finding(
-                "vsftpd 2.3.4 backdoor (CVE-2011-2523)",
-                f"{target}:{ftp_port2} is running vsftpd 2.3.4 — "
-                f"this version contains a deliberately planted backdoor.\n\n"
-                f"EXPLOIT: send a username ending in ':)' during login to "
-                f"trigger a bind shell on port 6200 as root (no password needed).\n\n"
-                f"Quick manual test:\n"
-                f"  nc {target} {ftp_port2}  →  USER backdoor:)  →  PASS x\n"
-                f"  nc {target} 6200          →  instant root shell\n\n"
-                f"Use the RUN WITH MSF button to launch the Metasploit module.",
-                severity="critical", source="nmap banner",
-                port=ftp_port2)
-
-        # distcc daemon RCE (CVE-2004-2687).
-        #
-        # Gate on an actual open-port line, not on the bare substring:
-        # `distcc` anywhere in the output (an NSE script name, a
-        # package name echoed by http-* scripts, a page body) used to
-        # emit a CRITICAL RCE hardcoded on port 3632 for a host that
-        # was never running the daemon.  The port now comes from the
-        # match instead of being assumed.
-        m_distcc = re.search(
-            r'^\s*(\d+)/tcp\s+open\s+distcc', full_text, re.I | re.M)
-        if m_distcc:
-            distcc_port = int(m_distcc.group(1))
-            self.add_auto_finding(
-                "DistCC daemon RCE (CVE-2004-2687)",
-                f"{target}:{distcc_port} — DistCC daemon detected.\n\n"
-                f"DistCC is a distributed C compiler that executes compile\n"
-                f"jobs sent over the network. There is no authentication —\n"
-                f"the only access control is the daemon's --allow list.\n\n"
-                f"NOT CONFIRMED — service match only. Exploitable if the daemon\n"
-                f"accepts jobs from your IP (the historic default, and the case\n"
-                f"on Metasploitable2); a daemon started with a restrictive\n"
-                f"--allow will refuse the job.\n\n"
-                f"EXPLOIT: the Metasploit module sends a compile job containing\n"
-                f"a reverse shell payload — returns a shell as the 'daemon' user.\n"
-                f"From there, check for SUID binaries (nmap 5.x is installed on\n"
-                f"Metasploitable and has --interactive → root).\n\n"
-                f"Use the RUN WITH MSF button to launch the Metasploit module.",
-                severity="critical", source="nmap banner",
-                port=distcc_port)
-
-        # UnrealIRCd 3.2.8.1 backdoor (CVE-2010-2075) — port 6667
-        if re.search(r'UnrealIRCd\s+3\.2\.8\.1', full_text, re.I):
-            self.add_auto_finding(
-                "UnrealIRCd 3.2.8.1 backdoor (CVE-2010-2075)",
-                f"{target}:6667 — UnrealIRCd 3.2.8.1 detected.\n\n"
-                f"This version was distributed with a backdoor that opens a\n"
-                f"bind shell on a random port when triggered — root, no creds.\n\n"
-                f"Use the RUN WITH MSF button to launch the Metasploit module.",
-                severity="critical", source="nmap banner",
-                port=6667)
-
-        # Samba usermap_script (CVE-2007-2447) — port 139/445.
-        #
-        # Version gate is 3.0.0–3.0.25rc3, NOT "anything below 3.4".
-        # The wider gate reported every Samba 3.x banner as a confirmed
-        # CRITICAL RCE: `Samba smbd 3.2.5`, the default on Ubuntu
-        # 8.10/9.04 and on plenty of HTB boxes, is not vulnerable at
-        # all.  FINDING_INFO (see the `usermap_script` entry further
-        # down this file) always had the correct range.
-        #
-        # It stays `high` and not `critical` because the version alone
-        # does not make the box exploitable: CVE-2007-2447 needs
-        # `username map script` configured in smb.conf, which is NOT a
-        # default.  That precondition is now stated in the description
-        # instead of being implied away.
-        m_samba = re.search(r'Samba\s+(\d+\.\d+\.\d+)', full_text, re.I)
-        if m_samba:
-            parts = m_samba.group(1).split(".")
-            try:
-                major, minor = int(parts[0]), int(parts[1])
-                patch = int(parts[2])
-                if major == 3 and minor == 0 and patch <= 25:
-                    # Prefer 445 (modern SMB) when available, fallback 139
-                    smb_p = (445 if re.search(
-                                r'445/tcp\s+open', full_text)
-                             else 139)
-                    self.add_auto_finding(
-                        f"Samba {m_samba.group(1)} — usermap_script RCE (CVE-2007-2447)",
-                        f"{target} — Samba {m_samba.group(1)} detected. This is inside "
-                        f"the vulnerable range for CVE-2007-2447 (3.0.0-3.0.25rc3).\n\n"
-                        f"NOT CONFIRMED — version match only. The bug is a username\n"
-                        f"metacharacter injection in the MS-RPC SamrCreateUser call, and\n"
-                        f"it only reaches a shell when smb.conf defines a\n"
-                        f"`username map script` — which is NOT the default. On a stock\n"
-                        f"configuration the exploit fails against a vulnerable version.\n\n"
-                        f"Confirm before reporting: run the MSF module (it fails cleanly\n"
-                        f"if the option is unset), or read smb.conf if you get a shell.\n\n"
-                        f"Use the RUN WITH MSF button to launch the Metasploit module.",
-                        severity="high", source="nmap banner",
-                        port=smb_p)
-            except (ValueError, IndexError):
-                pass
+        # Version/banner-based CVE detectors (vsftpd, distcc, UnrealIRCd,
+        # Samba) used to live here.  They key off nmap `-sV` version
+        # banners whose output is delivered to `update_from_nmap`, NOT to
+        # this method — so a plain service scan never reached them and
+        # Samba CVE-2007-2447 / distcc CVE-2004-2687 were silently lost
+        # (live-validation F-07 / F-08).  They now live in
+        # `_detect_version_cves`, invoked from `update_from_nmap` (which
+        # runs for every nmap scan, including the vuln-script one), so the
+        # detectors are reachable from the flow that actually carries the
+        # version data.
 
         # smb-security-mode: "account_used: guest" → anonymous SMB
         if re.search(r'account_used:\s*guest', full_text, re.I):

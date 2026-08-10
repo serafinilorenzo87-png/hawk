@@ -50,6 +50,9 @@ def _build_intel():
         def write(self, message, style=None):
             self.messages.append((message, style))
 
+        def section(self, title):
+            self.messages.append((title, "section"))
+
     class DummyIntel(TargetIntelRenderMixin):
         # The nmap/NSE regexes are class attributes of the composing
         # widget, not of the mixin under test.  Borrow them by
@@ -67,11 +70,21 @@ def _build_intel():
             self._auto_findings = []
             self._collapsed = {"vulns": True}
             self._fp = None
+            # Skip the once-per-session nonstandard-port probe so
+            # update_from_nmap doesn't need _check_nonstandard_ports.
+            self._nonstandard_checked = True
             # No cred_store attribute: the credential auto-push is not
-            # under test here and needs a real store.
-            self.app = types.SimpleNamespace(terminal=Terminal())
+            # under test here and needs a real store.  session_manager
+            # with current=None lets update_from_nmap's session save
+            # short-circuit without a real Session.
+            self.app = types.SimpleNamespace(
+                terminal=Terminal(),
+                session_manager=types.SimpleNamespace(current=None))
 
         def _render_auto_findings(self):
+            pass
+
+        def _render_all(self):
             pass
 
         def _blink_start(self, count_as_new: bool = True):
@@ -108,41 +121,37 @@ def _find(intel, needle, source=None):
 
 # ─── Samba CVE-2007-2447 (T2) ──────────────────────────────────────
 #
-# The only nmap output form this detector's regex `Samba\s+(\d+\.\d+\.\d+)`
-# can match is smb-os-discovery's "OS: Unix (Samba <version>)" line —
-# `nmap -sV` prints "Samba smbd 3.0.20-Debian", where the `smbd` token
-# sits between "Samba" and the digits.
+# These detectors are driven by nmap `-sV` version banners, which reach
+# `update_from_nmap` (called for EVERY nmap scan), NOT
+# `update_from_vuln_scripts` (called only for the nmap_vuln tool).  The
+# regression F-07/F-08 was that the block lived only in the latter, so a
+# plain service scan never fired it — and the regex itself matched only
+# smb-os-discovery's "Samba 3.0.20" form, not the `-sV` banner
+# "Samba smbd 3.0.20-Debian" that this flow actually receives.  These
+# samples are real `nmap -sV` output from Metasploitable2, exercised
+# through the real flow so the test cannot go false-green again.
 
-_SMB_OS_DISCOVERY_3_0_20 = """\
-Host script results:
-| smb-os-discovery:
-|   OS: Unix (Samba 3.0.20-Debian)
-|   NetBIOS computer name:
-|   Workgroup: WORKGROUP\\x00
-|_  System time: 2026-08-04T05:12:32-04:00
+_NMAP_SV_SAMBA_3_0_20 = """\
+Nmap scan report for 192.168.177.134
+Host is up (0.00042s latency).
+PORT    STATE SERVICE     VERSION
+139/tcp open  netbios-ssn Samba smbd 3.X - 4.X (workgroup: WORKGROUP)
+445/tcp open  netbios-ssn Samba smbd 3.0.20-Debian (workgroup: WORKGROUP)
+Service Info: OSs: Unix, Linux; CPE: cpe:/o:linux:linux_kernel
 """
 
-_SMB_OS_DISCOVERY_3_2_5 = """\
-Host script results:
-| smb-os-discovery:
-|   OS: Unix (Samba 3.2.5)
-|   Computer name: fileserver
-|   Workgroup: WORKGROUP\\x00
-|_  System time: 2026-08-04T11:12:32+01:00
+_NMAP_SV_SAMBA_3_2_5 = """\
+Nmap scan report for 10.10.10.20
+Host is up (0.00051s latency).
+PORT    STATE SERVICE     VERSION
+445/tcp open  netbios-ssn Samba smbd 3.2.5 (workgroup: WORKGROUP)
 """
 
-_SMB_OS_DISCOVERY_3_3_10 = """\
-Host script results:
-| smb-os-discovery:
-|   OS: Unix (Samba 3.3.10)
-|   Computer name: fileserver
-|_  Workgroup: WORKGROUP\\x00
-"""
-
-_PORT_TABLE_SMB = """\
-PORT    STATE SERVICE
-139/tcp open  netbios-ssn
-445/tcp open  microsoft-ds
+_NMAP_SV_SAMBA_3_3_10 = """\
+Nmap scan report for 10.10.10.21
+Host is up (0.00049s latency).
+PORT    STATE SERVICE     VERSION
+445/tcp open  netbios-ssn Samba smbd 3.3.10 (workgroup: WORKGROUP)
 """
 
 
@@ -158,14 +167,17 @@ class SambaUsermapScriptTests(unittest.TestCase):
             sys.modules["customtkinter"] = self._old_ctk
 
     def _run(self, sample):
+        # The real flow: a `-sV` service scan feeds update_from_nmap.
+        # update_from_vuln_scripts is NOT called here on purpose — that
+        # was the false-green path (F-07): it never ran for a service
+        # scan, so testing it hid the broken wiring.
         intel = _build_intel()
-        intel.update_from_vuln_scripts(
-            (_PORT_TABLE_SMB + sample).splitlines())
+        intel.update_from_nmap(sample.splitlines())
         return intel
 
     def test_samba_3_0_20_still_reported(self):
         """Metasploitable2 must stay covered: 3.0.20 is in range."""
-        intel = self._run(_SMB_OS_DISCOVERY_3_0_20)
+        intel = self._run(_NMAP_SV_SAMBA_3_0_20)
         f = _find(intel, "CVE-2007-2447")
         self.assertIsNotNone(f, _titles(intel))
         self.assertEqual(f["port"], 445)
@@ -177,11 +189,11 @@ class SambaUsermapScriptTests(unittest.TestCase):
         HTB boxes.  The old gate (`major == 3 and minor < 4`) called it
         a confirmed CRITICAL root RCE.
         """
-        intel = self._run(_SMB_OS_DISCOVERY_3_2_5)
+        intel = self._run(_NMAP_SV_SAMBA_3_2_5)
         self.assertIsNone(_find(intel, "CVE-2007-2447"), _titles(intel))
 
     def test_samba_3_3_10_is_not_reported(self):
-        intel = self._run(_SMB_OS_DISCOVERY_3_3_10)
+        intel = self._run(_NMAP_SV_SAMBA_3_3_10)
         self.assertIsNone(_find(intel, "CVE-2007-2447"), _titles(intel))
 
     def test_finding_is_high_and_states_its_precondition(self):
@@ -191,7 +203,7 @@ class SambaUsermapScriptTests(unittest.TestCase):
         not a default.  The card and the report row must say so instead
         of asserting a confirmed critical.
         """
-        intel = self._run(_SMB_OS_DISCOVERY_3_0_20)
+        intel = self._run(_NMAP_SV_SAMBA_3_0_20)
         f = _find(intel, "CVE-2007-2447")
         self.assertEqual(f["severity"], "high")
         desc = f["description"]
@@ -202,24 +214,18 @@ class SambaUsermapScriptTests(unittest.TestCase):
 
 # ─── distcc CVE-2004-2687 ──────────────────────────────────────────
 #
-# `nmap -v -Pn --script vuln` (HAWK's NMAP Vuln Scripts command) runs
-# no version detection, so the service column comes from nmap-services.
+# distcc lives on port 3632, outside nmap's top-1000 (F-08): it is only
+# seen in a full scan or when 3632 is scanned explicitly.  When it IS
+# scanned, `-sV` prints the distccd banner and the finding must reach
+# the report through update_from_nmap.  Real Metasploitable2 `-sV`
+# output below.
 
 _METASPLOITABLE_DISTCC = """\
-Nmap scan report for 10.10.10.5
+Nmap scan report for 192.168.177.134
 Host is up (0.0011s latency).
-PORT     STATE SERVICE
-3632/tcp open  distccd
-| distcc-cve2004-2687:
-|   VULNERABLE:
-|   distcc Daemon Command Execution
-|     State: VULNERABLE (Exploitable)
-|     IDs:  CVE:CVE-2004-2687
-|     Risk factor: High  CVSSv2: 9.3
-|       Allows executing of arbitrary commands on systems running
-|       distccd 3.1 and earlier.
-|     References:
-|_      https://nvd.nist.gov/vuln/detail/CVE-2004-2687
+PORT     STATE SERVICE VERSION
+3632/tcp open  distccd distccd v1 ((GNU) 4.2.4 (Ubuntu 4.2.4-1ubuntu4))
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel
 """
 
 # A web host with no distcc daemon anywhere.  http-enum prints the
@@ -248,8 +254,7 @@ class DistccDetectionTests(unittest.TestCase):
 
     def test_open_distcc_port_is_reported_on_the_detected_port(self):
         intel = _build_intel()
-        intel.update_from_vuln_scripts(
-            _METASPLOITABLE_DISTCC.splitlines())
+        intel.update_from_nmap(_METASPLOITABLE_DISTCC.splitlines())
         f = _find(intel, "DistCC daemon RCE", source="nmap banner")
         self.assertIsNotNone(f, _titles(intel))
         self.assertEqual(f["port"], 3632)
@@ -261,8 +266,7 @@ class DistccDetectionTests(unittest.TestCase):
         hardcoded on port 3632 for a host that has no such service.
         """
         intel = _build_intel()
-        intel.update_from_vuln_scripts(
-            _HTTP_ENUM_MENTIONS_DISTCC.splitlines())
+        intel.update_from_nmap(_HTTP_ENUM_MENTIONS_DISTCC.splitlines())
         self.assertIsNone(_find(intel, "DistCC"), _titles(intel))
 
 
