@@ -572,6 +572,134 @@ class PostRceScrollbackTests(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  post-RCE recon (Windows) — PowerShell 2.0 payload + marker robustness
+#  (W-08 / W-09)
+# ═══════════════════════════════════════════════════════════════════
+
+# The real recon block as it comes back on a healthy run: BEGIN, the
+# sections with a line-anchored <<<SECTION:...>>> each, END.  The
+# PRIV_TOKENS body is a real `whoami /priv` table; SCHED_TASKS is the
+# TaskName / Run As User lines the new schtasks-based snippet emits.
+_WIN_REAL_BLOCK = (
+    "___HAWK_BEGIN___\n"
+    "<<<SECTION:WHOAMI>>>\n"
+    "prova\\bob\n"
+    "WIN-DC01\n"
+    "Microsoft Windows Server 2008 R2 Datacenter\n"
+    "prova.prova.com\n"
+    "<<<END:WHOAMI>>>\n"
+    "<<<SECTION:PRIV_TOKENS>>>\n"
+    "\n"
+    "PRIVILEGES INFORMATION\n"
+    "----------------------\n"
+    "\n"
+    "Privilege Name                Description                        State\n"
+    "============================= ================================== ========\n"
+    "SeChangeNotifyPrivilege       Bypass traverse checking           Enabled\n"
+    "SeImpersonatePrivilege        Impersonate a client after auth    Enabled\n"
+    "<<<END:PRIV_TOKENS>>>\n"
+    "<<<SECTION:SCHED_TASKS>>>\n"
+    "TaskName:                             \\VendorUpdater\n"
+    "Run As User:                          SYSTEM\n"
+    "TaskName:                             \\UserSync\n"
+    "Run As User:                          prova\\bob\n"
+    "<<<END:SCHED_TASKS>>>\n"
+    "___HAWK_END___\n"
+)
+
+# A PowerShell 2.0 error render: the whole payload is one line, so the
+# error position display re-echoes a chunk of it — markers included —
+# under "+" continuation markers.  Both ___HAWK_BEGIN___ and a
+# <<<SECTION:SCHED_TASKS>>> ... <<<END:SCHED_TASKS>>> span appear, but
+# ONLY mid-line (never at column 0).  rfind used to grab this begin.
+_PS2_ERROR_ECHO = (
+    "Get-CimInstance : The term 'Get-CimInstance' is not recognized as the "
+    "name of a cmdlet,\n"
+    "function, script file, or operable program. Check the spelling...\n"
+    "At line:1 char:1\n"
+    "+ Write-Host '___HAWK_BEGIN___'; Write-Host '<<<SECTION:SCHED_TASKS>>>'; "
+    "phantomTaskA;\n"
+    "+ phantomTaskB; phantomTaskC; Write-Host '<<<END:SCHED_TASKS>>>'; "
+    "Write-Host '___HAWK_END___'\n"
+    "    + CategoryInfo          : ObjectNotFound: (Get-CimInstance:String) []\n"
+    "    + FullyQualifiedErrorId : CommandNotFoundException\n"
+)
+
+
+class PostRceWinPs2Tests(unittest.TestCase):
+    """W-08: the snippet must not use PS 3.0+ cmdlets that die on Win
+    2008 R2 / PowerShell 2.0.  W-09: a re-echoed command / error must
+    never hijack the parse or fabricate a finding."""
+
+    # ── W-08 — payload is PowerShell 2.0 compatible ────────────────
+    def test_snippet_uses_ps2_compatible_cmdlets(self):
+        snippet = prw.generate_snippet()
+        self.assertNotIn("Get-CimInstance", snippet)
+        self.assertNotIn("Get-ScheduledTask", snippet)
+        self.assertIn("Get-WmiObject", snippet)
+        self.assertIn("schtasks /query", snippet)
+
+    def test_snippet_still_has_no_double_quotes(self):
+        # The cmd.exe wrapper supplies the only pair; the PS2.0 rewrite
+        # must not have reintroduced one (generate_snippet raises if the
+        # inner payload contains a double quote, so this also guards the
+        # generator's own invariant).  The whole string therefore holds
+        # exactly two double quotes: the wrapper.
+        self.assertEqual(prw.generate_snippet().count('"'), 2)
+
+    # ── W-09 — error echo below the real block ─────────────────────
+    def test_error_echo_does_not_hijack_or_fabricate(self):
+        """PS2.0 error echo AFTER the real block: the analyzer must read
+        the REAL sections (SeImpersonate extracted, real SYSTEM task) and
+        must NOT fabricate a task from the echoed command."""
+        blob = _WIN_REAL_BLOCK + _PS2_ERROR_ECHO
+        out = prw.analyze_output(blob)
+
+        # Real identity, not the error echo.
+        self.assertEqual(out["user"], "prova\\bob")
+        self.assertNotIn(
+            "WHOAMI section missing — output looks truncated.",
+            out["parse_warnings"])
+
+        titles = [f["title"] for f in out["findings"]]
+        # SeImpersonate survives (it was lost pre-fix).
+        self.assertTrue(
+            any("SeImpersonatePrivilege" in t for t in titles), titles)
+
+        # Exactly one SYSTEM-scheduled-tasks finding, and it is the REAL
+        # task — not the phantom* lines from the echoed command.
+        sched = [f for f in out["findings"]
+                 if "SYSTEM scheduled tasks" in f["title"]]
+        self.assertEqual(len(sched), 1, titles)
+        self.assertIn("\\VendorUpdater", sched[0]["description"])
+        self.assertNotIn("phantom", sched[0]["description"].lower())
+        self.assertIn("(1)", sched[0]["title"])
+
+    # ── W-09 — command echo scrollback around the real block ───────
+    def test_command_echo_scrollback_yields_real_findings(self):
+        """The pasted scrollback opens with the shell's echo of the
+        command and can close with a re-echo at the next prompt; both
+        contain the markers mid-line.  Real findings must still come
+        out, none of them fabricated."""
+        snippet = prw.generate_snippet()
+        blob = (
+            f"C:\\Users\\bob> {snippet}\n"
+            + _WIN_REAL_BLOCK
+            + f"C:\\Users\\bob> {snippet}\n"
+        )
+        out = prw.analyze_output(blob)
+
+        self.assertEqual(out["user"], "prova\\bob")
+        titles = [f["title"] for f in out["findings"]]
+        self.assertTrue(
+            any("SeImpersonatePrivilege" in t for t in titles), titles)
+        sched = [f for f in out["findings"]
+                 if "SYSTEM scheduled tasks" in f["title"]]
+        self.assertEqual(len(sched), 1, titles)
+        self.assertIn("\\VendorUpdater", sched[0]["description"])
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  john --show / HTTP headers
 # ═══════════════════════════════════════════════════════════════════
 

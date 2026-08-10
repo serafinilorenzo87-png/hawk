@@ -181,9 +181,14 @@ def generate_snippet() -> str:
         "/v AlwaysInstallElevated 2>&1",
     ])
 
-    # Unquoted service paths.  Win32_Service via CIM is portable
-    # back to Win 7 / 2008 R2 — wmic is deprecated on Win11/2022
-    # so we don't use it.  We filter for services where:
+    # Unquoted service paths.  Get-WmiObject Win32_Service is the
+    # lowest-common-denominator: it exists in Windows PowerShell 2.0
+    # (Server 2008 R2 — a very common lab target, and exactly where
+    # winPEASany.exe won't run) AND in every later Windows PowerShell,
+    # since the snippet always boots powershell.exe, never pwsh.
+    # Get-CimInstance was PS 3.0+ only, so on 2008 R2 this section used
+    # to emit a "not recognized" error instead of data (W-08).  wmic is
+    # avoided (deprecated on Win11/2022).  We filter for services where:
     #   - it isn't already quoted with a leading " AND
     #   - the EXECUTABLE PATH contains a space
     # which is the classic vulnerable shape (C:\Program Files\…\foo.exe).
@@ -204,7 +209,7 @@ def generate_snippet() -> str:
     # `\x22` is the .NET-regex escape for `"` and matches the same
     # thing.
     section("UNQUOTED_SVC", [
-        "Get-CimInstance Win32_Service "
+        "Get-WmiObject Win32_Service "
         "| Where-Object { $_.PathName -and "
         "$_.PathName -notmatch '^\\x22' -and "
         "(($_.PathName -split '(?i)\\.exe')[0]) -match ' ' } "
@@ -212,15 +217,18 @@ def generate_snippet() -> str:
         "| Format-Table -AutoSize | Out-String -Width 4096",
     ])
 
-    # Scheduled tasks running as SYSTEM.  Get-ScheduledTask is
-    # the modern API; the legacy schtasks /query also works but
-    # dumps far more than we need.
+    # Scheduled tasks running as SYSTEM.  Get-ScheduledTask is PS 3.0+
+    # AND needs the ScheduledTasks module (Win 8 / Server 2012+), so on
+    # 2008 R2 / PS 2.0 it errored out and produced no data (W-08).  The
+    # native `schtasks` exe is present on every Windows since XP, so we
+    # use it and let the analyzer pick out the SYSTEM tasks.  We keep
+    # only the TaskName / Run As User lines (Select-String exists in PS
+    # 2.0) — the `SYSTEM` filter moves into analyze_output, which pairs
+    # each TaskName with its Run As User so noise/echo can't be counted
+    # as a task (W-09).
     section("SCHED_TASKS", [
-        "Get-ScheduledTask 2>$null "
-        "| Where-Object { $_.Principal.UserId -match 'SYSTEM' "
-        "-and $_.State -ne 'Disabled' } "
-        "| Select-Object TaskPath, TaskName, State "
-        "| Format-Table -AutoSize | Out-String -Width 4096",
+        "schtasks /query /fo LIST /v 2>$null "
+        "| Select-String -Pattern 'TaskName:','Run As User:'",
     ])
 
     # Saved credentials in the credential vault — `cmdkey /list`
@@ -244,8 +252,8 @@ def generate_snippet() -> str:
     # Antivirus product brand — affects which .exe variants of
     # winpeas / Potato will detonate vs. get quarantined.
     section("AV", [
-        "Get-CimInstance -Namespace 'root\\SecurityCenter2' "
-        "-ClassName AntivirusProduct 2>$null "
+        "Get-WmiObject -Namespace 'root\\SecurityCenter2' "
+        "-Class AntivirusProduct 2>$null "
         "| Select-Object displayName, productState "
         "| Format-Table -AutoSize | Out-String -Width 4096",
     ])
@@ -313,22 +321,60 @@ def _extract_section(blob: str, name: str) -> str:
     return blob[nl + 1:end].rstrip("\n").rstrip()
 
 
-def _trim_to_markers(text: str) -> str:
-    """Cut `text` down to the LAST ``___HAWK_BEGIN___ … ___HAWK_END___``.
+_BEGIN_MARK = "___HAWK_BEGIN___"
+_END_MARK_TOK = "___HAWK_END___"
 
-    Same reasoning as the Linux module: a pasted shell transcript opens
-    with the echo of the pasted command, and that command line contains
-    both markers literally.  Cutting at the FIRST of each kept the
-    echoed command and dropped all of the real output.
+# A line whose FIRST non-space content is a section marker.  The real
+# recon output prints `<<<SECTION:NAME>>>` on its own line; a command /
+# error echo only ever contains it mid-line, inside the Write-Host
+# quotes.  This is the discriminator between a real block and an echo.
+_REAL_SECTION_RE = re.compile(r"(?m)^[^\S\n]*<<<SECTION:")
+
+
+def _trim_to_markers(text: str) -> str:
+    """Return the first REAL ``___HAWK_BEGIN___ … ___HAWK_END___`` block.
+
+    "Real" means the block's body carries a line-anchored
+    ``<<<SECTION:`` marker.  Two kinds of decoy block otherwise defeat a
+    naive first- or last-cut:
+
+      • the shell's echo of the pasted command sits ABOVE the output and
+        repeats every marker literally, mid-line, inside the Write-Host
+        quotes — so cutting at the FIRST begin kept the command line and
+        threw the output away (the Linux-module bug);
+      • on Windows PowerShell 2.0 (Server 2008 R2) a cmdlet that doesn't
+        exist prints an error that RE-ECHOES the whole one-line command,
+        markers included, BELOW the real output — so cutting at the LAST
+        begin (the previous behaviour here) grabbed the error echo,
+        discarded the real sections above it, dropped SeImpersonate, and
+        let the analyzer read the echoed command as data and fabricate a
+        "SYSTEM scheduled tasks" finding (live-validation W-09).
+
+    Selecting the FIRST begin whose block actually contains a line-start
+    section marker skips both decoys wherever they fall.  When no block
+    qualifies (genuinely truncated output — END or the sections lost) we
+    fall back to the last begin so the analyzer still sees something and
+    warns about the missing sections instead of silently parsing empty.
     """
     blob = text or ""
-    end = blob.rfind("___HAWK_END___")
-    begin = blob.rfind("___HAWK_BEGIN___",
-                       0, end if end != -1 else len(blob))
+    mlen = len(_BEGIN_MARK)
+
+    for m in re.finditer(re.escape(_BEGIN_MARK), blob):
+        after = blob[m.end():]
+        e = after.find(_END_MARK_TOK)
+        body = after[:e] if e != -1 else after
+        if _REAL_SECTION_RE.search(body):
+            return body.rstrip("\n").rstrip()
+
+    # Fallback: no block carried a real section marker.  Hand back the
+    # last begin..end span (old behaviour) so analyze_output can report
+    # the truncation rather than see nothing at all.
+    end = blob.rfind(_END_MARK_TOK)
+    begin = blob.rfind(_BEGIN_MARK, 0, end if end != -1 else len(blob))
     if begin != -1:
-        blob = blob[begin:]
+        blob = blob[begin + mlen:]
         if end != -1:
-            end -= begin
+            end -= (begin + mlen)
     if end != -1:
         blob = blob[:end]
     return blob
@@ -535,13 +581,29 @@ def analyze_output(text: str) -> dict:
 
     # SCHED_TASKS — tasks running as SYSTEM.  Surface as INFO so the
     # operator can grep for one with a writable script path.
+    #
+    # The section is `schtasks /query /fo LIST /v` filtered to its
+    # `TaskName:` / `Run As User:` lines.  We pair each TaskName with the
+    # Run As User that follows it and keep ONLY the pairs whose account
+    # is SYSTEM.  This is a validated parse, not a line count: an error
+    # message or a re-echoed command line does not carry a
+    # `TaskName:` line immediately followed by a `Run As User: …SYSTEM`
+    # line, so it can no longer be miscounted as tasks and fabricate a
+    # finding (live-validation W-09).
     tasks_text = _extract_section(blob, "SCHED_TASKS")
     sys_tasks = []
+    pending_name = None
     for ln in tasks_text.splitlines():
         ln = ln.strip()
-        if not ln or ln.startswith("TaskPath") or ln.startswith("---"):
+        m_name = re.match(r"(?i)^TaskName:\s*(\S.*)$", ln)
+        if m_name:
+            pending_name = m_name.group(1).strip()
             continue
-        sys_tasks.append(ln)
+        m_user = re.match(r"(?i)^Run As User:\s*(\S.*)$", ln)
+        if m_user and pending_name is not None:
+            if "system" in m_user.group(1).lower():
+                sys_tasks.append(pending_name)
+            pending_name = None
     if sys_tasks:
         out["findings"].append({
             "title":       (f"SYSTEM scheduled tasks on "
