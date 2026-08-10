@@ -83,7 +83,8 @@ EXPLANATIONS = {
     "x-content-type":       "MIME sniffing enabled. Browser may misinterpret file types — potential XSS vector.",
     "server:":              "Server version disclosed. Search for CVEs: searchsploit <software> <version>",
     "sql syntax":           "Possible SQL injection. Run: sqlmap -u 'http://target/page?id=1' --dbs --batch",
-    "message signing":      "SMB signing disabled or not required. Vulnerable to NTLM relay attacks (ntlmrelayx). Capture a hash and relay to other services.",
+    # SMB message-signing is handled by _explain_smb_signing (it depends
+    # on whether signing is REQUIRED), not by a flat keyword lookup.
     "ms17-010":             "CVE-2017-0144 — EternalBlue. High probability of RCE on unpatched systems. Go to Exploitation and select the EternalBlue preset.",
     "eternal":              "EternalBlue potentially exploitable. Use msfconsole: exploit/windows/smb/ms17_010_eternalblue",
     "anonymous":            "Anonymous login allowed. Connect without credentials and list available files.",
@@ -94,8 +95,31 @@ EXPLANATIONS = {
 }
 
 
+def _explain_smb_signing(low: str) -> str:
+    """Explain an nmap SMB message-signing line.
+
+    nmap reports it as e.g. `message_signing: required` /
+    `message_signing: disabled` (smb-security-mode) or
+    `Message signing enabled and required` / `... but not required`
+    (smb2-security-mode).  Signing REQUIRED is the SECURE case: NTLM
+    relay to this host is blocked.  A flat keyword lookup annotated
+    EVERY signing line "relayable", inverting the finding when signing
+    was required (W-01).
+    """
+    # "required" but NOT "not required" → the secure, non-relayable case.
+    if "required" in low and "not required" not in low:
+        return ("SMB signing REQUIRED — NTLM relay to this host is "
+                "blocked (not a relay target).")
+    return ("SMB signing not required — vulnerable to NTLM relay "
+            "(ntlmrelayx). Capture a hash and relay it to other hosts.")
+
+
 def _explain(line: str) -> str:
     low = line.lower()
+    # SMB signing is relay-relevant only when NOT required — decide from
+    # the line itself instead of a flat keyword (W-01).
+    if "message signing" in low or "message_signing" in low:
+        return _explain_smb_signing(low)
     for kw, expl in EXPLANATIONS.items():
         if kw in low:
             return expl
