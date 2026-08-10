@@ -313,7 +313,14 @@ SERVICE_VERIFY_COMMANDS = {
     "smb": {
         "hint": "SMB / NetBIOS. Enumerate shares + OS fingerprint.",
         "commands": [
-            ("smbclient list",   "smbclient -L //{target} -p {port} -N"),
+            # -I / min-protocol / lanman mirror the smbclient_list
+            # cmd_template (modules/enumeration.py SMBCLIENT_COMPAT_FLAGS):
+            # a bare `-N` fails with NT_STATUS_RESOURCE_NAME_NOT_FOUND on
+            # Server 2008 R2 (W-05).
+            ("smbclient list",   "smbclient -L //{target} -p {port} -N "
+                                 "-I {target} "
+                                 "--option='client min protocol=NT1' "
+                                 "--option='client lanman auth=yes'"),
             ("nxc smb",          "nxc smb {target} -u '' -p ''"),
             ("nmap smb scripts", "nmap -Pn -p {port} --script smb-os-discovery,smb-enum-shares {target}"),
         ],

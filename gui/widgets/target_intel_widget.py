@@ -1437,10 +1437,15 @@ class TargetIntelWidget(TargetIntelRenderMixin, TargetIntelExploitMixin, TargetI
                       "(modern) and 139 (NetBIOS). Often enumerable without "
                       "credentials via the IPC$ null session."),
             "actions": [
+                # {compat} → SMB1/NetBIOS/LANMAN flags on legacy targets
+                # (empty on modern), from _COMPAT_FLAGS["smb"] — the same
+                # single source _CONNECT_CMDS uses.  Without it the
+                # anonymous CONNECT enum hit NT_STATUS_RESOURCE_NAME_
+                # NOT_FOUND on Server 2008 R2 (W-05).
                 {"id":"enum_anon",   "label":"Enumerate shares (anonymous)",
                  "what":"Connects with NO credentials (null session) and lists "
                         "available shares. First thing to always try.",
-                 "tpl":"smbclient -L //{host} -N",
+                 "tpl":"smbclient -L //{host} -N {compat}",
                  "mode":"anon", "needs":[]},
                 {"id":"enum_guest",  "label":"Enumerate shares (guest login)",
                  "what":"Logs in as the built-in 'guest' account with no "
@@ -1448,12 +1453,12 @@ class TargetIntelWidget(TargetIntelRenderMixin, TargetIntelExploitMixin, TargetI
                         "anonymous null session is disabled but the guest "
                         "account is still enabled (common on Samba and on "
                         "non-DC Windows boxes).",
-                 "tpl":"smbclient -L //{host} -U 'guest%'",
+                 "tpl":"smbclient -L //{host} -U 'guest%' {compat}",
                  "mode":"anon", "needs":[]},
                 {"id":"enum_auth",   "label":"Enumerate shares (with creds)",
                  "what":"Same as above but authenticated — shows shares the "
                         "user is allowed to see.",
-                 "tpl":"smbclient -L //{host} -U '{user}%{pass}'",
+                 "tpl":"smbclient -L //{host} -U '{user}%{pass}' {compat}",
                  "mode":"auth", "needs":[]},
                 {"id":"enum_hash",   "label":"Enumerate shares (pass-the-hash)",
                  "what":"Uses the NTLM hash instead of a cleartext password. "
@@ -1470,12 +1475,12 @@ class TargetIntelWidget(TargetIntelRenderMixin, TargetIntelExploitMixin, TargetI
                         "old Samba).  Requires the share name — run "
                         "'Enumerate shares (anonymous)' first if you don't "
                         "know what's exposed.",
-                 "tpl":"smbclient //{host}/{share} -N",
+                 "tpl":"smbclient //{host}/{share} -N {compat}",
                  "mode":"anon", "needs":["share"]},
                 {"id":"connect_share","label":"Connect to a share (with credentials)",
                  "what":"Opens an interactive smb:\\> prompt. Use 'ls', "
                         "'get file', 'put file'. Requires share name.",
-                 "tpl":"smbclient //{host}/{share} -U '{user}%{pass}'",
+                 "tpl":"smbclient //{host}/{share} -U '{user}%{pass}' {compat}",
                  "mode":"auth", "needs":["share"]},
                 {"id":"check_creds", "label":"Validate credentials",
                  "what":"Fast auth check with netexec — no interactive shell. "

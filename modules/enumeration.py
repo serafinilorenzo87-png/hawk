@@ -26,6 +26,19 @@ from modules.base import BaseModule, Tool
 # null-session bind instead of hand-rolling it and dropping it (W-03).
 NXC_NULL_SESSION_AUTH = "-u '' -p ''"
 
+# smbclient compat flags for legacy Windows (NT4 -> Server 2008 R2, and
+# Win9x via the LM fallback).  Single source for the smbclient_list tool
+# template, the SMBCLIENT network dialog and the CONNECT path, so none of
+# them regress to a bare `-N` that fails with
+# NT_STATUS_RESOURCE_NAME_NOT_FOUND on 2008 R2 (W-05):
+#   -I <ip>                              skip NetBIOS/DNS name resolution
+#   --option='client min protocol=NT1'   allow SMB1/CIFS fallback
+#   --option='client lanman auth=yes'    re-enable LANMAN auth for Win9x
+SMBCLIENT_COMPAT_FLAGS = (
+    "-I {target} "
+    "--option='client min protocol=NT1' "
+    "--option='client lanman auth=yes'")
+
 
 class EnumerationModule(BaseModule):
     PHASE_ID   = "enumeration"
@@ -175,11 +188,10 @@ class EnumerationModule(BaseModule):
             #     only speak LM.  Zero impact on anything NT-based.
             #
             # Net result: single command that works NT4 → Server 2026
-            # (and even Win 9x when the LM fallback kicks in).
-            cmd_template=(
-                "smbclient -L //{target} -N -I {target} "
-                "--option='client min protocol=NT1' "
-                "--option='client lanman auth=yes'"),
+            # (and even Win 9x when the LM fallback kicks in).  The compat
+            # flags live in SMBCLIENT_COMPAT_FLAGS so the network dialog
+            # and CONNECT path build the same command (W-05).
+            cmd_template=f"smbclient -L //{{target}} -N {SMBCLIENT_COMPAT_FLAGS}",
             binary="smbclient",
             category="smb",
             requires_sudo=False,

@@ -89,6 +89,28 @@ def build_netexec_smb_cmd(target, port, selected_flags, cred=None):
     return re.sub(r"\s{2,}", " ", cmd).strip()
 
 
+def build_smbclient_list_cmd(target, port, user="", password=""):
+    """Build the `smbclient -L` share-list command.
+
+    The -I / min-protocol / lanman flags legacy Windows (Server 2008 R2)
+    needs come from modules.enumeration.SMBCLIENT_COMPAT_FLAGS — the same
+    single source as the smbclient_list cmd_template — instead of being
+    hand-rolled and dropped, which regressed to a bare `-N` that fails
+    with NT_STATUS_RESOURCE_NAME_NOT_FOUND on 2008 R2 (W-05).
+    """
+    from modules.enumeration import SMBCLIENT_COMPAT_FLAGS
+    compat = SMBCLIENT_COMPAT_FLAGS.replace("{target}", target)
+    if user:
+        # Escape single quotes so a password like o'brien's doesn't break
+        # the shell command.
+        safe_pw = password.replace("'", "'\"'\"'")
+        auth = f"-U '{user}%{safe_pw}'"
+    else:
+        auth = "-N"
+    cmd = f"smbclient -L //{target} -p {port} {auth} {compat}"
+    return re.sub(r"\s{2,}", " ", cmd).strip()
+
+
 class CardNetworkRoutesMixin:
     def _route_smb_tool(self, tool):
         # Check installation FIRST
@@ -546,16 +568,11 @@ class CardNetworkRoutesMixin:
             u = (user_var.get() or "").strip()
             pw = (pass_var.get() or "").strip()
             # Username is the sole switch between authed and anonymous —
-            # so "u:" with empty password = authed with blank password
-            # (some services accept it), and "" = true anonymous.
-            if u:
-                # Escape single quotes so a password like o'brien's doesn't
-                # break the shell command.
-                safe_pw = pw.replace("'", "'\"'\"'")
-                cmd = (f"smbclient -L //{target} -p {p} "
-                       f"-U '{u}%{safe_pw}'")
-            else:
-                cmd = f"smbclient -L //{target} -N -p {p}"
+            # "u:" with empty password = authed with blank password (some
+            # services accept it), "" = true anonymous.  The command is
+            # built from the module's smbclient compat flags so the
+            # legacy-Windows flags aren't dropped (W-05).
+            cmd = build_smbclient_list_cmd(target, p, u, pw)
             _safe_destroy(win)
             self._run_raw(tool, cmd)
 
