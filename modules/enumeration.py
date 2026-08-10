@@ -19,6 +19,14 @@ HAWK - Phase 3: Enumeration v1.0
 from modules.base import BaseModule, Tool
 
 
+# netexec null-session auth (nxc >= 1.5.1).  Legacy Windows (Server 2008
+# R2) needs the explicit empty creds or netexec skips the auth step and
+# Impacket chokes parsing the share-enum reply (IndexError / 0x5b).  Kept
+# as a module constant so the SMB network dialog builds the SAME
+# null-session bind instead of hand-rolling it and dropping it (W-03).
+NXC_NULL_SESSION_AUTH = "-u '' -p ''"
+
+
 class EnumerationModule(BaseModule):
     PHASE_ID   = "enumeration"
     PHASE_NAME = "ENUMERATION"
@@ -131,13 +139,13 @@ class EnumerationModule(BaseModule):
             id="netexec",
             name="NETEXEC (CME)",
             desc="SMB/WinRM enumeration — works on Windows and Linux. Requires SMB.",
-            # Explicit empty creds force a real null-session bind.
-            # Without `-u '' -p ''` netexec skips the auth step on some
-            # legacy servers (Win 2008 R2) and Impacket chokes parsing
-            # the follow-up share-enum reply, yielding
+            # Explicit empty creds force a real null-session bind — see
+            # NXC_NULL_SESSION_AUTH.  Without them netexec skips the auth
+            # step on some legacy servers (Win 2008 R2) and Impacket
+            # chokes parsing the follow-up share-enum reply, yielding
             #   IndexError: list index out of range
             #   Could not get nt error code 91 (0x5b)
-            cmd_template="netexec smb {target} --shares -u '' -p ''",
+            cmd_template=f"netexec smb {{target}} --shares {NXC_NULL_SESSION_AUTH}",
             binary="netexec",
             category="smb",
             requires_sudo=False,

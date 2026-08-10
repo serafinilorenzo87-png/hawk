@@ -46,6 +46,49 @@ from utils.runner import ToolRunner, MultiRunner, MetasploitRunner, GreenBoneRun
 from utils.session import Credential
 from gui.widgets.card_common import *
 
+
+# ── netexec (SMB) command builder ───────────────────────────────────
+# The netexec dialog used to BUILD its command by hand, letting it drift
+# from the netexec 1.5.1 CLI: a stale `--sessions` (renamed
+# `--smb-sessions`) aborted argparse and zeroed the enum (W-02),
+# `--users`/`--groups` moved to the `ldap` protocol and became no-ops
+# under `smb` (W-02b), and the Anonymous option dropped the `-u '' -p ''`
+# null-session bind legacy Windows needs (W-03).  Building the command
+# here — from the module's null-session auth — keeps the flags in one
+# place.
+#
+# nxc 1.5.1 smb enumeration options, each mapped to the EXACT flag nxc
+# expects.  Do NOT derive `--<key>`: that produced the stale `--sessions`
+# and `--rid`.  `--users`/`--groups` are omitted on purpose (they moved
+# to `nxc ldap` in 1.5.1) — the LDAP / enum4linux / rpcclient routes
+# still enumerate them.
+NXC_SMB_OPTIONS = [
+    ("shares",   "--shares",       "--shares        Enumerate shares"),
+    ("sessions", "--smb-sessions", "--smb-sessions  Active sessions"),
+    ("pass_pol", "--pass-pol",     "--pass-pol      Password policy"),
+    ("rid",      "--rid-brute",    "--rid-brute     RID brute force"),
+]
+
+
+def build_netexec_smb_cmd(target, port, selected_flags, cred=None):
+    """Build the `netexec smb` enumeration command.
+
+    Anonymous (cred is None) reuses modules.enumeration.NXC_NULL_SESSION_AUTH
+    so the null-session bind that legacy Windows (Server 2008 R2) needs
+    can't drift from the module cmd_template again (W-03).
+    """
+    from modules.enumeration import NXC_NULL_SESSION_AUTH
+    if cred is not None and cred.cred_type == "cleartext":
+        auth = f"-u '{cred.username}' -p '{cred.password}'"
+    elif cred is not None and cred.cred_type == "hash" and cred.hash_val:
+        auth = f"-u '{cred.username}' -H '{cred.hash_val}'"
+    else:
+        auth = NXC_NULL_SESSION_AUTH
+    flags = " ".join(f for f in selected_flags if f)
+    cmd = f"netexec smb {target} --port {port} {auth} {flags}"
+    return re.sub(r"\s{2,}", " ", cmd).strip()
+
+
 class CardNetworkRoutesMixin:
     def _route_smb_tool(self, tool):
         # Check installation FIRST
@@ -601,16 +644,9 @@ class CardNetworkRoutesMixin:
                      anchor="w").pack(fill="x", padx=24, pady=(8,4))
 
         opts = {}
-        for key, label in [
-            ("shares",   "--shares      Enumerate shares"),
-            ("users",    "--users       Enumerate users"),
-            ("groups",   "--groups      Enumerate groups"),
-            ("sessions", "--sessions    Active sessions"),
-            ("pass_pol", "--pass-pol    Password policy"),
-            ("rid",      "--rid-brute   RID brute force"),
-        ]:
-            var = ctk.BooleanVar(value=(key in ("shares",)))
-            opts[key] = (var, f"--{key.replace('_','-')}")
+        for key, flag, label in NXC_SMB_OPTIONS:
+            var = ctk.BooleanVar(value=(key == "shares"))
+            opts[key] = (var, flag)
             rf = ctk.CTkFrame(win, fg_color="transparent")
             rf.pack(anchor="w", padx=40, pady=2)
             ctk.CTkCheckBox(rf, text=label, variable=var,
@@ -620,20 +656,23 @@ class CardNetworkRoutesMixin:
                             checkmark_color=COLORS["bg_primary"],
                             width=18, height=18).pack(side="left")
 
+        # `--users` / `--groups` intentionally not offered here: netexec
+        # 1.5.1 moved them to the `ldap` protocol, so under `smb` they are
+        # no-ops.  Point the operator at the routes that still work.
+        ctk.CTkLabel(
+            win,
+            text=("Users / groups moved to the LDAP protocol in netexec "
+                  "1.5.1 — use the LDAP / ENUM4LINUX / RPCCLIENT routes "
+                  "for AD user + group enumeration."),
+            font=_f("xs"), text_color=COLORS["text_dim"],
+            anchor="w", wraplength=520).pack(fill="x", padx=40, pady=(6, 0))
+
         def _run():
-            flags = " ".join(
-                f"--{k.replace('_','-')}" if k != "pass_pol" else "--pass-pol"
-                for k, (v, _) in opts.items() if v.get())
-            # Add credentials if selected
-            auth = ""
-            selected = cred_var.get()
-            cred = cred_map.get(selected)
-            if cred:
-                if cred.cred_type == "cleartext":
-                    auth = f" -u '{cred.username}' -p '{cred.password}'"
-                elif cred.cred_type == "hash" and cred.hash_val:
-                    auth = f" -u '{cred.username}' -H '{cred.hash_val}'"
-            cmd = f"netexec smb {target} --port {port_var.get()}{auth} {flags}"
+            selected = [flag for _k, (var, flag) in opts.items()
+                        if var.get()]
+            cred = cred_map.get(cred_var.get())
+            cmd = build_netexec_smb_cmd(
+                target, port_var.get(), selected, cred)
             _safe_destroy(win)
             self._run_raw(tool, cmd)
 
