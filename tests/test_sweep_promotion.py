@@ -9,17 +9,22 @@
 # Attribution "Created by Lorenzo Serafini" must be preserved in all
 # redistributed and Derivative Works — see NOTICE for details.
 
-"""Lazy session model of the network sweep (spec §3 / OBS-3).
+"""Lazy session model of the network sweep (spec §3 / OBS-3 / ENHANCEMENT).
 
 The sweep writes an inventory whose per-host `session_ref` starts null and
 is meant to MATERIALISE on the first click of that host's graph node, so a
 later click LOADS the same session instead of spawning a new one.  These
 tests pin that promotion flow:
 
-  first promotion of a null-ref host creates ONE session and records the
-  resulting `session_ref` in both the in-memory inventory and the on-disk
-  artifact; a second promotion loads it (no second session); a failed
-  inventory write degrades to a terminal line, never a crash.
+  A1  first promotion of a null-ref host creates ONE session and records
+      the resulting `session_ref` in both the in-memory inventory and the
+      on-disk artifact; a second promotion loads it (no second session);
+      a failed inventory write degrades to a terminal line, never a crash.
+
+  A2  promoting a host that already has a session opens a choice dialog
+      (load previous / start fresh); loading a session whose IP differs
+      from the node's target is stopped at a mismatch warning (F-02 family)
+      unless the operator confirms.
 
 The promotion methods live on TargetBar; they are bound onto a bare host
 object so the shipped logic runs without a live Tk root.  The customtkinter
@@ -35,6 +40,7 @@ import sys
 import tempfile
 import types
 import unittest
+from unittest.mock import patch
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -197,7 +203,8 @@ class _PromotionBase(_CtkStub, unittest.TestCase):
         h.apply_session = lambda sess: h.apply_session_calls.append(sess)
 
         for name in ("_promote_sweep_host", "_materialize_sweep_session",
-                     "_load_sweep_session", "_close_sweep_graph"):
+                     "_load_sweep_session", "_ask_sweep_promotion_choice",
+                     "_warn_sweep_ip_mismatch", "_close_sweep_graph"):
             setattr(h, name, getattr(TargetBar, name).__get__(h, Host))
         return h
 
@@ -206,8 +213,26 @@ class _PromotionBase(_CtkStub, unittest.TestCase):
                     if x["ip"] == ip)
         return host["session_ref"]
 
+    # ── Dialog capture ──────────────────────────────────────────────
+    def _capture(self, build_call):
+        """Run a dialog builder with the shared primitives patched out,
+        returning {button_text: command} without constructing a Toplevel."""
+        captured = {}
 
-# ── Lazy materialisation ─────────────────────────────────────────────
+        def fake_btn(_parent, text, cmd, **_kw):
+            captured[text] = cmd
+
+        with patch("gui.dialogs._make_win", return_value=object()), \
+                patch("gui.dialogs._title"), \
+                patch("gui.dialogs._sub"), \
+                patch("gui.dialogs._btn_row", return_value=object()), \
+                patch("gui.dialogs._btn", side_effect=fake_btn), \
+                patch("gui.dialogs._safe_destroy"):
+            build_call()
+        return captured
+
+
+# ── A1 — lazy materialisation ────────────────────────────────────────
 
 class MaterialiseTests(_PromotionBase):
 
@@ -250,7 +275,12 @@ class MaterialiseTests(_PromotionBase):
         self.assertEqual(h._new_session_calls, 1)
         created_id = self._host_ref(h, "10.0.0.5")["session_id"]
 
-        h._promote_sweep_host("10.0.0.5")          # ref set → LOAD
+        # Second click → choice dialog; operator picks "Load previous".
+        buttons = self._capture(
+            lambda: h._promote_sweep_host("10.0.0.5"))
+        self.assertIn("Load previous session", buttons)
+        self.assertIn("Start fresh", buttons)
+        buttons["Load previous session"]()
 
         # No second session; the recorded one was applied with its IP.
         self.assertEqual(h._new_session_calls, 1)
@@ -273,6 +303,97 @@ class MaterialiseTests(_PromotionBase):
             h.app.terminal.text())
         # The promotion still completed (session created).
         self.assertEqual(h._new_session_calls, 1)
+
+
+# ── A2 — choice dialog + IP mismatch guard ───────────────────────────
+
+class ChoiceDialogTests(_PromotionBase):
+
+    def _seed_ref(self, h, ip, target_ip=None, session_id="deadbeefcafe0000"):
+        """Give host `ip` a session_ref pointing at a real session file
+        recorded for `target_ip` (defaults to the node IP)."""
+        target_ip = target_ip or ip
+        path = os.path.join(self._tmp, f"seed_{session_id[:8]}.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"target_ip": target_ip,
+                       "session_id": session_id}, fh)
+        host = next(x for x in h._sweep_inventory["hosts"]
+                    if x["ip"] == ip)
+        host["session_ref"] = {"session_id": session_id, "file": path}
+        return host["session_ref"]
+
+    def test_promotion_with_existing_ref_opens_the_choice_dialog(self):
+        h = self._make_host()
+        self._seed_ref(h, "10.0.0.5")
+        opened = []
+        h._ask_sweep_promotion_choice = (
+            lambda ip, host, ref: opened.append((ip, ref)))
+
+        h._promote_sweep_host("10.0.0.5")
+
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(opened[0][0], "10.0.0.5")
+        self.assertEqual(h._new_session_calls, 0)   # did not materialise
+
+    def test_start_fresh_overwrites_the_recorded_ref(self):
+        h = self._make_host()
+        h._promote_sweep_host("10.0.0.5")           # ref → session A
+        ref_a = dict(next(x for x in h._sweep_inventory["hosts"]
+                          if x["ip"] == "10.0.0.5")["session_ref"])
+
+        buttons = self._capture(
+            lambda: h._promote_sweep_host("10.0.0.5"))
+        buttons["Start fresh"]()
+
+        ref_b = next(x for x in h._sweep_inventory["hosts"]
+                     if x["ip"] == "10.0.0.5")["session_ref"]
+        self.assertEqual(h._new_session_calls, 2)   # a new session
+        self.assertNotEqual(ref_a["session_id"], ref_b["session_id"])
+        self.assertEqual(h.apply_session_calls, [])  # fresh ≠ load
+
+    def test_loading_a_matching_ip_applies_without_warning(self):
+        h = self._make_host()
+        ref = self._seed_ref(h, "10.0.0.5", target_ip="10.0.0.5")
+        warned = []
+        h._warn_sweep_ip_mismatch = (
+            lambda *a: warned.append(a))
+
+        h._load_sweep_session("10.0.0.5", {"ip": "10.0.0.5"}, ref)
+
+        self.assertEqual(warned, [])
+        self.assertEqual(len(h.apply_session_calls), 1)
+
+    def test_loading_a_mismatched_ip_warns_and_does_not_apply(self):
+        h = self._make_host()
+        # ref recorded for .5 but reached from the .9 node.
+        ref = self._seed_ref(h, "10.0.0.9", target_ip="10.0.0.5")
+        warned = []
+        h._warn_sweep_ip_mismatch = (
+            lambda ip, host, r, loaded: warned.append((ip, loaded)))
+
+        h._load_sweep_session("10.0.0.9", {"ip": "10.0.0.9"}, ref)
+
+        self.assertEqual(warned, [("10.0.0.9", "10.0.0.5")])
+        self.assertEqual(h.apply_session_calls, [])   # not applied silently
+
+    def test_confirmed_mismatch_applies_the_session(self):
+        h = self._make_host()
+        ref = self._seed_ref(h, "10.0.0.9", target_ip="10.0.0.5")
+
+        h._load_sweep_session("10.0.0.9", {"ip": "10.0.0.9"}, ref,
+                              force_mismatch=True)
+
+        self.assertEqual(len(h.apply_session_calls), 1)
+        self.assertEqual(h.apply_session_calls[0].target_ip, "10.0.0.5")
+
+    def test_mismatch_dialog_offers_continue_and_go_back(self):
+        h = self._make_host()
+        ref = {"session_id": "x", "file": "/nope.json"}
+        buttons = self._capture(
+            lambda: h._warn_sweep_ip_mismatch(
+                "10.0.0.9", {"ip": "10.0.0.9"}, ref, "10.0.0.5"))
+        self.assertIn("Continue", buttons)
+        self.assertIn("Go back", buttons)
 
     def test_missing_session_file_reports_error(self):
         h = self._make_host()

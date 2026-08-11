@@ -889,9 +889,11 @@ class TargetBar(ctk.CTkFrame):
         """Click on a graph node → set as active target, lazy session (§3).
 
         First selection of a host MATERIALISES its session and records the
-        `session_ref` in the inventory; a host already worked on
-        (`session_ref` set) LOADS the recorded session instead of creating
-        a second one.
+        `session_ref` in the inventory.  A host already worked on
+        (`session_ref` set) does not silently reload: it offers the
+        operator a choice — load the recorded session or start a fresh one
+        — so a stale reference can't quietly repoint the whole UI at the
+        wrong host (the F-02 corruption family).
         """
         inv = self._sweep_inventory
         if not inv:
@@ -902,7 +904,7 @@ class TargetBar(ctk.CTkFrame):
         ref = (host or {}).get("session_ref")
 
         if ref:
-            self._load_sweep_session(ip, host, ref)
+            self._ask_sweep_promotion_choice(ip, host, ref)
         else:
             self._materialize_sweep_session(ip, host)
 
@@ -954,32 +956,114 @@ class TargetBar(ctk.CTkFrame):
             "success")
         self._close_sweep_graph()
 
-    def _load_sweep_session(self, ip, host, ref):
+    def _load_sweep_session(self, ip, host, ref, force_mismatch=False):
         """Load the session recorded for a swept host (§3).
 
         Hand the session to the same restore path the LOAD dialog uses.
         Repointing session_manager.current on its own is what corrupted
         data: the panels still held the PREVIOUS host's state and the next
         autosave tick wrote it over this host's file.
+
+        Guard the F-02 mismatch class: if the recorded session belongs to
+        a DIFFERENT IP than the node just clicked, stop at an explicit
+        warning instead of applying it silently — unless the operator has
+        already confirmed via that warning (`force_mismatch`).
         """
         from utils.session import Session
 
         sid = (ref or {}).get("session_id", "")
         fpath = (ref or {}).get("file", "")
-        self.app.terminal.write(
-            f"[*] Loading existing session for {ip} ({sid[:8]})", "info")
         try:
             sess = Session(ip, sid)
             if not (fpath and sess.load(fpath)):
                 self.app.terminal.write(
                     f"[!] Session file not found: {fpath}", "error")
                 return
+        except Exception as e:
+            self.app.terminal.write(
+                f"[!] Could not load session: {e}", "error")
+            return
+
+        loaded_ip = getattr(sess, "target_ip", "") or ""
+        if not force_mismatch and loaded_ip and loaded_ip != ip:
+            self._warn_sweep_ip_mismatch(ip, host, ref, loaded_ip)
+            return
+
+        self.app.terminal.write(
+            f"[*] Loading existing session for {ip} ({sid[:8]})", "info")
+        try:
             self.apply_session(sess)
         except Exception as e:
             self.app.terminal.write(
                 f"[!] Could not load session: {e}", "error")
             return
         self._close_sweep_graph()
+
+    def _ask_sweep_promotion_choice(self, ip, host, ref):
+        """A2: promoting a host that already has a session → let the
+        operator choose between loading the recorded session and starting
+        a fresh one.  Non-modal, built with the shared dialog primitives
+        (WM_DELETE_WINDOW handled by `_make_win`), like the other dialogs.
+        """
+        from gui.dialogs import (_make_win, _title, _sub,
+                                  _btn_row, _btn, _safe_destroy)
+
+        sid = (ref or {}).get("session_id", "")
+        win = _make_win(self, "Sweep — Host Session", 560, 300)
+        _title(win, "🖧  HOST ALREADY WORKED ON")
+        _sub(win,
+             f"{ip} has a recorded session ({sid[:8]}).\n\n"
+             "Load it to continue where you left off, or start fresh to "
+             "create a new session for this host — starting fresh "
+             "overwrites the recorded reference.",
+             COLORS["text_dim"])
+
+        row = _btn_row(win)
+
+        def _load():
+            _safe_destroy(win)
+            self._load_sweep_session(ip, host, ref)
+
+        def _fresh():
+            _safe_destroy(win)
+            self._materialize_sweep_session(ip, host)
+
+        _btn(row, "Load previous session", _load, primary=True, w=200)
+        _btn(row, "Start fresh", _fresh, warn=True, w=140)
+        return win
+
+    def _warn_sweep_ip_mismatch(self, ip, host, ref, loaded_ip):
+        """A2 guard: the session recorded for this node belongs to a
+        DIFFERENT IP (F-02 family — target/session mixing).  Make the
+        operator confirm before the mismatched session becomes active;
+        Go back returns to the load/fresh choice.
+        """
+        from gui.dialogs import (_make_win, _title, _sub,
+                                  _btn_row, _btn, _safe_destroy)
+
+        win = _make_win(self, "Sweep — Session IP Mismatch", 580, 320)
+        _title(win, "⚠  SESSION IP MISMATCH")
+        _sub(win,
+             f"The session recorded for node {ip} is for a DIFFERENT "
+             f"target: {loaded_ip}.\n\n"
+             f"Loading it makes {loaded_ip}'s panels, findings and Target "
+             f"Intel active while the node you clicked was {ip}. Continue "
+             "only if you know the reference is correct.",
+             COLORS["text_yellow"])
+
+        row = _btn_row(win)
+
+        def _continue():
+            _safe_destroy(win)
+            self._load_sweep_session(ip, host, ref, force_mismatch=True)
+
+        def _go_back():
+            _safe_destroy(win)
+            self._ask_sweep_promotion_choice(ip, host, ref)
+
+        _btn(row, "Continue", _continue, danger=True, w=140)
+        _btn(row, "Go back", _go_back, primary=True, w=140)
+        return win
 
     # ─── Actions ───────────────────────────────────────────────────────────────
 
