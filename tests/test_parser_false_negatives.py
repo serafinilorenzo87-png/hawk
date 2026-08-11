@@ -90,6 +90,104 @@ class LinpeasSuidTests(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════════════
+#  linPEAS — default-SUID noise (#25)
+# ═══════════════════════════════════════════════════════════════════
+
+# su / sudo / mount ship SUID-root on every box: flagging them HIGH is
+# noise.  nmap SUID is a genuine misconfiguration and must stay HIGH.
+_SUID_DEFAULT_NOISE = """\
+-rwsr-xr-x 1 root root 67K Jan 20  2022 /usr/bin/su
+-rwsr-xr-x 1 root root 166K Jan 20  2022 /usr/bin/sudo
+-rwsr-xr-x 1 root root 55K Jan 20  2022 /usr/bin/mount
+-rwsr-xr-x 1 root root 1.2M Feb  7 09:11 /usr/bin/nmap
+"""
+
+
+class LinpeasSuidNoiseTests(unittest.TestCase):
+    def _run(self, body):
+        findings = []
+        lp._parse_suid_binaries({"suid": body}, "10.10.10.5", findings)
+        return findings
+
+    def _find(self, findings, title_frag, severity=None):
+        return [f for f in findings
+                if title_frag in f["title"]
+                and (severity is None or f["severity"] == severity)]
+
+    def test_real_misconfig_nmap_stays_high(self):
+        findings = self._run(_SUID_DEFAULT_NOISE)
+        high = self._find(findings, "GTFOBins", "high")
+        self.assertEqual(len(high), 1, [f["title"] for f in findings])
+        self.assertIn("nmap", high[0]["description"])
+
+    def test_default_suid_are_not_flagged_high(self):
+        findings = self._run(_SUID_DEFAULT_NOISE)
+        high = self._find(findings, "GTFOBins", "high")
+        blob = "\n".join(f["description"] for f in high)
+        # su / sudo (SAFE) and mount (CAUTION) must not be in the HIGH list.
+        self.assertNotIn("/usr/bin/sudo", blob)
+        self.assertNotIn("/usr/bin/mount", blob)
+        # "/usr/bin/su" is a prefix of ".../sudo"; assert on the whole line.
+        self.assertNotIn("su  →", blob)
+
+    def test_conditional_default_suid_is_medium_not_suppressed(self):
+        findings = self._run(_SUID_DEFAULT_NOISE)
+        med = self._find(findings, "Default-SUID", "medium")
+        self.assertEqual(len(med), 1, [f["title"] for f in findings])
+        self.assertIn("/usr/bin/mount", med[0]["description"])
+
+    def test_safe_default_suid_still_listed_in_info(self):
+        # No false negative: su/sudo remain visible in the full SUID list.
+        findings = self._run(_SUID_DEFAULT_NOISE)
+        info = self._find(findings, "All SUID binaries")
+        self.assertEqual(len(info), 1)
+        self.assertIn("/usr/bin/su", info[0]["description"])
+        self.assertIn("/usr/bin/sudo", info[0]["description"])
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  linPEAS — parse runs off the UI thread (#24)
+# ═══════════════════════════════════════════════════════════════════
+
+class LinpeasParseMarshalsPushesTests(unittest.TestCase):
+    """The 13k-line parse runs on a worker; every widget push must hop back
+    onto the UI thread via app.ui_call instead of being called directly."""
+
+    class _Intel:
+        def __init__(self):
+            self.findings = []
+
+        def add_auto_finding(self, **kw):
+            self.findings.append(kw)
+
+    class _Creds:
+        def __init__(self):
+            self.creds = []
+
+        def add_credential(self, c):
+            self.creds.append(c)
+
+    class _App:
+        def __init__(self):
+            self.target_intel = LinpeasParseMarshalsPushesTests._Intel()
+            self.cred_store = LinpeasParseMarshalsPushesTests._Creds()
+            self.ui_calls = 0
+
+        def ui_call(self, fn, *a, **k):
+            self.ui_calls += 1
+            fn(*a, **k)
+
+    def test_pushes_are_marshalled_through_ui_call(self):
+        app = self._App()
+        lp.parse_linpeas("nothing actionable here", app, "10.0.0.5")
+        # The always-present summary finding guarantees at least one push,
+        # and it must have gone through ui_call (not touched a widget from
+        # the worker).
+        self.assertGreaterEqual(app.ui_calls, 1)
+        self.assertTrue(app.target_intel.findings)
+
+
+# ═══════════════════════════════════════════════════════════════════
 #  linPEAS — SSH keys
 # ═══════════════════════════════════════════════════════════════════
 

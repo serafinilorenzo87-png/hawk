@@ -79,6 +79,30 @@ _GTFOBINS_SUID = {
 }
 
 
+# ─── Default-SUID binaries (noise control, #25) ─────────────────────
+# These ship SUID-root on a stock Linux install, so the SUID bit alone is
+# EXPECTED — not a misconfiguration.  Flagging them HIGH on every box (su,
+# sudo, mount ...) is pure noise.  The real vector needs a separate
+# condition (a NOPASSWD sudoers rule, an unusual mount setup), which the
+# sudo-rules parser and the operator's own review catch.
+#
+# Split by residual risk so we LOWER severity instead of suppressing (no
+# false negatives — every SUID still appears in the "All SUID binaries"
+# info list regardless):
+#   * SAFE    — the SUID bit grants no privesc by itself (su/sudo/passwd
+#               family): dropped from the HIGH list, still shown in info.
+#   * CAUTION — a GTFOBins escape exists but only under specific conditions
+#               (mount/umount/pkexec ...): reported at MEDIUM, not HIGH.
+_DEFAULT_SUID_SAFE = {
+    "su", "sudo", "passwd", "chsh", "chfn", "gpasswd", "newgrp",
+    "chage", "expiry",
+}
+_DEFAULT_SUID_CAUTION = {
+    "mount", "umount", "fusermount", "fusermount3",
+    "mount.nfs", "mount.cifs", "ntfs-3g", "pkexec",
+}
+
+
 # ─── Dangerous capabilities (getcap output) ─────────────────────────
 _DANGEROUS_CAPS = {
     "cap_setuid": (
@@ -282,15 +306,17 @@ def parse_linpeas(text: str,
     else:
         summary_sev = "info"
 
-    try:
-        app.target_intel.add_auto_finding(
-            title=summary_title,
-            description="\n".join(summary_desc_lines),
-            severity=summary_sev,
-            source="linpeas parser",
-            linked_run_id=run_id)
-    except Exception:
-        pass
+    def _push_summary():
+        try:
+            app.target_intel.add_auto_finding(
+                title=summary_title,
+                description="\n".join(summary_desc_lines),
+                severity=summary_sev,
+                source="linpeas parser",
+                linked_run_id=run_id)
+        except Exception:
+            pass
+    _on_ui(app, _push_summary)
 
     return {
         "sections":        section_reports,
@@ -462,6 +488,7 @@ def _parse_suid_binaries(sections, target, findings):
         return None
 
     gtfo_hits = []
+    caution_hits = []
     all_suids = []
     # SUID lines in linPEAS are plain `ls -l` rows, e.g.
     #   -rwsr-xr-x 1 root root 55K Jan 20  2022 /usr/bin/mount
@@ -486,7 +513,17 @@ def _parse_suid_binaries(sections, target, findings):
             continue
         all_suids.append(path)
         basename = os.path.basename(path).lower()
-        if basename in _GTFOBINS_SUID:
+        if basename not in _GTFOBINS_SUID:
+            continue
+        # Default-SUID binaries are expected: don't scream HIGH on every box
+        # (#25).  SAFE ones carry no privesc from the SUID bit and are left
+        # to the info list; CAUTION ones keep a conditional escape and are
+        # reported at MEDIUM.  Everything else is a genuine misconfiguration.
+        if basename in _DEFAULT_SUID_SAFE:
+            continue
+        if basename in _DEFAULT_SUID_CAUTION:
+            caution_hits.append((basename, path))
+        else:
             gtfo_hits.append((basename, path))
 
     if not all_suids:
@@ -504,6 +541,23 @@ def _parse_suid_binaries(sections, target, findings):
                 f"and pick the simplest one.\n\n"
                 + "\n".join(lines)),
             "severity":    "high",
+            "source":      "linpeas parser",
+        })
+
+    if caution_hits:
+        lines = [f"  • {b}  →  {p}"
+                 for b, p in caution_hits[:20]]
+        findings.append({
+            "title":       f"Default-SUID binaries with conditional escapes "
+                           f"({len(caution_hits)})",
+            "description": (
+                f"These binaries ship SUID-root by default on {target}, so "
+                f"the SUID bit alone is not a misconfiguration — but each has "
+                f"a GTFOBins escape that works only under specific conditions "
+                f"(unusual mount options, writable configs, a permissive "
+                f"policy).  Verify the condition before relying on them.\n\n"
+                + "\n".join(lines)),
+            "severity":    "medium",
             "source":      "linpeas parser",
         })
 
@@ -1134,36 +1188,56 @@ def _scrape(text: str, pattern: str, flags: int = re.I) -> str:
     return m.group(1).strip() if m else ""
 
 
+def _on_ui(app, fn, *args, **kwargs):
+    """Run a widget-touching callback on the UI thread.
+
+    parse_linpeas is CPU-heavy (~13k lines, ~5s) and runs on a worker so it
+    no longer freezes the GUI (#24).  Every push into Target Intel / the
+    Credential Store therefore has to hop back onto the Tk main loop —
+    touching widgets from the worker is unsafe.  Falls back to a direct call
+    when no dispatcher is present (headless tests, or an old caller that runs
+    on the main thread anyway)."""
+    ui = getattr(app, "ui_call", None)
+    if callable(ui):
+        ui(fn, *args, **kwargs)
+    else:
+        fn(*args, **kwargs)
+
+
 def _push_finding(app, f: dict, run_id: str):
-    try:
-        app.target_intel.add_auto_finding(
-            title=f["title"],
-            description=f["description"],
-            severity=f["severity"],
-            source=f.get("source", "linpeas parser"),
-            linked_run_id=run_id)
-    except Exception:
-        pass
+    def _do():
+        try:
+            app.target_intel.add_auto_finding(
+                title=f["title"],
+                description=f["description"],
+                severity=f["severity"],
+                source=f.get("source", "linpeas parser"),
+                linked_run_id=run_id)
+        except Exception:
+            pass
+    _on_ui(app, _do)
 
 
 def _push_credential(app, c: dict, run_id: str):
-    try:
-        from utils.session import Credential
-        cred = Credential(
-            username=c.get("username", ""),
-            password=c.get("password", ""),
-            host=c.get("host", ""),
-            services=c.get("services", []) or [],
-            cred_type=c.get("cred_type", "cleartext"),
-            notes=c.get("notes", ""),
-            source_phase="post_exploit",
-            linked_run_id=run_id,
-            # Scraped out of files/config on the host: a candidate
-            # secret, not a login linpeas performed.
-            verified=False)
-        app.cred_store.add_credential(cred)
-    except Exception:
-        pass
+    def _do():
+        try:
+            from utils.session import Credential
+            cred = Credential(
+                username=c.get("username", ""),
+                password=c.get("password", ""),
+                host=c.get("host", ""),
+                services=c.get("services", []) or [],
+                cred_type=c.get("cred_type", "cleartext"),
+                notes=c.get("notes", ""),
+                source_phase="post_exploit",
+                linked_run_id=run_id,
+                # Scraped out of files/config on the host: a candidate
+                # secret, not a login linpeas performed.
+                verified=False)
+            app.cred_store.add_credential(cred)
+        except Exception:
+            pass
+    _on_ui(app, _do)
 
 
 def _term_warn(app, msg: str):

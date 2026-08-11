@@ -2228,11 +2228,19 @@ class PostExploitGuideDialog:
                         clean, self._app, self._target,
                         source_file=path)
                 elif "linpeas" in script_lower:
+                    # linPEAS output is ~13k lines; the parse takes ~5s and
+                    # would freeze the GUI on the main thread (#24).  Run it
+                    # on a worker — the parser marshals its Target Intel /
+                    # Credential Store pushes back via app.ui_call, so no
+                    # widget is touched from this thread.
                     from modules.parsers.linpeas_parser import (
                         parse_linpeas)
-                    parse_linpeas(
-                        clean, self._app, self._target,
-                        source_file=path)
+                    import threading as _threading
+                    _threading.Thread(
+                        target=lambda c=clean, p=path: parse_linpeas(
+                            c, self._app, self._target, source_file=p),
+                        name="hawk-linpeas-parse",
+                        daemon=True).start()
                 elif "powerup" in script_lower:
                     # PowerUp.ps1 — no dedicated parser (output is compact
                     # and human-readable).  Print a focused reading guide
@@ -2271,11 +2279,15 @@ class PostExploitGuideDialog:
                         clean, self._app, self._target,
                         source_file=path)
                 elif self._os == "linux":
+                    # Off the main thread — see the linpeas branch above (#24).
                     from modules.parsers.linpeas_parser import (
                         parse_linpeas)
-                    parse_linpeas(
-                        clean, self._app, self._target,
-                        source_file=path)
+                    import threading as _threading
+                    _threading.Thread(
+                        target=lambda c=clean, p=path: parse_linpeas(
+                            c, self._app, self._target, source_file=p),
+                        name="hawk-linpeas-parse",
+                        daemon=True).start()
             except ImportError as e:
                 term.write(
                     f"  [i] Parser not available: {e}.  Output saved "
