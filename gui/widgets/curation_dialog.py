@@ -158,23 +158,32 @@ def open_curation_dialog(app, session, on_generated=None) -> None:
 
         # ATT&CK override: blank = use the curated auto-map (shown as the
         # placeholder hint); type technique ids to override per finding.
+        # The placeholder disappears once the field is populated, so a
+        # persistent label sits beside each control (#20 — the two
+        # side-by-side fields were otherwise unlabelled once filled).
+        ctk.CTkLabel(ctrl, text="ATT&CK:", font=_f("sm"),
+                     text_color=COLORS["text_dim"]).pack(
+            side="left", padx=(10, 0))
         tq_var = tk.StringVar(value=" ".join(view["technique_ids"]))
         auto_hint = ", ".join(view["techniques_resolved"]) or "none"
         tq = ctk.CTkEntry(ctrl, textvariable=tq_var,
-                          placeholder_text=f"ATT&CK (auto: {auto_hint})",
+                          placeholder_text=f"auto: {auto_hint}",
                           font=_f("sm"), width=180)
-        tq.pack(side="left", padx=(10, 0))
+        tq.pack(side="left", padx=(4, 0))
 
         def _on_tq(_evt=None, it=item, v=tq_var):
             controller.set_techniques(it, v.get())
         tq.bind("<FocusOut>", _on_tq)
         pending_commits.append(_on_tq)
 
+        ctk.CTkLabel(ctrl, text="Note:", font=_f("sm"),
+                     text_color=COLORS["text_dim"]).pack(
+            side="left", padx=(10, 0))
         note_var = tk.StringVar(value=view["operator_note"])
         note = ctk.CTkEntry(ctrl, textvariable=note_var,
                             placeholder_text="operator note",
                             font=_f("sm"), width=200)
-        note.pack(side="left", padx=(10, 0), fill="x", expand=True)
+        note.pack(side="left", padx=(4, 0), fill="x", expand=True)
 
         def _on_note(_evt=None, it=item, v=note_var):
             controller.set_operator_note(it, v.get())

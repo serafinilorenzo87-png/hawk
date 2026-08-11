@@ -427,10 +427,16 @@ class CardResponderRoutesMixin:
                 verified=False)
             sess.add_credential(cred)
             sess.save()
-            # Refresh Credential Store UI if available.
+            # Refresh Credential Store UI if available.  Route through
+            # mark_captured so the new row is HIGHLIGHTED (not just the tab
+            # counter) — a Responder capture is pushed straight onto the
+            # session, bypassing the widget's own new-row marking (MSF3 B4.4).
             cs = getattr(self.app, "cred_store", None)
             if cs:
-                cs.refresh()
+                if hasattr(cs, "mark_captured"):
+                    cs.mark_captured(cred)
+                else:
+                    cs.refresh()
             self.app.terminal.write(
                 f"  [+] Responder captured NTLMv2 for "
                 f"{user}@{domain or '(no-domain)'} → Credential "

@@ -42,6 +42,24 @@ def needs_unverified_badge(cred) -> bool:
     return not getattr(cred, "verified", True)
 
 
+def cred_identity(cred) -> tuple:
+    """Stable identity for a credential: domain-stripped username + host +
+    type + secret.  Matches the duplicate-detection identity (services and
+    verified state excluded) so the same credential keys the same before and
+    after a store refresh.  Module level = testable without a Tk display.
+    """
+    user = (getattr(cred, "username", "") or "").strip().lower()
+    if "\\" in user:
+        user = user.split("\\", 1)[1]
+    if "/" in user:
+        user = user.split("/", 1)[1]
+    host = (getattr(cred, "host", "") or "").strip().lower()
+    secret = (getattr(cred, "hash_val", "")
+              or getattr(cred, "password", "") or "").strip()
+    ctype = (getattr(cred, "cred_type", "") or "").strip().lower()
+    return (user, host, ctype, secret)
+
+
 HASH_FORMATS_JOHN = {
     "NTLM":       "NT",
     "LM":         "LM",
@@ -192,6 +210,12 @@ class CredentialStoreWidget(ctk.CTkFrame):
         self._blink_active   = False
         self._blink_count    = 0
         self._new_findings   = 0
+        # Identities of credentials captured since the operator last viewed
+        # this tab.  A fresh capture (e.g. a Responder NetNTLMv2 hash) lands
+        # UNVERIFIED in AD RESULTS; the tab shows "(N new)" but the ROW was
+        # not marked, so the operator could miss it (MSF3 B4.4).  Rows whose
+        # identity is in this set are highlighted; cleared on tab view.
+        self._new_cred_keys: set = set()
         # ── Active-crack registry ────────────────────────────────────
         # idx → {"runner": CrackRunner, "strategy": "FAST" | "RULE-BASED"
         #        | "HYBRID" | "TARGET" | "MASK" | "FULL STACK"}
@@ -585,15 +609,31 @@ class CredentialStoreWidget(ctk.CTkFrame):
             self._blink_start()
             return
 
-        # No existing match → brand-new entry.
+        # No existing match → brand-new entry.  Remember its identity so the
+        # ROW is highlighted as new (not just the tab counter) until the
+        # operator views the store (MSF3 B4.4).
         sess.add_credential(cred)
         sess.save()
+        self._new_cred_keys.add(cred_identity(cred))
         self.refresh()
         self.app.terminal.write(
             f"  ↗  Credential: {cred.username}  "
             f"[{cred.password or cred.hash_type or 'hash'}]",
             "finding")
         self._blink_start()
+
+    def mark_captured(self, cred):
+        """Register a credential that was pushed straight onto the session
+        (bypassing this widget's add_credential — e.g. a Responder NetNTLMv2
+        capture) as NEW, blink the tab counter, and re-render so the row is
+        highlighted.  Without this such a capture updated the list silently
+        and only the tab counter moved (MSF3 B4.4)."""
+        try:
+            self._new_cred_keys.add(cred_identity(cred))
+        except Exception:
+            pass
+        self._blink_start()
+        self.refresh()
 
     # ─── Tab blink (mirrors TargetIntelWidget) ──────────────────────────────
 
@@ -637,6 +677,11 @@ class CredentialStoreWidget(ctk.CTkFrame):
     def _blink_stop(self):
         self._blink_active = False
         self._new_findings = 0
+        # The operator is now looking at the store: the rows have been
+        # rendered (app switches the tab -> refresh() -> _blink_stop()), so
+        # clearing the new-set here means the highlight fades on the NEXT
+        # render instead of persisting forever.
+        self._new_cred_keys = set()
         if self._tab_label and self._tab_label.winfo_exists():
             try:
                 self._tab_label.configure(
@@ -792,10 +837,15 @@ class CredentialStoreWidget(ctk.CTkFrame):
         """
         if grid_row is None:
             grid_row = idx
+        # Freshly captured (since last tab view) rows get a cyan border so
+        # the operator spots the new credential in the list, not just via the
+        # tab counter (MSF3 B4.4).
+        is_new = cred_identity(cred) in (self._new_cred_keys or set())
         row = ctk.CTkFrame(self._scroll,
             fg_color=COLORS["bg_secondary"],
-            border_color=COLORS["border_dim"],
-            border_width=1, corner_radius=3)
+            border_color=(COLORS.get("tab_blink", "#00FFFF") if is_new
+                          else COLORS["border_dim"]),
+            border_width=2 if is_new else 1, corner_radius=3)
         row.grid(row=grid_row, column=0, sticky="ew", padx=4, pady=2)
         row.grid_columnconfigure(2, weight=1)
 
@@ -838,6 +888,14 @@ class CredentialStoreWidget(ctk.CTkFrame):
 
         ctk.CTkLabel(act, text=f"  phase: {cred.source_phase}",
             font=_mono(10), text_color=COLORS["text_muted"]
+            ).pack(side="left", padx=4)
+
+        if is_new:
+            ctk.CTkLabel(act, text=" ● NEW ",
+                font=_mono(10, True),
+                fg_color=COLORS.get("bg_card", "#0B0F14"),
+                text_color=COLORS.get("tab_blink", "#00FFFF"),
+                corner_radius=2,
             ).pack(side="left", padx=4)
 
         if needs_unverified_badge(cred):
