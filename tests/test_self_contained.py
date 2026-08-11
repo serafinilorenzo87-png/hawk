@@ -90,5 +90,79 @@ class SelfContainedPolicyTests(unittest.TestCase):
             runner.subprocess.run = old_run
 
 
+class RouteToTargetTests(unittest.TestCase):
+    """Multi-homed correctness (OBS-2 / #13): the local IP + gateway that
+    REACH the target come from `ip route get <target>`, not the default
+    route or the ranked global lhost."""
+
+    def _with_route_output(self, sample):
+        from utils import runner
+
+        class Result:
+            stdout = sample
+
+        old_run = runner.subprocess.run
+        runner.subprocess.run = lambda *a, **k: Result()
+        self.addCleanup(lambda: setattr(runner.subprocess, "run", old_run))
+        return runner
+
+    def test_via_gateway_route_extracts_iface_src_and_gateway(self):
+        runner = self._with_route_output(
+            "192.168.176.173 via 192.168.176.1 dev eth1 "
+            "src 192.168.176.172 uid 0 \n    cache")
+        info = runner.route_to_target("192.168.176.173")
+        self.assertEqual(info.get("iface"), "eth1")
+        self.assertEqual(info.get("src"), "192.168.176.172")
+        self.assertEqual(info.get("gateway"), "192.168.176.1")
+        self.assertFalse(info.get("on_link"))
+
+    def test_on_link_route_has_no_gateway(self):
+        runner = self._with_route_output(
+            "10.10.10.5 dev tun0 src 10.10.14.9 uid 0 \n    cache")
+        info = runner.route_to_target("10.10.10.5")
+        self.assertEqual(info.get("iface"), "tun0")
+        self.assertEqual(info.get("src"), "10.10.14.9")
+        self.assertIsNone(info.get("gateway"))
+        self.assertTrue(info.get("on_link"))
+
+    def test_invalid_target_returns_empty(self):
+        from utils import runner
+        self.assertEqual(runner.route_to_target("not-an-ip"), {})
+        self.assertEqual(runner.route_to_target(""), {})
+
+    def test_missing_ip_command_returns_empty(self):
+        from utils import runner
+        old_run = runner.subprocess.run
+
+        def boom(*_a, **_k):
+            raise FileNotFoundError("ip")
+
+        runner.subprocess.run = boom
+        try:
+            self.assertEqual(runner.route_to_target("10.0.0.1"), {})
+        finally:
+            runner.subprocess.run = old_run
+
+    def test_lhost_for_target_prefers_route_src(self):
+        runner = self._with_route_output(
+            "192.168.176.173 via 192.168.176.1 dev eth1 "
+            "src 192.168.176.172 uid 0 \n    cache")
+        self.assertEqual(runner.lhost_for_target("192.168.176.173"),
+                         "192.168.176.172")
+
+    def test_lhost_for_target_falls_back_when_route_unresolved(self):
+        from utils import runner
+        old_run = runner.subprocess.run
+        old_detect = runner.lhost_detect
+        runner.subprocess.run = lambda *a, **k: type("R", (), {"stdout": ""})()
+        runner.lhost_detect = lambda: "10.10.14.23"
+        try:
+            self.assertEqual(runner.lhost_for_target("10.0.0.1"),
+                             "10.10.14.23")
+        finally:
+            runner.subprocess.run = old_run
+            runner.lhost_detect = old_detect
+
+
 if __name__ == "__main__":
     unittest.main()

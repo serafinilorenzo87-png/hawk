@@ -396,6 +396,63 @@ def lhost_iface():
     candidates = lhost_candidates()
     return candidates[0]["iface"] if candidates else "unknown"
 
+
+def route_to_target(target_ip: str) -> dict:
+    """How the kernel actually reaches ``target_ip`` — the authoritative
+    answer on a multi-homed host.
+
+    Returns ``{"iface", "src", "gateway", "on_link"}`` (keys present only
+    when parsed).  On a box with several interfaces the default route is
+    NOT necessarily the one that reaches the target: transfer URLs and
+    reachability checks built from the default-route IP point at the wrong
+    NIC (OBS-2 / MSF2 #13).  ``ip route get <ip>`` asks the kernel which
+    source address and gateway it would use, e.g.
+
+        192.168.176.173 via 192.168.176.1 dev eth1 src 192.168.176.172 ...
+        10.10.10.5 dev tun0 src 10.10.14.9 ...           (on-link, no gw)
+
+    Returns ``{}`` when the target is not a usable IPv4 or ``ip`` is
+    unavailable/fails — callers then fall back to the ranked global lhost.
+    """
+    if not target_ip:
+        return {}
+    try:
+        ipaddress.ip_address(target_ip)
+    except ValueError:
+        return {}
+    try:
+        r = subprocess.run(
+            ["ip", "-4", "route", "get", target_ip],
+            capture_output=True, text=True, timeout=2)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return {}
+    text = r.stdout or ""
+    out = {}
+    dev = re.search(r"\bdev\s+(\S+)", text)
+    if dev:
+        out["iface"] = dev.group(1)
+    src = re.search(r"\bsrc\s+(\d+\.\d+\.\d+\.\d+)", text)
+    if src and _usable_lhost_ip(src.group(1)):
+        out["src"] = src.group(1)
+    via = re.search(r"\bvia\s+(\d+\.\d+\.\d+\.\d+)", text)
+    if via:
+        out["gateway"] = via.group(1)
+        out["on_link"] = False
+    elif out:
+        # A parsed route with no "via" hop is on-link (same L2 segment).
+        out["on_link"] = True
+    return out
+
+
+def lhost_for_target(target_ip: str) -> str:
+    """The local source IP the kernel uses to reach ``target_ip``.
+
+    Prefers the route lookup (correct on multi-homed hosts); falls back to
+    the ranked global lhost when the route can't be resolved."""
+    src = route_to_target(target_ip).get("src")
+    return src or lhost_detect()
+
+
 def _open_terminal(title, cmd, return_proc=False):
     """Open a new terminal window running `cmd` (a bash script string).
 

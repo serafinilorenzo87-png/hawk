@@ -818,12 +818,25 @@ class PostExploitGuideDialog:
         self._target = target or "<TARGET>"
         self._os = os_type
 
-        # Detect Kali IP once — prefer VPN interface (tun0/tun1) if present
+        # Detect the Kali IP the target will actually reach.  On a multi-homed
+        # Kali the transfer URLs / SMB path must carry the IP of the interface
+        # that ROUTES to the target, not the default-route / best-ranked NIC —
+        # otherwise the pasted wget/certutil/smbclient points at the wrong NIC
+        # and hangs (OBS-2).  Ask the kernel's route to the target first, then
+        # fall back to the ranked global lhost when it can't be resolved
+        # (target still a placeholder, non-Linux, no `ip`).
         try:
-            from utils.runner import lhost_candidates
-            candidates = lhost_candidates()
-            self._kali_ip = candidates[0]["ip"] if candidates else "<KALI_IP>"
-            self._kali_iface = candidates[0]["iface"] if candidates else "?"
+            from utils.runner import route_to_target, lhost_candidates
+            route = route_to_target(self._target)
+            if route.get("src"):
+                self._kali_ip = route["src"]
+                self._kali_iface = route.get("iface") or "?"
+            else:
+                candidates = lhost_candidates()
+                self._kali_ip = (candidates[0]["ip"]
+                                 if candidates else "<KALI_IP>")
+                self._kali_iface = (candidates[0]["iface"]
+                                    if candidates else "?")
         except Exception:
             self._kali_ip = "<KALI_IP>"
             self._kali_iface = "?"

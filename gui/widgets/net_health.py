@@ -223,23 +223,39 @@ class NetHealthIndicator(ctk.CTkFrame):
     def _probe_network(self) -> dict:
         out = {
             "iface": None, "ip": None,
-            "gateway": None, "gateway_ok": None,
+            "gateway": None, "gateway_ok": None, "on_link": None,
             "target": None, "target_ok": None, "target_via": None,
             "nm_running": None,
         }
-        gw, iface = _read_default_route()
-        out["iface"]   = iface
-        out["gateway"] = gw
-        if iface:
-            out["ip"] = _read_iface_ip(iface)
-        if gw:
-            out["gateway_ok"] = _ping(gw, count=1, timeout_s=1)
 
         try:
             tgt = self.app.get_target() if self.app else ""
         except Exception:
             tgt = ""
         tgt = (tgt or "").strip()
+
+        # Health must reflect the interface that REACHES the target, not the
+        # default route: on a multi-homed Kali the target often lives on a
+        # non-default NIC, and probing the default gateway paints a false red
+        # (#13 / OBS-2).  Ask the kernel which route serves the target; fall
+        # back to the default route when there is no target or the lookup
+        # fails.
+        from utils.runner import route_to_target
+        route = route_to_target(tgt) if tgt else {}
+        if route.get("iface"):
+            iface = route["iface"]
+            gw = route.get("gateway")          # None when the target is on-link
+            out["on_link"] = bool(route.get("on_link"))
+            out["ip"] = route.get("src") or _read_iface_ip(iface)
+        else:
+            gw, iface = _read_default_route()
+            if iface:
+                out["ip"] = _read_iface_ip(iface)
+        out["iface"]   = iface
+        out["gateway"] = gw
+        if gw:
+            out["gateway_ok"] = _ping(gw, count=1, timeout_s=1)
+
         if tgt:
             out["target"] = tgt
             if _ping(tgt, count=1, timeout_s=1):
@@ -276,6 +292,15 @@ class NetHealthIndicator(ctk.CTkFrame):
         gw_ok  = r.get("gateway_ok")
         tg_ok  = r.get("target_ok")
         has_tg = r.get("target") is not None
+
+        # On-link target: there is no gateway hop to ping, so gateway_ok is
+        # None even though the network is fine.  Prove "our link is up" from
+        # the local IP on the reaching interface instead — otherwise an
+        # on-link target (e.g. HTB over tun0) would always paint red.  The
+        # dialog still shows the gateway as "(none)"; only the pill/drift
+        # decision uses this normalisation.
+        if r.get("on_link") and gw_ok is None:
+            gw_ok = bool(r.get("ip"))
 
         # ── Target IP drift detection ─────────────────────────────
         # Counts consecutive target failures, but only after we've
