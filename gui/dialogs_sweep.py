@@ -203,60 +203,76 @@ def show_sweep_graph_window(parent, cidr, graph_data,
                  facecolor=COLORS["bg_primary"])
     ax = fig.add_subplot(111, facecolor=COLORS["bg_primary"])
 
-    nx.draw_networkx_edges(
-        G, pos, ax=ax,
-        edge_color="#2A3642",
-        width=0.7, arrows=False, alpha=0.55)
-
-    _TYPE_SIZE = {"subnet": 500, "host": 350}
-
-    for cat in ("normal", "medium", "warn", "critical"):
-        ids = [n["id"] for n in vis_nodes
-               if n.get("category") == cat and n.get("type") == "host"]
-        if not ids:
-            continue
-        nx.draw_networkx_nodes(
-            G, pos, nodelist=ids, ax=ax,
-            node_color=_CAT_COLOR.get(cat, "#55708A"),
-            node_size=350,
-            edgecolors=COLORS["bg_primary"],
-            linewidths=0.9,
-            node_shape="o",
-            alpha=1.0 if cat != "normal" else 0.7)
-
     subnet_ids = [n["id"] for n in vis_nodes if n.get("type") == "subnet"]
-    if subnet_ids:
-        nx.draw_networkx_nodes(
-            G, pos, nodelist=subnet_ids, ax=ax,
-            node_color="#55708A",
-            node_size=500,
-            edgecolors=COLORS["bg_primary"],
-            linewidths=0.9,
-            node_shape="p",
-            alpha=0.7)
-
     labels = {n["id"]: n["label"] for n in vis_nodes}
-    if labels:
-        nx.draw_networkx_labels(
-            G, pos, labels=labels, ax=ax,
-            font_size=9, font_color="#E8F0F8",
-            font_family="monospace")
 
-    session_ids = [n["id"] for n in vis_nodes
-                   if n.get("type") == "host"
-                   and "has_session" in (n.get("flags") or [])]
-    if session_ids:
-        nx.draw_networkx_nodes(
-            G, pos, nodelist=session_ids, ax=ax,
-            node_color="none",
-            node_size=420,
-            edgecolors=COLORS["text_cyan"],
-            linewidths=2.0,
-            node_shape="o",
-            alpha=0.9)
+    def _paint(preserve_view: bool = False):
+        """(Re)draw the whole figure from the CURRENT node flags on the
+        fixed layout ``pos``.  The has_session cyan ring is recomputed here
+        every call, so marking a host promoted and repainting makes the ring
+        appear without reopening the window (carry-over graph-redraw fix).
+        ``preserve_view`` keeps the operator's current zoom/pan across a
+        repaint triggered by a promotion."""
+        if preserve_view:
+            xl, yl = ax.get_xlim(), ax.get_ylim()
+        ax.clear()
 
-    ax.set_axis_off()
-    ax.margins(0.05)
+        nx.draw_networkx_edges(
+            G, pos, ax=ax,
+            edge_color="#2A3642",
+            width=0.7, arrows=False, alpha=0.55)
+
+        for cat in ("normal", "medium", "warn", "critical"):
+            ids = [n["id"] for n in vis_nodes
+                   if n.get("category") == cat and n.get("type") == "host"]
+            if not ids:
+                continue
+            nx.draw_networkx_nodes(
+                G, pos, nodelist=ids, ax=ax,
+                node_color=_CAT_COLOR.get(cat, "#55708A"),
+                node_size=350,
+                edgecolors=COLORS["bg_primary"],
+                linewidths=0.9,
+                node_shape="o",
+                alpha=1.0 if cat != "normal" else 0.7)
+
+        if subnet_ids:
+            nx.draw_networkx_nodes(
+                G, pos, nodelist=subnet_ids, ax=ax,
+                node_color="#55708A",
+                node_size=500,
+                edgecolors=COLORS["bg_primary"],
+                linewidths=0.9,
+                node_shape="p",
+                alpha=0.7)
+
+        if labels:
+            nx.draw_networkx_labels(
+                G, pos, labels=labels, ax=ax,
+                font_size=9, font_color="#E8F0F8",
+                font_family="monospace")
+
+        session_ids = [n["id"] for n in vis_nodes
+                       if n.get("type") == "host"
+                       and "has_session" in (n.get("flags") or [])]
+        if session_ids:
+            nx.draw_networkx_nodes(
+                G, pos, nodelist=session_ids, ax=ax,
+                node_color="none",
+                node_size=420,
+                edgecolors=COLORS["text_cyan"],
+                linewidths=2.0,
+                node_shape="o",
+                alpha=0.9)
+
+        ax.set_axis_off()
+        if preserve_view:
+            ax.set_xlim(xl)
+            ax.set_ylim(yl)
+        else:
+            ax.margins(0.05)
+
+    _paint()
 
     # ── Embed in tk ───────────────────────────────────────────────────
     canvas = FigureCanvasTkAgg(fig, master=graph_fr)
@@ -338,6 +354,27 @@ def show_sweep_graph_window(parent, cidr, graph_data,
             _add_action_button(btn_text, _select, primary=True)
 
     canvas.mpl_connect("button_press_event", _on_click)
+
+    # Let the caller mark a host promoted and repaint IN PLACE, so the cyan
+    # has_session ring appears the moment the session materialises instead of
+    # only on a reopen.  The click handler reads flags from these same node
+    # dicts, so a later click on the promoted node correctly offers LOAD.
+    def _mark_session_ring(ip: str):
+        touched = False
+        for n in vis_nodes:
+            if n.get("type") == "host" and n.get("label") == ip:
+                flags = n.setdefault("flags", [])
+                if "has_session" not in flags:
+                    flags.append("has_session")
+                    touched = True
+        if not touched:
+            return
+        try:
+            _paint(preserve_view=True)
+            canvas.draw_idle()
+        except Exception:
+            pass
+    win.mark_session_ring = _mark_session_ring
 
     # ── Footer ────────────────────────────────────────────────────────
     row = _btn_row(win)

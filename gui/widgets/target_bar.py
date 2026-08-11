@@ -581,7 +581,12 @@ class TargetBar(ctk.CTkFrame):
         def _on_output(line, tool_name, level="info"):
             if method == "arp-scan":
                 self._sweep_arp_lines.append(line)
-            self.app.terminal.output_callback(line, tool_name, level)
+            # mirror_live: a sweep is a discovery run — the operator watches
+            # hosts appear to decide whether to abort.  Without live mirroring
+            # smart mode buffers everything until done, so a long sweep shows
+            # nothing and the operator aborts blind (F-26).
+            self.app.terminal.output_callback(line, tool_name, level,
+                                              mirror_live=True)
 
         def _on_done(tool_name, rc, log):
             self._sweep_running = False
@@ -954,7 +959,26 @@ class TargetBar(ctk.CTkFrame):
         self.app.terminal.write(
             f"[+] Target promoted: {ip} (session {session.session_id[:8]})",
             "success")
-        self._close_sweep_graph()
+        # The host just gained a session: repaint its cyan has_session ring
+        # in place so the change is visible without reopening the graph
+        # (carry-over graph-redraw fix).  Falls back to closing the window
+        # if the open graph predates this capability.
+        self._mark_sweep_graph_session(ip)
+
+    def _mark_sweep_graph_session(self, ip):
+        """Reflect a fresh promotion on the open sweep graph: draw the
+        has_session ring on ``ip`` in place.  If the current graph window
+        can't repaint (older window, or the call raises), fall back to the
+        previous behaviour of closing it so nothing stale is left up."""
+        win = getattr(self, "_sweep_graph_win", None)
+        mark = getattr(win, "mark_session_ring", None) if win else None
+        if mark is None:
+            self._close_sweep_graph()
+            return
+        try:
+            mark(ip)
+        except Exception:
+            self._close_sweep_graph()
 
     def _load_sweep_session(self, ip, host, ref, force_mismatch=False):
         """Load the session recorded for a swept host (§3).

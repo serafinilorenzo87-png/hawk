@@ -754,7 +754,17 @@ class TerminalWidget(ctk.CTkFrame):
     def write(self, text: str, level: str = "info"):
         self.after(0, lambda: self._append(_strip(text), level))
 
-    def output_callback(self, line: str, tool_name: str, level: str = "info"):
+    def output_callback(self, line: str, tool_name: str, level: str = "info",
+                        mirror_live: bool = False):
+        """Route a tool output line: intercept nmap/masscan progress into
+        the bar, otherwise buffer (smart mode) or append (verbose).
+
+        ``mirror_live`` forces every non-progress line to the terminal as it
+        arrives even in smart mode.  Discovery runs (network sweep) need it:
+        a smart-mode sweep buffers all output until done, so on a long range
+        the operator sees nothing and aborts blind (finding F-26).  Progress
+        lines still feed the bar only — they are never echoed as text.
+        """
         line = _strip(line)
         # ── Nmap / masscan progress interception (smart & raw mode) ──
         if _NMAP_STATS_RE.match(line):
@@ -831,8 +841,10 @@ class TerminalWidget(ctk.CTkFrame):
                 pct = raw_pct
             self.after(0, lambda p=pct, ph=phase, e=eta, tn=tool_name:
                       self._update_progress(p, ph, e, tn))
-            # Still buffer for smart mode if active
-            if self._smart_mode:
+            # Still buffer for smart mode if active.  A live-mirrored run
+            # (sweep) never buffers: the bar already carries the progress %,
+            # so the text line is simply dropped here.
+            if self._smart_mode and not mirror_live:
                 if tool_name not in self._pending:
                     self._pending[tool_name] = []
                 self._pending[tool_name].append(line)
@@ -846,12 +858,12 @@ class TerminalWidget(ctk.CTkFrame):
             eta   = (eta_m.group(1) + " remaining") if eta_m else ""
             self.after(0, lambda p=pct, e=eta, tn=tool_name:
                       self._update_progress(p, "Masscan", e, tn))
-            if self._smart_mode:
+            if self._smart_mode and not mirror_live:
                 if tool_name not in self._pending:
                     self._pending[tool_name] = []
                 self._pending[tool_name].append(line)
             return
-        if not self._smart_mode:
+        if not self._smart_mode or mirror_live:
             self.after(0, lambda: self._append(line, level))
             return
         if tool_name not in self._pending:

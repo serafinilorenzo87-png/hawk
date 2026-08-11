@@ -204,7 +204,8 @@ class _PromotionBase(_CtkStub, unittest.TestCase):
 
         for name in ("_promote_sweep_host", "_materialize_sweep_session",
                      "_load_sweep_session", "_ask_sweep_promotion_choice",
-                     "_warn_sweep_ip_mismatch", "_close_sweep_graph"):
+                     "_warn_sweep_ip_mismatch", "_close_sweep_graph",
+                     "_mark_sweep_graph_session"):
             setattr(h, name, getattr(TargetBar, name).__get__(h, Host))
         return h
 
