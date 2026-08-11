@@ -12,7 +12,8 @@
 """
 HAWK - API Key Setup Dialog v1.0
 Shown at startup. User enters NVD API key or skips.
-Key saved to .env — never committed to git.
+Key saved to sessions/.apikeys.json (chmod 0600) — never committed to git.
+It can also be changed later from the API KEYS button on the target bar.
 """
 
 import customtkinter as ctk
@@ -112,8 +113,8 @@ class ApiKeyDialog(ctk.CTkToplevel):
                          "With free API key: 50 requests / 30 seconds  ★ recommended\n\n"
                          "Get your free key at:\n"
                          "  nvd.nist.gov/developers/request-an-api-key\n\n"
-                         "Your key is saved locally in .env — "
-                         "never uploaded to GitHub."
+                         "Your key is saved locally in sessions/.apikeys.json "
+                         "(chmod 0600) — never uploaded to GitHub."
                      ),
                      font=_f("md"),
                      text_color=COLORS["text_dim"],
@@ -209,7 +210,8 @@ class ApiKeyDialog(ctk.CTkToplevel):
         ).pack(side="left", padx=8)
 
         ctk.CTkLabel(self,
-                     text="You can change this later in Settings → API Keys",
+                     text="You can change this later via the API KEYS "
+                          "button on the target bar",
                      font=_f("sm"),
                      text_color=COLORS["text_muted"]).pack(pady=4)
 

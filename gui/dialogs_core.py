@@ -1393,6 +1393,16 @@ class ApiKeyManagerDialog:
         existing.update(keys)
         self._save_keys(existing)
         paths = self._write_configs()
+        # NVD is a managed key now (utils.apikeys): push the saved value
+        # into the in-memory CVE client so a change made here takes effect
+        # immediately, without a restart.  `existing` still carries the
+        # stored nvd value even in filtered (per-tool) mode where the
+        # field isn't shown, so this is safe to call unconditionally.
+        try:
+            from utils import cve_lookup
+            cve_lookup.get_client().set_api_key(existing.get("nvd", ""))
+        except Exception:
+            pass
         _safe_destroy(self._win)
         if self._on_save:
             try:

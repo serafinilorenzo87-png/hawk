@@ -330,21 +330,40 @@ _scrub_legacy_key_from_env()
 
 
 def _load_stored_key() -> str:
-    """Always return an empty string.
+    """Return the persisted NVD API key, or "" if none is set.
 
-    The NVD API key is treated as ephemeral session data — entered by
-    the operator at launch, kept in the running process only, gone on
-    close.  Persisting a sensitive token in a plaintext file inside the
-    project directory was the wrong default; this function is kept as a
-    stub so existing call sites (hawk.py, get_client) keep working.
+    NVD is now a managed key like the OSINT providers: it lives in the
+    0600 ``sessions/.apikeys.json`` under the ``nvd`` id (utils.apikeys),
+    so ``get_client()`` picks it up at boot and the operator sets it once
+    instead of re-typing it every launch.  This is a deliberate reversal
+    of the earlier "ephemeral, never on disk" stub: NVD is the least
+    sensitive key HAWK holds — free, read-only, its only effect a higher
+    rate limit (50 vs 5 requests / 30 s) — so keeping it next to the other
+    API keys is the right trade.  (The legacy ``.env`` persistence, which
+    could leak the key into the project folder, is still scrubbed on
+    import; only the storage location moved, to the guarded apikeys file.)
     """
-    return ""
+    try:
+        from utils.apikeys import load_keys
+        return load_keys().get("nvd", "")
+    except Exception:
+        return ""
 
 
 def _save_key(key: str) -> None:
-    """No-op — see _load_stored_key.  The key is held by the in-memory
-    NVDClient via ``set_api_key`` and discarded when the process exits."""
-    return
+    """Persist the NVD key into ``sessions/.apikeys.json`` (utils.apikeys).
+
+    Counterpart of _load_stored_key: an empty key clears the stored one
+    (save_keys drops empty values).  The in-memory NVDClient is updated
+    separately via ``set_api_key`` so a change takes effect without a
+    restart."""
+    try:
+        from utils.apikeys import load_keys, save_keys
+        keys = load_keys()
+        keys["nvd"] = (key or "").strip()
+        save_keys(keys)
+    except Exception:
+        pass
 
 
 # ─── Async search helper ──────────────────────────────────────────────────────

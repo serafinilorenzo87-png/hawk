@@ -183,6 +183,21 @@ class DialogConstructionTests(_TkTestCase):
                               f"{type(exc).__name__}: {exc}")
                 self.root.update_idletasks()
 
+    def test_api_key_manager_all_mode_lists_every_provider(self):
+        """The global API KEYS button opens the manager with NO tool
+        filter — every provider must get a field, including NVD (now a
+        managed key, not a startup-only special case)."""
+        from gui import dialogs_core as dc
+        from utils.apikeys import PROVIDERS
+
+        dlg = dc.ApiKeyManagerDialog(self.root)   # tool=None → all providers
+        self.root.update_idletasks()
+        self.assertEqual(
+            {p[0] for p in PROVIDERS}, set(dlg._entries),
+            "all-mode manager did not surface a field for every provider")
+        self.assertIn("nvd", dlg._entries,
+                      "NVD is not managed by the global API key manager")
+
 
 class TargetCommandDialogTests(_TkTestCase):
     """X1 — the COPY button was built with kwargs `_btn` does not take,

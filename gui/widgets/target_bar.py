@@ -322,6 +322,25 @@ class TargetBar(ctk.CTkFrame):
         self._proxy_btn.pack(side="left", padx=(16, 0))
         self.after(200, self._refresh_proxy_button)
 
+        # Global API-key manager.  This is the settings row (net health,
+        # proxychains) so the keys control belongs here — the only way,
+        # before this, to review or change a key was to edit
+        # sessions/.apikeys.json by hand or wait for an OSINT tool to ask.
+        self._apikeys_btn = ctk.CTkButton(
+            row3,
+            text="🔑  API KEYS",
+            width=130, height=26,
+            font=ctk.CTkFont(family="Courier New", size=12, weight="bold"),
+            fg_color=COLORS["bg_card"],
+            hover_color=COLORS["bg_card_hover"],
+            border_color=COLORS["border_amber"],
+            border_width=1,
+            text_color=COLORS["text_yellow"],
+            corner_radius=3,
+            command=self._open_api_keys_dialog,
+        )
+        self._apikeys_btn.pack(side="left", padx=(16, 0))
+
         cta_frame = ctk.CTkFrame(row3, fg_color="transparent")
         cta_frame.pack(side="right")
         self._build_coming_soon_buttons(cta_frame)
@@ -1954,6 +1973,19 @@ class TargetBar(ctk.CTkFrame):
             try:
                 self.app.terminal.write(
                     f"  [!] Could not open proxychains config dialog: {e}",
+                    "error")
+            except Exception:
+                pass
+
+    def _open_api_keys_dialog(self) -> None:
+        """Open the API-key manager with ALL providers (no tool filter)."""
+        try:
+            from gui.dialogs import ApiKeyManagerDialog
+            ApiKeyManagerDialog(self)
+        except Exception as e:
+            try:
+                self.app.terminal.write(
+                    f"  [!] Could not open API key manager: {e}",
                     "error")
             except Exception:
                 pass

@@ -74,6 +74,15 @@ PROVIDERS = [
      "https://hunter.io/api-keys"),
     ("wpscan",         "WPScan API token",         ["wpscan"],
      "https://wpscan.com/profile"),
+    # NVD is the least sensitive key HAWK holds: free, read-only, and its
+    # only effect is a higher rate limit (50 vs 5 requests / 30 s).  It is
+    # persisted here alongside the OSINT keys — same 0600 sessions/
+    # .apikeys.json — instead of being a session-only special case, so the
+    # operator sets it once and never re-types it.  Consumed internally by
+    # the CVE lookup (utils.cve_lookup), which reads it at boot and when
+    # the operator changes it from the API Key Manager.
+    ("nvd",            "NVD API key",              ["nvd"],
+     "https://nvd.nist.gov/developers/request-an-api-key"),
 ]
 
 
