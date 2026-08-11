@@ -973,7 +973,14 @@ class CardServiceParserMixin:
             anon_try = next((s[0] for s in shares
                              if s[0].lower() not in ("ipc$", "admin$", "c$")), None)
             if anon_try:
-                suggestions.append(f"smbclient //{target}/{anon_try} -N")
+                # Carry the module's legacy-Windows compat flags so a copied
+                # hint also works on 2008 R2 / NT4 instead of failing with
+                # NT_STATUS_RESOURCE_NAME_NOT_FOUND (V3 carry-over; single
+                # source is enumeration.SMBCLIENT_COMPAT_FLAGS).
+                from modules.enumeration import SMBCLIENT_COMPAT_FLAGS
+                compat = SMBCLIENT_COMPAT_FLAGS.format(target=target)
+                suggestions.append(
+                    f"smbclient //{target}/{anon_try} -N {compat}")
         if samba_version and samba_version.startswith("3."):
             suggestions.append(
                 "msfconsole → use exploit/multi/samba/usermap_script  "

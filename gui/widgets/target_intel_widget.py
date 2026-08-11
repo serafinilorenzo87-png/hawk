@@ -1322,20 +1322,6 @@ class TargetIntelWidget(TargetIntelRenderMixin, TargetIntelExploitMixin, TargetI
 
 
 
-    # Hash-aware connect templates — used when the chosen credential is a
-    # hash (no cleartext password available). Only services that support
-    # pass-the-hash are listed here; others fall back to the default template.
-    _CONNECT_CMDS_HASH = {
-        # netexec winrm supports PtH via -H; keeps Connect semantically a
-        # "validate the service" action rather than opening an evil-winrm
-        # shell behind the user's back.  Shell-on-PtH is exposed
-        # explicitly via the shell_hash action.
-        "winrm":   "netexec winrm {host} -u {user} -H {hash}",
-        "smb":          "netexec smb {host} -u {user} -H {hash}",
-        "microsoft-ds": "netexec smb {host} -u {user} -H {hash}",
-        "netbios-ssn":  "netexec smb {host} -u {user} -H {hash}",
-    }
-
     # Services whose protocol REJECTS anonymous/guest/null auth by
     # design.  The Connect dialog and _pick_best_cred both consult
     # this set so anonymous creds from the store (e.g. FTP anonymous)
@@ -1384,31 +1370,6 @@ class TargetIntelWidget(TargetIntelRenderMixin, TargetIntelExploitMixin, TargetI
         "ftp", "ftps", "sftp",
     }
 
-
-    # Anonymous / unauth templates — used when the user chooses "Anonymous".
-    # For services where anonymous is not meaningful (RDP, WinRM) we fall
-    # back to the normal template and surface the missing-cred warning.
-    _CONNECT_CMDS_ANON = {
-        "smb":          "smbclient -L //{host} -N",
-        "microsoft-ds": "smbclient -L //{host} -N",
-        "netbios-ssn":  "smbclient -L //{host} -N",
-        # FTP anonymous: auto-login USER/PASS then drop to an INTERACTIVE
-        # prompt.  We pipe the auth commands into ftp(1) and then `cat`
-        # keeps stdin alive so the user can type `ls`, `get`, `pwd`, …
-        # at the ftp> prompt.  Without this, stock `ftp -n host port`
-        # lands in ftp> un-authenticated and every command bounces with
-        # "530 Please login with USER and PASS."  Also sets passive mode
-        # to avoid "Can't bind for data connection: Address already in
-        # use" from stuck TIME_WAIT sockets on the active port.
-        "ftp":          ("{ printf 'user anonymous anonymous@\\n"
-                         "passive\\n'; cat; } | ftp -nv {host} {port}"),
-        "http":         "curl -I -v http://{host}:{port}/",
-        "https":        "curl -I -vk https://{host}:{port}/",
-        "http-proxy":   "curl -I -v http://{host}:{port}/",
-        "ssl/http":     "curl -I -vk https://{host}:{port}/",
-        "redis":        "redis-cli -h {host} -p {port}",
-        "mongodb":      "mongosh mongodb://{host}:{port}",
-    }
 
     # Services that will NEVER accept anonymous — we require creds.
     _AUTH_REQUIRED = {"winrm", "rdp", "ms-wbt-server",
@@ -1712,7 +1673,10 @@ class TargetIntelWidget(TargetIntelRenderMixin, TargetIntelExploitMixin, TargetI
                         "so the data channel works behind NAT/firewalls.",
                  # Pipe the auth commands into ftp(1) and keep stdin alive
                  # with `cat` so the user can keep typing interactively.
-                 # See _CONNECT_CMDS_ANON comment for the rationale.
+                 # Without it stock `ftp -n host port` lands at ftp>
+                 # unauthenticated and every command bounces with
+                 # "530 Please login with USER and PASS."; passive mode
+                 # avoids the stuck-TIME_WAIT data-connection bind error.
                  "tpl":("{ printf 'user anonymous anonymous@\\n"
                         "passive\\n'; cat; } | ftp -nv {host} {port}"),
                  "mode":"anon", "needs":[]},

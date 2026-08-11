@@ -38,6 +38,18 @@ os.makedirs(SWEEPS_DIR, exist_ok=True)
 # Host count above which we prefer masscan over nmap for Phase 1.
 MASSCAN_THRESHOLD = 1024
 
+# Usable-host count at which a sweep is "large" enough to require an explicit
+# operator confirm + force masscan.  A /16 has exactly this many usable hosts
+# (65536 - network - broadcast), so the comparison is INCLUSIVE: a /16 must
+# trigger the dialog (the old `> 65534` let an exact /16 slip through — #27).
+LARGE_RANGE_CONFIRM_HOSTS = 65534
+
+
+def needs_large_range_confirm(host_count: int) -> bool:
+    """True when a sweep of ``host_count`` hosts is large enough (a /16 or
+    bigger) to warrant the confirm dialog and forced masscan."""
+    return host_count >= LARGE_RANGE_CONFIRM_HOSTS
+
 
 # ─── Interface resolution ────────────────────────────────────────────────────
 

@@ -33,6 +33,35 @@ class CidrHelperTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("number", reason)
 
+
+class LargeRangeGuardrailTests(unittest.TestCase):
+    """#27 — the confirm dialog / forced masscan must cover an EXACT /16.
+
+    A /16 has 65534 usable hosts; the old `> 65534` let it start with no
+    warning.  needs_large_range_confirm uses an inclusive comparison.
+    """
+
+    def test_exact_slash_16_requires_confirm(self):
+        from utils.target_validator import parse_cidr
+        from modules.discovery import needs_large_range_confirm
+        ok, _net, count = parse_cidr("10.0.0.0", "16")
+        self.assertTrue(ok)
+        self.assertEqual(count, 65534)
+        self.assertTrue(needs_large_range_confirm(count),
+                        "an exact /16 must trigger the large-range guardrail")
+
+    def test_slash_17_does_not_require_confirm(self):
+        from utils.target_validator import parse_cidr
+        from modules.discovery import needs_large_range_confirm
+        _ok, _net, count = parse_cidr("10.0.0.0", "17")   # 32766 hosts
+        self.assertFalse(needs_large_range_confirm(count))
+
+    def test_slash_15_requires_confirm(self):
+        from utils.target_validator import parse_cidr
+        from modules.discovery import needs_large_range_confirm
+        _ok, _net, count = parse_cidr("10.0.0.0", "15")   # 131070 hosts
+        self.assertTrue(needs_large_range_confirm(count))
+
     def test_out_of_range_prefix(self):
         from utils.target_validator import parse_cidr
         ok, _, _ = parse_cidr("192.168.1.0", "33")

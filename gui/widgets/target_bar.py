@@ -497,7 +497,7 @@ class TargetBar(ctk.CTkFrame):
         from utils.target_validator import parse_cidr
         from modules.discovery import (
             choose_method, build_phase1_cmd, gnmap_path_for,
-            masscan_list_path_for,
+            masscan_list_path_for, needs_large_range_confirm,
         )
 
         base = self._sweep_base_entry.get().strip()
@@ -509,8 +509,10 @@ class TargetBar(ctk.CTkFrame):
                 "error")
             return
 
-        # Scale warning above /16
-        if count > 65534:
+        # Scale warning at /16 and above.  A /16 has exactly 65534 usable
+        # hosts, so the old `> 65534` let an exact /16 start with no confirm
+        # dialog (off-by-one, #27); needs_large_range_confirm uses >=.
+        if needs_large_range_confirm(count):
             from gui.dialogs import _make_win, _title, _sub, _btn_row, _btn, _safe_destroy
             win = _make_win(self, "Large range warning", 480, 220)
             _title(win, "LARGE RANGE")
@@ -546,7 +548,7 @@ class TargetBar(ctk.CTkFrame):
             "intrusive than single-host probes. Ensure you have "
             "authorization for this range.", "dim")
 
-        force_masscan = count > 65534
+        force_masscan = needs_large_range_confirm(count)
         method = choose_method(cidr, count, force_masscan=force_masscan)
         if method == "arp-scan":
             out_path = None
