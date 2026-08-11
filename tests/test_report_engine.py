@@ -416,6 +416,49 @@ def _col(name):
     return render._CSV_COLUMNS.index(name)
 
 
+# ─── F-06 — operator session notes must reach the report ───────────────────
+
+class SessionNotesInReportTests(unittest.TestCase):
+    """The operator writes free-text notes in the report card; they were
+    captured onto session.notes but never rendered.  They must now land in
+    Markdown and HTML."""
+
+    _NOTE = "Foothold via vsftpd backdoor; pivoted to 10.10.10.20."
+
+    def test_notes_reach_the_markdown_report(self):
+        s = Session("10.10.10.5")
+        s.notes = self._NOTE
+        ctx = ReportContext(s)
+        body = render.render_markdown(ctx, engine.build_sections(ctx))
+        self.assertIn("Session Notes", body)
+        self.assertIn(self._NOTE, body)
+
+    @unittest.skipUnless(_HAS_JINJA2, "jinja2 not installed")
+    def test_notes_reach_the_html_report(self):
+        s = Session("10.10.10.5")
+        s.notes = self._NOTE
+        ctx = ReportContext(s)
+        html = render.render_html(ctx, engine.build_sections(ctx))
+        self.assertIn("Session Notes", html)
+        self.assertIn(self._NOTE, html)
+
+    def test_no_notes_means_no_section(self):
+        s = Session("10.10.10.5")
+        s.notes = "   "                         # blank/whitespace only
+        ctx = ReportContext(s)
+        body = render.render_markdown(ctx, engine.build_sections(ctx))
+        self.assertNotIn("Session Notes", body)
+
+    def test_notes_section_is_omitted_from_csv(self):
+        """CSV is a per-finding dump: a free-text note has no column and
+        must not corrupt the header/row contract."""
+        s = Session("10.10.10.5")
+        s.notes = self._NOTE
+        ctx = ReportContext(s)
+        rows = list(csv.reader(io.StringIO(render.render_csv(ctx))))
+        self.assertEqual(rows[0], render._CSV_COLUMNS)
+
+
 # ─── M15 — one dead format must not kill the others ────────────────────────
 
 class PerFormatDegradationTests(unittest.TestCase):

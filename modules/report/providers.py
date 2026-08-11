@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from modules.report.model import (
     Block, Section, SectionProvider,
-    BLOCK_KEYVALUE, BLOCK_TABLE, BLOCK_FINDINGS, BLOCK_PHASES,
+    BLOCK_KEYVALUE, BLOCK_TABLE, BLOCK_FINDINGS, BLOCK_PHASES, BLOCK_PARAGRAPH,
     SEVERITIES,
 )
 from utils.config import KILL_CHAIN_PHASES
@@ -80,6 +80,36 @@ class ExecutiveSummaryProvider(SectionProvider):
             Block(BLOCK_KEYVALUE, {"rows": rows}),
             Block(BLOCK_TABLE, {"columns": ["Severity", "Count"],
                                 "rows": sev_rows}),
+        ])
+
+
+class SessionNotesProvider(SectionProvider):
+    """Operator's free-text session notes, captured in the report card.
+
+    These are the operator's own words about the engagement; without a
+    provider they were captured onto ``session.notes`` and never rendered
+    (finding F-06).  Rendered as a plain paragraph so it lands in HTML and
+    Markdown through the existing BLOCK_PARAGRAPH path with no render-target
+    change.  CSV is a per-finding flat dump — a single free-text blob has
+    no column there, so it is intentionally omitted from CSV.
+    """
+
+    id = "session_notes"
+    title = "Session Notes"
+
+    @staticmethod
+    def _notes(ctx) -> str:
+        return (getattr(ctx.session, "notes", "") or "").strip()
+
+    def applies(self, ctx) -> bool:
+        return bool(self._notes(ctx))
+
+    def build(self, ctx) -> "Section | None":
+        notes = self._notes(ctx)
+        if not notes:
+            return None
+        return Section(self.id, self.title, [
+            Block(BLOCK_PARAGRAPH, {"text": notes}),
         ])
 
 
@@ -294,6 +324,7 @@ class AttackProvider(SectionProvider):
 # untouched as long as they reuse the Block vocabulary.
 CORE_PROVIDERS = [
     ExecutiveSummaryProvider(),
+    SessionNotesProvider(),
     AttackProvider(),
     TargetIntelProvider(),
     CredentialsProvider(),

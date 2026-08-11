@@ -25,29 +25,67 @@ def _xclip_available() -> bool:
     return shutil.which("xclip") is not None
 
 
-def clipboard_copy(text: str) -> bool:
-    """Copy text to system clipboard via xclip."""
-    if not text:
+def _tk_clipboard_copy(text: str) -> bool:
+    """Fallback copy that owns the clipboard on the ROOT window.
+
+    Tk's clipboard selection is tied to the window that appended it: when
+    that window is a transient Toplevel dialog, closing the dialog drops
+    the selection and the copy is lost (finding F-01).  Binding the copy
+    to `tk._default_root` (the main application window) keeps it alive for
+    the whole session, matching xclip's behaviour when xclip is absent.
+    """
+    root = getattr(tk, "_default_root", None)
+    if root is None:
         return False
     try:
-        subprocess.run(
-            ["xclip", "-selection", "clipboard"],
-            input=text.encode("utf-8"),
-            check=True, timeout=3)
+        root.clipboard_clear()
+        root.clipboard_append(text)
+        # Flush the selection to the X server now so it is available even
+        # while the app is idle.
+        root.update_idletasks()
         return True
     except Exception:
         return False
 
 
+def clipboard_copy(text: str) -> bool:
+    """Copy text to the system clipboard.
+
+    Prefers xclip (survives dialog/app close); falls back to a Tk
+    clipboard owned by the root window so the copy still outlives the
+    dialog it was triggered from.
+    """
+    if not text:
+        return False
+    if _xclip_available():
+        try:
+            subprocess.run(
+                ["xclip", "-selection", "clipboard"],
+                input=text.encode("utf-8"),
+                check=True, timeout=3)
+            return True
+        except Exception:
+            pass
+    return _tk_clipboard_copy(text)
+
+
 def clipboard_paste() -> str:
-    """Paste text from system clipboard via xclip."""
-    try:
-        result = subprocess.run(
-            ["xclip", "-selection", "clipboard", "-o"],
-            capture_output=True, timeout=3)
-        return result.stdout.decode("utf-8", errors="replace")
-    except Exception:
-        return ""
+    """Paste text from the system clipboard (xclip, Tk-root fallback)."""
+    if _xclip_available():
+        try:
+            result = subprocess.run(
+                ["xclip", "-selection", "clipboard", "-o"],
+                capture_output=True, timeout=3)
+            return result.stdout.decode("utf-8", errors="replace")
+        except Exception:
+            pass
+    root = getattr(tk, "_default_root", None)
+    if root is not None:
+        try:
+            return root.clipboard_get()
+        except Exception:
+            pass
+    return ""
 
 
 def get_selected_text(widget) -> str:
@@ -136,8 +174,6 @@ def add_context_menu(widget):
     except Exception:
         readonly = False
 
-    use_xclip = _xclip_available()
-
     menu = tk.Menu(widget, tearoff=0,
                    bg="#1a1a2e", fg="#d0d8e0",
                    activebackground="#00C8C8",
@@ -156,25 +192,12 @@ def add_context_menu(widget):
                     text = widget._textbox.get("1.0", "end-1c")
             except Exception:
                 return
-        if use_xclip:
-            clipboard_copy(text)
-        else:
-            try:
-                widget.clipboard_clear()
-                widget.clipboard_append(text)
-            except Exception:
-                pass
+        clipboard_copy(text)
 
     def _paste():
         if readonly:
             return
-        if use_xclip:
-            text = clipboard_paste()
-        else:
-            try:
-                text = widget.clipboard_get()
-            except Exception:
-                text = ""
+        text = clipboard_paste()
         if text:
             insert_text(widget, text)
 
@@ -183,14 +206,7 @@ def add_context_menu(widget):
             return
         text = get_selected_text(widget)
         if text:
-            if use_xclip:
-                clipboard_copy(text)
-            else:
-                try:
-                    widget.clipboard_clear()
-                    widget.clipboard_append(text)
-                except Exception:
-                    pass
+            clipboard_copy(text)
             delete_selected(widget)
 
     def _select_all():
