@@ -217,14 +217,18 @@ class CredentialStoreWidget(ctk.CTkFrame):
         # identity is in this set are highlighted; cleared on tab view.
         self._new_cred_keys: set = set()
         # ── Active-crack registry ────────────────────────────────────
-        # idx → {"runner": CrackRunner, "strategy": "FAST" | "RULE-BASED"
-        #        | "HYBRID" | "TARGET" | "MASK" | "FULL STACK"}
+        # credential.id → {"runner": CrackRunner, "strategy": "FAST" |
+        #        "RULE-BASED" | "HYBRID" | "TARGET" | "MASK" | "FULL STACK"}
+        # Keyed by the credential's STABLE id, not its list position: a
+        # crack can run for minutes and the operator may delete another
+        # row in the meantime, sliding every index — the id is the only
+        # handle that still points at the credential that started it.
         # Populated by _register_crack() the moment a run starts,
         # drained by _unregister_crack() from the runner's done
         # callback OR by _stop_crack_on_row() when the user clicks the
         # red STOP on the credential row.  The render pipeline swaps
         # the yellow 🔓 CRACK button for a red ⏹ STOP button on any
-        # row whose idx is in this dict.
+        # row whose id is in this dict.
         #
         # HAWK enforces "one crack at a time" (see _has_active_crack)
         # to keep the VM responsive — rationale: running multiple
@@ -250,8 +254,8 @@ class CredentialStoreWidget(ctk.CTkFrame):
     #      another is running pops a non-blocking info dialog telling
     #      the user to stop the first one.
     #
-    #   2. Per-row STOP button — _render_credential_row() checks
-    #      `idx in self._active_cracks` and renders a red ⏹ STOP in
+    #   2. Per-row STOP button — the row builder checks
+    #      `cred.id in self._active_cracks` and renders a red ⏹ STOP in
     #      place of the yellow 🔓 CRACK, wired to _stop_crack_on_row.
     #      This fixes the "CLOSE on the progress dialog orphans the
     #      crack with no way to stop it" trap.
@@ -260,15 +264,21 @@ class CredentialStoreWidget(ctk.CTkFrame):
         """True if any credential row currently owns a running crack."""
         return bool(self._active_cracks)
 
-    def _active_crack_idx(self):
-        """Return the idx of the currently running crack, or None."""
+    def _active_crack_id(self):
+        """Return the credential id of the running crack, or None."""
         if not self._active_cracks:
             return None
         return next(iter(self._active_cracks.keys()))
 
-    def _register_crack(self, idx: int, runner, strategy: str) -> None:
-        """Record an active crack and repaint so the row shows STOP."""
-        self._active_cracks[idx] = {
+    def _register_crack(self, cred_id: str, runner, strategy: str) -> None:
+        """Record an active crack and repaint so the row shows STOP.
+
+        Keyed by the credential's stable id, not its list position: the
+        crack outlives the row it was launched from (the user can delete
+        another credential and shift every index while hashcat chews),
+        and STOP / done must still find the exact credential that started
+        it."""
+        self._active_cracks[cred_id] = {
             "runner":   runner,
             "strategy": strategy,
         }
@@ -277,30 +287,30 @@ class CredentialStoreWidget(ctk.CTkFrame):
         except Exception:
             pass
 
-    def _unregister_crack(self, idx: int) -> None:
+    def _unregister_crack(self, cred_id: str) -> None:
         """Clear the active-crack slot and repaint.  Safe to call more
         than once (idempotent) — the done_callback and the STOP button
         can race and both end up here."""
-        self._active_cracks.pop(idx, None)
+        self._active_cracks.pop(cred_id, None)
         try:
             self.refresh()
         except Exception:
             pass
 
-    def _stop_crack_on_row(self, idx: int) -> None:
+    def _stop_crack_on_row(self, cred_id: str) -> None:
         """User clicked ⏹ STOP on a row.  Kill the subprocess; the
         done_callback will fire shortly (SIGTERM → 2s → SIGKILL) and
         trigger _unregister_crack().  We ALSO unregister right away so
         the UI feels responsive — re-registering a moment later is
         harmless because the done_callback's unregister is idempotent."""
-        entry = self._active_cracks.get(idx)
+        entry = self._active_cracks.get(cred_id)
         if not entry:
             return
         runner = entry.get("runner")
         strategy = entry.get("strategy", "?")
         try:
             self.app.terminal.write(
-                f"  [*] Stopping {strategy} crack on idx={idx}...",
+                f"  [*] Stopping {strategy} crack...",
                 "warn")
         except Exception:
             pass
@@ -311,7 +321,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
                 print(f"[HAWK] runner.kill() failed: {e}")
         # Eager unregister — better UX than waiting ~2 s for SIGKILL
         # escalation to close the loop through done_callback.
-        self._unregister_crack(idx)
+        self._unregister_crack(cred_id)
 
     def stop_all_active_cracks(self) -> None:
         """Teardown hook — called from app._on_close.  Kills every
@@ -320,8 +330,8 @@ class CredentialStoreWidget(ctk.CTkFrame):
         if not self._active_cracks:
             return
         # Copy the keys first because _unregister_crack mutates the dict.
-        for idx in list(self._active_cracks.keys()):
-            entry = self._active_cracks.get(idx)
+        for cred_id in list(self._active_cracks.keys()):
+            entry = self._active_cracks.get(cred_id)
             if not entry:
                 continue
             runner = entry.get("runner")
@@ -337,11 +347,11 @@ class CredentialStoreWidget(ctk.CTkFrame):
         a second credential while one is already running."""
         from gui.dialogs import (_make_win, _title, _sub, _note_box,
                                    _btn_row, _btn, _safe_destroy)
-        active_idx = self._active_crack_idx()
+        active_id = self._active_crack_id()
         active_strategy = "?"
-        if active_idx is not None:
+        if active_id is not None:
             active_strategy = (
-                self._active_cracks.get(active_idx, {})
+                self._active_cracks.get(active_id, {})
                 .get("strategy", "?"))
         win = _make_win(self, "One crack at a time", 560, 320)
         _title(win, "⚠  One crack at a time")
@@ -351,8 +361,8 @@ class CredentialStoreWidget(ctk.CTkFrame):
               COLORS["text_dim"])
         _note_box(
             win,
-            f"A {active_strategy} crack is already running on "
-            f"credential idx={active_idx}.\n\n"
+            f"A {active_strategy} crack is already running on another "
+            f"credential.\n\n"
             "Running one crack at a time lets the app and the VM's "
             "hardware work at their best — parallel cracks peg every "
             "core and starve the UI thread.\n\n"
@@ -912,7 +922,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
             fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
             border_color=COLORS["border_dim"], border_width=1,
             text_color=COLORS["text_dim"], corner_radius=2,
-            command=lambda c=cred, i=idx: self._edit_credential(c, i)
+            command=lambda c=cred: self._edit_credential(c)
             ).pack(side="left", padx=2)
 
         # Delete button
@@ -921,7 +931,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
             fg_color=COLORS["bg_card"], hover_color="#2A0A0A",
             border_color=COLORS["text_red"], border_width=1,
             text_color=COLORS["text_red"], corner_radius=2,
-            command=lambda i=idx: self._delete_credential(i)
+            command=lambda c=cred: self._delete_credential(c)
             ).pack(side="left", padx=2)
 
         # SHOW RESULTS button — only for hash creds that have been cracked.
@@ -1081,7 +1091,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
             # a glance what's going on — useful when the progress
             # dialog has been closed and the crack is still chewing in
             # the background.
-            active = self._active_cracks.get(idx)
+            active = self._active_cracks.get(getattr(cred, "id", None))
             if active:
                 # Badge column (uses an existing empty cell to the left
                 # of the button — grid column 2.5 effectively).  Packed
@@ -1104,7 +1114,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
                     hover_color=COLORS["bg_card_hover"],
                     border_color=COLORS["text_red"], border_width=1,
                     text_color=COLORS["text_red"], corner_radius=2,
-                    command=lambda i=idx: self._stop_crack_on_row(i),
+                    command=lambda cid=cred.id: self._stop_crack_on_row(cid),
                 ).pack(side="left")
             else:
                 ctk.CTkButton(parent, text="🔓 CRACK",
@@ -1112,12 +1122,12 @@ class CredentialStoreWidget(ctk.CTkFrame):
                     fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
                     border_color=COLORS["text_yellow"], border_width=1,
                     text_color=COLORS["text_yellow"], corner_radius=2,
-                    command=lambda c=cred, i=idx: self._show_crack_dialog(c, i)
+                    command=lambda c=cred: self._show_crack_dialog(c)
                     ).grid(row=0, column=3, padx=(4,8), pady=4)
 
     # ─── Edit / Delete ────────────────────────────────────────────────────────
 
-    def _edit_credential(self, cred, idx):
+    def _edit_credential(self, cred):
         """Edit an existing credential — username, password/hash, services."""
         from gui.dialogs import _make_win, _safe_destroy, _btn_row, _btn
         is_hash = (cred.cred_type == "hash")
@@ -1192,9 +1202,12 @@ class CredentialStoreWidget(ctk.CTkFrame):
             # and save() re-serialised the untouched dicts: the dialog
             # said "Credential updated" and nothing changed.  Same class
             # as the DELETE bug documented in Session.delete_credential.
-            ok = 0 <= idx < len(sess.credentials)
+            # Address by stable id, not index: another row could have been
+            # deleted while this edit dialog sat open, sliding every
+            # position — an index would then rewrite the wrong credential.
+            entry = sess.get_credential_by_id(cred.id)
+            ok = entry is not None
             if ok:
-                entry = sess.credentials[idx]
                 entry["username"] = fields["user"].get().strip()
                 entry["services"] = [
                     s.strip() for s in fields["svc"].get().split(",")
@@ -1213,14 +1226,14 @@ class CredentialStoreWidget(ctk.CTkFrame):
                                         "success")
             else:
                 self.app.terminal.write(
-                    f"  [!] Edit failed: index {idx} out of range.",
+                    "  [!] Edit failed: credential no longer exists.",
                     "warn")
 
         r = _btn_row(win)
         _btn(r, "SAVE", _save, primary=True)
         _btn(r, "CANCEL", lambda: _safe_destroy(win))
 
-    def _delete_credential(self, idx):
+    def _delete_credential(self, cred):
         """Delete a credential after confirmation."""
         from gui.dialogs import _make_win, _safe_destroy, _btn_row, _btn
         win = _make_win(self, "Delete Credential", 420, 200)
@@ -1238,7 +1251,10 @@ class CredentialStoreWidget(ctk.CTkFrame):
             # Must mutate sess.credentials directly — get_credentials()
             # returns a fresh list of reconstructed Credential objects,
             # so deleting from that list never reaches the session.
-            ok = sess.delete_credential(idx)
+            # Address by stable id: if a background crack just finished
+            # and repainted the list, the row's old index could now point
+            # at a different credential.
+            ok = sess.delete_credential_by_id(cred.id)
             if ok:
                 sess.save()
             _safe_destroy(win)
@@ -1248,7 +1264,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
                     "  [*] Credential deleted.", "dim")
             else:
                 self.app.terminal.write(
-                    f"  [!] Delete failed: index {idx} out of range.",
+                    "  [!] Delete failed: credential no longer exists.",
                     "warn")
 
         r = _btn_row(win)
@@ -1342,16 +1358,19 @@ class CredentialStoreWidget(ctk.CTkFrame):
                 sess = self.app.session_manager.current
                 try:
                     if sess:
-                        for i, cd in enumerate(sess.credentials):
-                            if (cd.get("hash_val") == raw_hv
-                                    and not (cd.get("username") or "").strip()):
-                                sess.credentials[i]["username"]  = parsed_u
-                                sess.credentials[i]["hash_val"]  = parsed_h
-                                if parsed_ht and parsed_ht != "Unknown":
-                                    sess.credentials[i]["hash_type"] = parsed_ht
-                                sess._touch()
-                                sess.save()
-                                break
+                        # Address THIS credential by its stable id instead
+                        # of scanning by hash_val — two orphan creds could
+                        # share the same hash_val and the scan would heal
+                        # whichever came first, not the one clicked.
+                        cd = sess.get_credential_by_id(cred.id)
+                        if (cd is not None
+                                and not (cd.get("username") or "").strip()):
+                            cd["username"]  = parsed_u
+                            cd["hash_val"]  = parsed_h
+                            if parsed_ht and parsed_ht != "Unknown":
+                                cd["hash_type"] = parsed_ht
+                            sess._touch()
+                            sess.save()
                 except Exception as e:
                     print(f"[hawk] heal in _show_cracked_result failed: {e}")
                 cred.username  = parsed_u
@@ -2235,15 +2254,15 @@ class CredentialStoreWidget(ctk.CTkFrame):
 
     # ─── Crack dialog ─────────────────────────────────────────────────────────
 
-    def _show_crack_dialog(self, cred, idx):
+    def _show_crack_dialog(self, cred):
         from gui.dialogs import _make_win, _safe_destroy, _btn_row, _btn, _note_box
         from utils.runner import _open_terminal
 
         # Gate: HAWK enforces one crack at a time (see _active_cracks
-        # docstring).  If the current idx is already cracking, the row
+        # docstring).  If THIS credential is already cracking, the row
         # shows STOP instead of CRACK so we shouldn't get here; but if
-        # ANOTHER idx is cracking, refuse and tell the user why.
-        if self._has_active_crack() and idx not in self._active_cracks:
+        # ANOTHER credential is cracking, refuse and tell the user why.
+        if self._has_active_crack() and cred.id not in self._active_cracks:
             self._show_one_at_a_time_notice()
             return
 
@@ -2261,11 +2280,11 @@ class CredentialStoreWidget(ctk.CTkFrame):
             # username. Otherwise leave it alone.
             if (parsed_h != raw_hash) or not (cred.username or "").strip():
                 sess = self.app.session_manager.current
-                if sess and 0 <= idx < len(sess.credentials):
-                    sess.credentials[idx]["username"]  = (
-                        cred.username or parsed_u)
-                    sess.credentials[idx]["hash_val"]  = parsed_h
-                    sess.credentials[idx]["hash_type"] = parsed_ht
+                cd = sess.get_credential_by_id(cred.id) if sess else None
+                if cd is not None:
+                    cd["username"]  = cred.username or parsed_u
+                    cd["hash_val"]  = parsed_h
+                    cd["hash_type"] = parsed_ht
                     try:
                         sess._touch()
                         sess.save()
@@ -2306,7 +2325,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
             if strategy == "CRACK ONLINE":
                 def _api_chosen(service_id):
                     self._start_online_api_crack(
-                        cred, idx, hash_for_crack, ht, service_id)
+                        cred, hash_for_crack, ht, service_id)
                 def _browser_chosen(service_id):
                     self._start_online_browser_crack(
                         hash_for_crack, service_id)
@@ -2319,7 +2338,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
             if strategy == "TARGET":
                 def _dict_built(dict_path, n_lines):
                     self._start_local_crack(
-                        cred, idx, hash_for_crack, ht,
+                        cred, hash_for_crack, ht,
                         "TARGET", dict_path=dict_path)
                 show_target_profile_dialog(
                     self, self.app, cred,
@@ -2328,18 +2347,21 @@ class CredentialStoreWidget(ctk.CTkFrame):
 
             if strategy == "MASK":
                 self._prompt_mask_and_run(
-                    cred, idx, hash_for_crack, ht)
+                    cred, hash_for_crack, ht)
                 return
 
             # FAST / RULE-BASED / HYBRID / FULL STACK → run now.
             self._start_local_crack(
-                cred, idx, hash_for_crack, ht, strategy)
+                cred, hash_for_crack, ht, strategy)
 
+        # cred_idx here is an opaque passthrough the dialog only echoes
+        # back; the credential is now tracked by its stable id, so hand
+        # that over instead of a fragile list position.
         show_crack_strategy_dialog(
-            self, self.app, cred, idx, _on_strategy)
+            self, self.app, cred, cred.id, _on_strategy)
 
     # ─── Strategy launchers (one per family) ──────────────────────────
-    def _start_local_crack(self, cred, idx, hash_str, hash_type,
+    def _start_local_crack(self, cred, hash_str, hash_type,
                             strategy, dict_path=None):
         """FAST / RULE-BASED / HYBRID / TARGET / FULL STACK go through
         CrackRunner.  Opens the progress dialog, streams output, updates
@@ -2365,14 +2387,16 @@ class CredentialStoreWidget(ctk.CTkFrame):
         def _on_done(strategy_name, rc, cracked):
             # Registry cleanup — always, regardless of outcome.  Must
             # happen BEFORE refresh() so the row paints back to CRACK.
-            self._unregister_crack(idx)
+            self._unregister_crack(cred.id)
             if cracked:
-                # Persist via session.mark_cracked — this is what the
-                # existing UI listens for.
+                # Persist via session.mark_cracked_by_id — addresses the
+                # credential by its stable id, so a delete that shifted
+                # the list mid-crack can't misfile the result onto a
+                # different row (and a False return means it was deleted).
                 try:
                     sess = self.app.session_manager.current
                     if sess is not None:
-                        sess.mark_cracked(idx, cracked)
+                        sess.mark_cracked_by_id(cred.id, cracked)
                 except Exception as e:
                     print(f"[hawk] mark_cracked failed: {e}")
                 cred.cracked = True
@@ -2402,7 +2426,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
         # Register BEFORE dispatching the run: the runner spawns its
         # subprocess from a worker thread, so by the time it returns
         # the row should already be showing STOP.
-        self._register_crack(idx, runner, strategy)
+        self._register_crack(cred.id, runner, strategy)
 
         # Dispatch to the right runner method.
         if strategy == "FAST":
@@ -2421,9 +2445,9 @@ class CredentialStoreWidget(ctk.CTkFrame):
                 f"  [!] Unknown strategy: {strategy}", "error")
             # Unknown strategy path never spawned — clear the
             # registration we just set.
-            self._unregister_crack(idx)
+            self._unregister_crack(cred.id)
 
-    def _prompt_mask_and_run(self, cred, idx, hash_str, hash_type):
+    def _prompt_mask_and_run(self, cred, hash_str, hash_type):
         """Small pop-up asking for the mask string, then runs the
         MASK strategy."""
         from gui.dialogs import (_make_win, _title, _sub, _note_box,
@@ -2488,12 +2512,12 @@ class CredentialStoreWidget(ctk.CTkFrame):
 
             def _on_done(strategy_name, rc, cracked):
                 # Always clear the active-crack registry first.
-                self._unregister_crack(idx)
+                self._unregister_crack(cred.id)
                 if cracked:
                     try:
                         sess = self.app.session_manager.current
                         if sess is not None:
-                            sess.mark_cracked(idx, cracked)
+                            sess.mark_cracked_by_id(cred.id, cracked)
                     except Exception as e:
                         print(f"[hawk] mark_cracked failed: {e}")
                     cred.cracked = True
@@ -2521,14 +2545,14 @@ class CredentialStoreWidget(ctk.CTkFrame):
             # Register BEFORE starting — same rationale as in
             # _start_local_crack: thread spawns fast and the row needs
             # to show STOP by the time the user's eyes return to it.
-            self._register_crack(idx, runner, "MASK")
+            self._register_crack(cred.id, runner, "MASK")
             runner.run_mask(hash_str, hash_type, mask)
 
         row = _btn_row(win)
         _btn(row, "RUN MASK", _go, primary=True, w=140)
         _btn(row, "CANCEL", lambda: _safe_destroy(win), w=120)
 
-    def _start_online_api_crack(self, cred, idx, hash_str,
+    def _start_online_api_crack(self, cred, hash_str,
                                   hash_type, service_id):
         """API-based online crack (hashes.com today).  Looks up the
         key, prompts lazily if missing, fires a HashesComJob."""
@@ -2568,7 +2592,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
                 try:
                     sess = self.app.session_manager.current
                     if sess is not None:
-                        sess.mark_cracked(idx, cracked)
+                        sess.mark_cracked_by_id(cred.id, cracked)
                 except Exception as e:
                     print(f"[hawk] mark_cracked failed: {e}")
                 cred.cracked = True
@@ -2616,8 +2640,12 @@ class CredentialStoreWidget(ctk.CTkFrame):
                 f"{svc.get('name', service_id)}. "
                 f"Open manually: {svc.get('url', '')}", "warn")
 
-    def _poll_crack_result(self, result_file, tool, cred_idx, username):
-        """Poll for cracked password from john/hashcat --show output file."""
+    def _poll_crack_result(self, result_file, tool, cred_id, username):
+        """Poll for cracked password from john/hashcat --show output file.
+
+        `cred_id` is the credential's stable id — held for up to 10
+        minutes while the crack runs, so it must survive an unrelated
+        delete that would slide any list position out from under us."""
         import threading
 
         def _check():
@@ -2705,34 +2733,40 @@ class CredentialStoreWidget(ctk.CTkFrame):
                     def _update():
                         sess = self.app.session_manager.current
                         if sess:
-                            sess.mark_cracked(cred_idx, cracked_pass)
+                            sess.mark_cracked_by_id(cred_id, cracked_pass)
                             # Pair username too, whenever john gave us one and
                             # the credential didn't already have one set.
                             try:
-                                cd = sess.credentials[cred_idx]
-                                if (cracked_user
-                                        and not (cd.get("username") or "").strip()):
-                                    cd["username"] = cracked_user
-                                    sess._touch()
-                                # Also strip any pwdump prefix still stuck in
-                                # hash_val — keeps later re-cracks from choking.
-                                hv = cd.get("hash_val") or ""
-                                p_u, p_h, p_ht = split_username_hash(hv)
-                                if p_u and p_h and p_h != hv:
-                                    cd["hash_val"] = p_h
-                                    if (p_ht and p_ht != "Unknown"
-                                            and not cd.get("hash_type")):
-                                        cd["hash_type"] = p_ht
-                                    if not (cd.get("username") or "").strip():
-                                        cd["username"] = p_u
-                                    sess._touch()
+                                # Deleted mid-crack → get_credential_by_id
+                                # returns None; skip the pairing rather than
+                                # touch whatever now sits at an old index.
+                                cd = sess.get_credential_by_id(cred_id)
+                                if cd is not None:
+                                    if (cracked_user
+                                            and not (cd.get("username") or "").strip()):
+                                        cd["username"] = cracked_user
+                                        sess._touch()
+                                    # Also strip any pwdump prefix still stuck in
+                                    # hash_val — keeps later re-cracks from choking.
+                                    hv = cd.get("hash_val") or ""
+                                    p_u, p_h, p_ht = split_username_hash(hv)
+                                    if p_u and p_h and p_h != hv:
+                                        cd["hash_val"] = p_h
+                                        if (p_ht and p_ht != "Unknown"
+                                                and not cd.get("hash_type")):
+                                            cd["hash_type"] = p_ht
+                                        if not (cd.get("username") or "").strip():
+                                            cd["username"] = p_u
+                                        sess._touch()
                             except Exception as e:
                                 print(f"[hawk] username pair after crack failed: {e}")
                             sess.save()
                         self.refresh()
+                        cd_final = (sess.get_credential_by_id(cred_id)
+                                    if sess else None)
                         final_user = (cracked_user
-                                      or (sess.credentials[cred_idx].get("username")
-                                          if sess else "")
+                                      or (cd_final.get("username")
+                                          if cd_final else "")
                                       or username or "?")
                         self.app.terminal.write(
                             f"  [+] CRACKED! {final_user} → {cracked_pass}",

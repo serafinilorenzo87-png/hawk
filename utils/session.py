@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import uuid
 from datetime import datetime
 from utils.config import SESSIONS_DIR, is_within_base, require_within_base
 
@@ -152,7 +153,16 @@ class Credential:
                  services: list = None, source_phase: str = "",
                  hash_type: str = "", host: str = "", notes: str = "",
                  linked_run_id: str = "", category: str = "",
-                 verified: bool = False):
+                 verified: bool = False, id: str = ""):
+        # Stable per-credential handle.  Callers (edit / delete /
+        # mark_cracked / a crack poll that runs for minutes) address a
+        # credential by this id instead of by its POSITION in
+        # session.credentials[], so a concurrent delete that shifts the
+        # list can no longer make them touch the wrong entry.  Left as a
+        # plain default the way every other field is: an empty id means
+        # "mint a fresh one", so no existing construction site has to
+        # pass it and the verified-kwarg AST guard is untouched.
+        self.id           = id or uuid.uuid4().hex[:12]
         self.username     = username
         self.password     = password
         self.hash_val     = hash_val
@@ -189,6 +199,7 @@ class Credential:
 
     def to_dict(self) -> dict:
         return {
+            "id":            self.id,
             "username":      self.username,
             "password":      self.password,
             "hash_val":      self.hash_val,
@@ -209,6 +220,13 @@ class Credential:
     @classmethod
     def from_dict(cls, d: dict) -> "Credential":
         c = cls(
+            # Retrocompat: sessions written before the id field carry no
+            # "id" key.  An empty string here makes __init__ mint a fresh
+            # one so the object always has a usable handle; the stored
+            # dict is backfilled separately (Session._ensure_credential_ids)
+            # so the id a caller reads off this view matches what is on
+            # disk after the next save.
+            id=d.get("id", ""),
             username=d.get("username", ""),
             password=d.get("password", ""),
             hash_val=d.get("hash_val", ""),
@@ -722,6 +740,69 @@ class Session:
     def get_credentials(self) -> list:
         return [Credential.from_dict(d) for d in self.credentials]
 
+    # ── stable-id addressing (M5) ────────────────────────────────────
+    #
+    # The index-based mark_cracked / delete_credential below still exist
+    # for synchronous callers (and the test-suite), but any code that
+    # holds a handle to a credential ACROSS a point where the list can
+    # change — an edit dialog left open, a delete on another row, a
+    # john/hashcat crack that polls for minutes — must address it by id,
+    # not by position.  These helpers are that path.
+
+    def _index_of_credential(self, cred_id: str) -> int:
+        """Return the position of the credential with this id, or -1."""
+        if not cred_id:
+            return -1
+        for i, d in enumerate(self.credentials):
+            if d.get("id") == cred_id:
+                return i
+        return -1
+
+    def _ensure_credential_ids(self) -> None:
+        """Backfill a stable id onto any credential dict that predates
+        the id field (sessions written before M5).
+
+        In-memory only: this adds the key to the loaded dicts so id-based
+        lookup works for the rest of the session, but it does NOT write
+        to disk — no mass rewrite is forced at load time.  The backfilled
+        id rides along on the next ordinary save().
+        """
+        for d in self.credentials:
+            if isinstance(d, dict) and not d.get("id"):
+                d["id"] = uuid.uuid4().hex[:12]
+
+    def get_credential_by_id(self, cred_id: str) -> dict:
+        """Return the stored credential dict for this id, or None."""
+        i = self._index_of_credential(cred_id)
+        return self.credentials[i] if i >= 0 else None
+
+    def mark_cracked_by_id(self, cred_id: str, plaintext: str) -> bool:
+        """Stable-id twin of mark_cracked().  Returns False if the
+        credential no longer exists (e.g. deleted while a crack ran),
+        so the caller never blindly writes onto whatever now sits at an
+        old index."""
+        i = self._index_of_credential(cred_id)
+        if i < 0:
+            return False
+        self.credentials[i]["cracked"]      = True
+        self.credentials[i]["cracked_pass"] = plaintext
+        self._touch()
+        try:
+            self.save()
+        except Exception as e:
+            print(f"[HAWK] session save after mark_cracked: {e}")
+        return True
+
+    def delete_credential_by_id(self, cred_id: str) -> bool:
+        """Stable-id twin of delete_credential().  Returns True if a
+        credential was removed, False if the id is unknown."""
+        i = self._index_of_credential(cred_id)
+        if i < 0:
+            return False
+        del self.credentials[i]
+        self._touch()
+        return True
+
     def mark_cracked(self, idx: int, plaintext: str):
         """Record a cracked plaintext AND persist it.
 
@@ -1034,6 +1115,10 @@ class Session:
         self.tags           = data.get("tags", [])
         self.phases         = data.get("phases", self.phases)
         self.credentials       = data.get("credentials", [])
+        # Backfill stable ids onto legacy credential dicts (M5).  In
+        # memory only — see _ensure_credential_ids: a load must never
+        # trigger a mass rewrite of an old session file.
+        self._ensure_credential_ids()
         self.defense_alerts    = data.get("defense_alerts", [])
         self.discovered_users  = data.get("discovered_users", [])
         self.discovered_shares = data.get("discovered_shares", [])

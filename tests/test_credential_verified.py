@@ -399,6 +399,136 @@ class UnverifiedPushTests(unittest.TestCase):
             self.assertEqual("Password1", reloaded.cracked_pass)
 
 
+class CredentialStableIdTests(unittest.TestCase):
+    """M5: credentials are addressed by a stable id, not by their
+    position in session.credentials[].  Edit / delete / mark_cracked and
+    a crack poll that runs for minutes all hold this id, so a concurrent
+    delete that shifts the list can never make them touch the wrong
+    entry.  Old session files (written before the id field) must still
+    load, get ids minted in memory, and not be rewritten just by loading.
+    """
+
+    @contextmanager
+    def _temp_session(self):
+        from utils.session import Session
+        with tempfile.TemporaryDirectory() as d:
+            with patch("utils.session.is_within_base", return_value=True), \
+                 patch("utils.config.is_within_base", return_value=True):
+                sess = Session("10.0.0.9")
+                sess.file_path = os.path.join(d, "sess.json")
+                yield sess
+
+    def test_new_credential_has_a_nonempty_id(self):
+        from utils.session import Credential
+        c = Credential(username="u", password="p", verified=False)
+        self.assertTrue(c.id, "a fresh credential must get an id")
+        # Two creds are distinct handles.
+        d = Credential(username="u", password="p", verified=False)
+        self.assertNotEqual(c.id, d.id)
+
+    def test_id_survives_roundtrip(self):
+        from utils.session import Credential
+        c = Credential(username="u", password="p", verified=False)
+        self.assertEqual(c.id, Credential.from_dict(c.to_dict()).id)
+
+    def test_load_backfills_ids_without_rewriting_disk(self):
+        """A session written before the id field: loading it must mint
+        ids in memory but leave the file on disk byte-for-byte unchanged
+        (no forced mass rewrite at load)."""
+        import hashlib
+        from utils.session import Session
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "old.json")
+            legacy = {
+                "target_ip": "10.0.0.9",
+                "credentials": [
+                    {"username": "alice", "password": "p1",
+                     "cred_type": "cleartext", "verified": True},
+                    {"username": "bob", "password": "p2",
+                     "cred_type": "cleartext", "verified": True},
+                ],
+            }
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(legacy, fh, indent=2)
+            before = hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+            sess = Session("10.0.0.9")
+            self.assertTrue(sess.load(path))
+            self.assertTrue(all(c.get("id") for c in sess.credentials),
+                            "load did not backfill ids in memory")
+            self.assertEqual(2, len({c["id"] for c in sess.credentials}),
+                             "backfilled ids must be unique")
+
+            after = hashlib.sha256(open(path, "rb").read()).hexdigest()
+            self.assertEqual(before, after,
+                             "loading an old session rewrote it on disk")
+            on_disk = json.load(open(path, encoding="utf-8"))
+            self.assertNotIn("id", on_disk["credentials"][0],
+                             "load must not persist the minted id by itself")
+
+    def test_backfilled_id_persists_on_next_save(self):
+        from utils.session import Session
+        with self._temp_session() as sess:
+            legacy_path = sess.file_path
+            with open(legacy_path, "w", encoding="utf-8") as fh:
+                json.dump({"target_ip": "10.0.0.9",
+                           "credentials": [
+                               {"username": "carol", "password": "p",
+                                "cred_type": "cleartext",
+                                "verified": True}]}, fh)
+            sess.load(legacy_path)
+            minted = sess.credentials[0]["id"]
+            sess.save()
+            stored = json.load(open(sess.file_path, encoding="utf-8"))
+            self.assertEqual(minted, stored["credentials"][0]["id"],
+                             "the minted id did not ride along on save")
+
+    def test_delete_by_id_keeps_other_handle_valid(self):
+        """Delete the first credential; a handle to the second must still
+        resolve to the SAME credential even though its index shifted."""
+        from utils.session import Credential
+        with self._temp_session() as sess:
+            sess.add_credential(Credential(
+                username="alice", password="p1", verified=False))
+            sess.add_credential(Credential(
+                username="bob", password="p2", verified=False))
+            bob_id = sess.credentials[1]["id"]
+            self.assertEqual(1, sess._index_of_credential(bob_id))
+
+            self.assertTrue(
+                sess.delete_credential_by_id(sess.credentials[0]["id"]))
+            # Same id, new position, still bob.
+            self.assertEqual(0, sess._index_of_credential(bob_id))
+            self.assertEqual("bob",
+                             sess.get_credential_by_id(bob_id)["username"])
+
+    def test_mark_cracked_by_id_across_a_delete_hits_the_right_row(self):
+        """A crack that started on bob and finishes AFTER alice was
+        deleted must update bob — and a crack whose credential was itself
+        deleted must no-op, never a bystander."""
+        from utils.session import Credential
+        with self._temp_session() as sess:
+            sess.add_credential(Credential(
+                username="alice", password="p1", verified=False))
+            sess.add_credential(Credential(
+                username="bob", hash_val="b" * 32, hash_type="NTLM",
+                cred_type="hash", verified=False))
+            alice_id = sess.credentials[0]["id"]
+            bob_id = sess.credentials[1]["id"]
+
+            # alice deleted mid-crack; bob slides from idx 1 to idx 0.
+            sess.delete_credential_by_id(alice_id)
+            self.assertTrue(sess.mark_cracked_by_id(bob_id, "Pwned1"))
+            self.assertEqual("Pwned1",
+                             sess.get_credential_by_id(bob_id)["cracked_pass"])
+
+            # A crack whose own credential is gone must not touch anyone.
+            self.assertFalse(sess.mark_cracked_by_id(alice_id, "ghost"))
+            self.assertNotEqual(
+                "ghost",
+                sess.get_credential_by_id(bob_id).get("cracked_pass"))
+
+
 class _FakeStore:
     def __init__(self):
         self.refreshed = 0
