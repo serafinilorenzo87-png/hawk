@@ -886,10 +886,13 @@ class TargetBar(ctk.CTkFrame):
         _safe_destroy(win)
 
     def _promote_sweep_host(self, ip):
-        """Click on a graph node → set as active target, lazy session."""
-        from modules.discovery import set_session_ref, update_inventory
-        from utils.session import Session
+        """Click on a graph node → set as active target, lazy session (§3).
 
+        First selection of a host MATERIALISES its session and records the
+        `session_ref` in the inventory; a host already worked on
+        (`session_ref` set) LOADS the recorded session instead of creating
+        a second one.
+        """
         inv = self._sweep_inventory
         if not inv:
             return
@@ -898,34 +901,27 @@ class TargetBar(ctk.CTkFrame):
                      if h.get("ip") == ip), None)
         ref = (host or {}).get("session_ref")
 
-        # Host already worked on → hand the session to the same restore
-        # path the LOAD dialog uses.  Repointing session_manager.current
-        # on its own is what corrupted data: the panels still held the
-        # PREVIOUS host's state and the next autosave tick wrote it over
-        # this host's file.
         if ref:
-            sid = ref.get("session_id", "")
-            fpath = ref.get("file", "")
-            self.app.terminal.write(
-                f"[*] Loading existing session for {ip} ({sid[:8]})", "info")
-            try:
-                sess = Session(ip, sid)
-                if not (fpath and sess.load(fpath)):
-                    self.app.terminal.write(
-                        f"[!] Session file not found: {fpath}", "error")
-                    return
-                self.apply_session(sess)
-            except Exception as e:
-                self.app.terminal.write(
-                    f"[!] Could not load session: {e}", "error")
-                return
-            self._close_sweep_graph()
+            self._load_sweep_session(ip, host, ref)
+        else:
+            self._materialize_sweep_session(ip, host)
+
+    def _materialize_sweep_session(self, ip, host):
+        """First promotion of a swept host → create its session and record
+        the resulting `session_ref` in the inventory (§3 lazy model), so
+        the next click LOADS instead of creating a second session.
+
+        `_new_session()` owns the full reset (panels, domain field,
+        kill-chain statuses, vhost button); duplicating a subset of it
+        here is what left the previous host's findings on screen under the
+        new target.
+        """
+        from modules.discovery import set_session_ref, update_inventory
+
+        inv = self._sweep_inventory
+        if not inv:
             return
 
-        # First selection → brand-new session.  _new_session() owns the
-        # full reset (panels, domain field, kill-chain statuses, vhost
-        # button); duplicating a subset of it here is what left the
-        # previous host's findings on screen under the new target.
         self._ip_entry.delete(0, "end")
         self._ip_entry.insert(0, ip)
 
@@ -941,12 +937,48 @@ class TargetBar(ctk.CTkFrame):
 
         set_session_ref(inv, ip, session.session_id,
                         getattr(session, "file_path", ""))
+        # Persist the IP→session index.  A failed write must not crash the
+        # promotion or cost the operator the target: mirror the sweep's own
+        # error path — keep the ref in memory and say so at the terminal.
         if self._sweep_inventory_path:
-            update_inventory(inv, self._sweep_inventory_path)
+            try:
+                update_inventory(inv, self._sweep_inventory_path)
+            except OSError as e:
+                self.app.terminal.write(
+                    f"[!] Inventory NOT updated ({e}) — session_ref for "
+                    f"{ip} kept in memory only, lost when HAWK closes.",
+                    "error")
 
         self.app.terminal.write(
             f"[+] Target promoted: {ip} (session {session.session_id[:8]})",
             "success")
+        self._close_sweep_graph()
+
+    def _load_sweep_session(self, ip, host, ref):
+        """Load the session recorded for a swept host (§3).
+
+        Hand the session to the same restore path the LOAD dialog uses.
+        Repointing session_manager.current on its own is what corrupted
+        data: the panels still held the PREVIOUS host's state and the next
+        autosave tick wrote it over this host's file.
+        """
+        from utils.session import Session
+
+        sid = (ref or {}).get("session_id", "")
+        fpath = (ref or {}).get("file", "")
+        self.app.terminal.write(
+            f"[*] Loading existing session for {ip} ({sid[:8]})", "info")
+        try:
+            sess = Session(ip, sid)
+            if not (fpath and sess.load(fpath)):
+                self.app.terminal.write(
+                    f"[!] Session file not found: {fpath}", "error")
+                return
+            self.apply_session(sess)
+        except Exception as e:
+            self.app.terminal.write(
+                f"[!] Could not load session: {e}", "error")
+            return
         self._close_sweep_graph()
 
     # ─── Actions ───────────────────────────────────────────────────────────────
