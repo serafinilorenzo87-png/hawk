@@ -66,6 +66,53 @@ class SelfContainedPolicyTests(unittest.TestCase):
                     pass
             shutil.rmtree(test_configs_dir, ignore_errors=True)
 
+    @unittest.skipUnless(os.name == "posix", "POSIX file modes only")
+    def test_key_temp_file_is_never_world_readable(self):
+        """C1: the keys file must be 0600 from its first byte, not only
+        after os.replace().  The old code wrote the temp file under the
+        default umask (0644 = readable by every local user) and tightened
+        it only after the rename — a real window in which another account
+        could read the secrets.  Inspect the temp file's mode at the
+        moment just before it becomes the final file."""
+        import stat
+        from unittest.mock import patch
+        from utils import apikeys
+        from utils.config import TMP_DIR
+
+        old_keys_path = apikeys.KEYS_PATH
+        old_sessions = apikeys.SESSIONS_DIR
+        test_dir = os.path.join(TMP_DIR, "test_apikeys_perms")
+        os.makedirs(test_dir, exist_ok=True)
+        apikeys.KEYS_PATH = os.path.join(test_dir, ".apikeys.json")
+        apikeys.SESSIONS_DIR = test_dir
+
+        captured = {}
+        real_replace = os.replace
+
+        def spy_replace(src, dst):
+            # src == the fully-written temp file, not yet the final path.
+            captured["mode"] = stat.S_IMODE(os.stat(src).st_mode)
+            return real_replace(src, dst)
+
+        old_umask = os.umask(0o022)   # so a plain open() WOULD be 0644
+        try:
+            with patch("os.replace", side_effect=spy_replace):
+                self.assertTrue(
+                    apikeys.save_keys({"shodan": "secret", "nvd": "k"}))
+            self.assertIn("mode", captured, "save never reached os.replace")
+            self.assertEqual(
+                0, captured["mode"] & 0o077,
+                "temp key file was group/other-readable before replace")
+            final = stat.S_IMODE(os.stat(apikeys.KEYS_PATH).st_mode)
+            self.assertEqual(
+                0, final & 0o077,
+                "final key file is group/other-readable")
+        finally:
+            os.umask(old_umask)
+            apikeys.KEYS_PATH = old_keys_path
+            apikeys.SESSIONS_DIR = old_sessions
+            shutil.rmtree(test_dir, ignore_errors=True)
+
     def test_lhost_detection_prefers_vpn_over_vm_nic_and_bridges(self):
         from utils import runner
 

@@ -199,6 +199,56 @@ class DialogConstructionTests(_TkTestCase):
                       "NVD is not managed by the global API key manager")
 
 
+class ApiKeyManagerSaveFailureTests(_TkTestCase):
+    """C2: a failed save must not masquerade as success.  The dialog
+    discarded save_keys()'s False, closed, and ran the tool — a save that
+    never hit disk looked exactly like one that did.  A failure must keep
+    the dialog open, surface the error, and NOT fire the run callback."""
+
+    def test_failed_save_keeps_dialog_open_and_runs_nothing(self):
+        from unittest.mock import patch
+        from gui import dialogs_core as dc
+
+        ran = []
+        dlg = dc.ApiKeyManagerDialog(
+            self.root, tool="shodan",
+            on_save=lambda tool=None: ran.append(tool))
+        self.root.update_idletasks()
+
+        # Force the persistence layer to report failure.
+        with patch.object(dlg, "_save_keys", return_value=False):
+            dlg._do_save()
+        self.root.update_idletasks()
+
+        self.assertFalse(ran, "the run callback fired despite a failed save")
+        self.assertTrue(dlg._win.winfo_exists(),
+                        "the dialog closed despite a failed save")
+        self.assertIn("✗", dlg._err_lbl.cget("text"),
+                      "no error was surfaced to the operator")
+
+    def test_successful_save_closes_and_runs(self):
+        from unittest.mock import patch
+        from gui import dialogs_core as dc
+
+        ran = []
+        dlg = dc.ApiKeyManagerDialog(
+            self.root, tool="shodan",
+            on_save=lambda tool=None: ran.append(tool))
+        self.root.update_idletasks()
+
+        # Save succeeds but write nothing real: stub persistence + config
+        # writers so the test never touches sessions/.apikeys.json.
+        with patch.object(dlg, "_save_keys", return_value=True), \
+             patch.object(dlg, "_write_configs", return_value={}):
+            dlg._do_save()
+        self.root.update_idletasks()
+
+        self.assertEqual(["shodan"], ran,
+                         "a successful save did not run the tool")
+        self.assertFalse(dlg._win.winfo_exists(),
+                         "a successful save left the dialog open")
+
+
 class TargetCommandDialogTests(_TkTestCase):
     """X1 — the COPY button was built with kwargs `_btn` does not take,
     so the dialog came up with no COPY and no CLOSE.  Both twins here."""

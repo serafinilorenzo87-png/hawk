@@ -109,7 +109,19 @@ def save_keys(keys: Dict[str, str]) -> bool:
         os.makedirs(SESSIONS_DIR, exist_ok=True)
         clean = {k: v.strip() for k, v in keys.items() if v and v.strip()}
         tmp_path = KEYS_PATH + f".tmp-{os.getpid()}"
-        with open(tmp_path, "w") as f:
+        # Create the temp file ALREADY at 0600 so the secrets are never,
+        # not even for the instant between write and chmod, world-readable.
+        # A plain open() honours the process umask (typically 0644), and
+        # the old code only tightened permissions AFTER os.replace() — a
+        # real window in which another local user could read the keys off
+        # the temp/final file.  os.open with mode 0o600 sets the bits
+        # before the first byte is written; the chmod below stays as a
+        # belt-and-braces for the destination path.  (On Windows the mode
+        # is mostly ignored, but there the multi-user threat model this
+        # closes does not apply.)
+        fd = os.open(tmp_path,
+                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(clean, f, indent=2)
             f.write("\n")
             f.flush()

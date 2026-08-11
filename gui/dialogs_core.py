@@ -1320,6 +1320,13 @@ class ApiKeyManagerDialog:
         bar.pack_propagate(False)
         bar.pack(side="bottom", fill="x")
 
+        # Inline save-error line (hidden until a save actually fails).
+        self._err_lbl = ctk.CTkLabel(
+            bar, text="", font=_f("sm"),
+            text_color=COLORS.get("text_red", COLORS["text_yellow"]),
+            anchor="w", justify="left")
+        self._err_lbl.pack(side="top", fill="x", padx=16, pady=(6, 0))
+
         scroll = ctk.CTkScrollableFrame(
             win, fg_color=COLORS["bg_secondary"],
             scrollbar_button_color=COLORS["border_dim"],
@@ -1391,7 +1398,21 @@ class ApiKeyManagerDialog:
         # Preserve existing keys that aren't shown in this filtered dialog
         existing = self._load_keys()
         existing.update(keys)
-        self._save_keys(existing)
+        if not self._save_keys(existing):
+            # A failed save must NOT masquerade as success.  The old code
+            # discarded this False, closed the dialog and ran the tool, so
+            # a save that never hit disk was indistinguishable from one
+            # that did: the operator's keys were silently gone and the
+            # tool ran keyless.  Keep the dialog open, show why, run
+            # nothing.
+            try:
+                self._err_lbl.configure(
+                    text="  ✗  Could not save keys to sessions/.apikeys.json "
+                         "— check permissions and disk space. Nothing was "
+                         "run.")
+            except Exception:
+                pass
+            return
         paths = self._write_configs()
         # NVD is a managed key now (utils.apikeys): push the saved value
         # into the in-memory CVE client so a change made here takes effect
