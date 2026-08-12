@@ -75,14 +75,29 @@ class SelfContainedPolicyTests(unittest.TestCase):
         could read the secrets.  Inspect the temp file's mode at the
         moment just before it becomes the final file."""
         import stat
+        import tempfile
         from unittest.mock import patch
         from utils import apikeys
-        from utils.config import TMP_DIR
 
+        # Use a real OS temp dir, NOT utils.config.TMP_DIR: the latter can
+        # live on a filesystem that does not honour Unix permission bits
+        # (e.g. a VMware HGFS / shared-folder mount, where every file stats
+        # as 0777) and would false-fail this mode check.  Skip outright if
+        # the chosen temp fs cannot represent 0600, so the test asserts the
+        # code's intent only where that intent is observable.
         old_keys_path = apikeys.KEYS_PATH
         old_sessions = apikeys.SESSIONS_DIR
-        test_dir = os.path.join(TMP_DIR, "test_apikeys_perms")
-        os.makedirs(test_dir, exist_ok=True)
+        test_dir = tempfile.mkdtemp(prefix="hawk_apikeys_perms_")
+        _probe = os.path.join(test_dir, ".probe")
+        _fd = os.open(_probe, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        os.close(_fd)
+        _probe_mode = stat.S_IMODE(os.stat(_probe).st_mode)
+        os.remove(_probe)
+        if _probe_mode & 0o077:
+            shutil.rmtree(test_dir, ignore_errors=True)
+            self.skipTest(
+                "temp filesystem does not honour Unix modes "
+                f"(0600 probe stat'd as {oct(_probe_mode)})")
         apikeys.KEYS_PATH = os.path.join(test_dir, ".apikeys.json")
         apikeys.SESSIONS_DIR = test_dir
 

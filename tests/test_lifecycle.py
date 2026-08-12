@@ -901,23 +901,37 @@ class DestroyCancelsTimersTests(unittest.TestCase):
     def _check(self, module_name, class_name, arm):
         _install_customtkinter_stub()
         import importlib
-        cls = getattr(importlib.import_module(module_name), class_name)
+        # Re-import the widget module UNDER the stub.  If it was already
+        # imported earlier in the run under a REAL customtkinter (as on any
+        # machine where ctk is installed, e.g. Kali), its class keeps the
+        # real tkinter base and w.after() resolves to tkinter.Misc.after,
+        # which needs a live Tk the bare Host never built — shadowing the
+        # _TimerHost fake.  Evicting forces a fresh import against the stub;
+        # restore the original afterwards so later tests are untouched.
+        saved_mod = sys.modules.pop(module_name, None)
+        try:
+            cls = getattr(importlib.import_module(module_name), class_name)
 
-        destroyed = []
-        # Sits last in the MRO so the widget's `super().destroy()` has
-        # somewhere harmless to land.
-        Base = type("Base", (),
-                    {"destroy": lambda self: destroyed.append(True)})
-        Host = type("Host", (cls, _TimerHost, Base),
-                    {"__init__": lambda self: _TimerHost.__init__(self)})
+            destroyed = []
+            # Sits last in the MRO so the widget's `super().destroy()` has
+            # somewhere harmless to land.
+            Base = type("Base", (),
+                        {"destroy": lambda self: destroyed.append(True)})
+            Host = type("Host", (cls, _TimerHost, Base),
+                        {"__init__": lambda self: _TimerHost.__init__(self)})
 
-        w = Host()
-        arm(w)
-        self.assertTrue(w.pending, "test did not arm a timer")
-        w.destroy()
-        self.assertEqual(w.pending, {},
-                         f"{class_name}.destroy() left a timer pending")
-        self.assertEqual(destroyed, [True])
+            w = Host()
+            arm(w)
+            self.assertTrue(w.pending, "test did not arm a timer")
+            w.destroy()
+            self.assertEqual(w.pending, {},
+                             f"{class_name}.destroy() left a timer pending")
+            self.assertEqual(destroyed, [True])
+        finally:
+            if saved_mod is not None:
+                sys.modules[module_name] = saved_mod
+            else:
+                sys.modules.pop(module_name, None)
 
     def test_status_bar_is_the_model(self):
         self._check("gui.widgets.status_bar", "StatusBar",
