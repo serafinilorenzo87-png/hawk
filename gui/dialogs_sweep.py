@@ -179,7 +179,8 @@ def show_sweep_graph_window(parent, cidr, graph_data,
         ).pack(fill="x", pady=3)
 
     # ── Build networkx graph (hosts only, no service nodes) ─────────
-    vis_nodes = [n for n in nodes if n.get("type") in ("subnet", "host")]
+    vis_nodes = [n for n in nodes
+                 if n.get("type") in ("subnet", "host", "routed_summary")]
     vis_ids = {n["id"] for n in vis_nodes}
 
     G = nx.DiGraph()
@@ -246,6 +247,20 @@ def show_sweep_graph_window(parent, cidr, graph_data,
                 node_shape="p",
                 alpha=0.7)
 
+        # Collapsed routed band: one amber square standing in for every
+        # off-subnet (unverified) host, so the graph stays readable.
+        summary_ids = [n["id"] for n in vis_nodes
+                       if n.get("type") == "routed_summary"]
+        if summary_ids:
+            nx.draw_networkx_nodes(
+                G, pos, nodelist=summary_ids, ax=ax,
+                node_color="#3A2A10",
+                node_size=900,
+                edgecolors="#E0A030",
+                linewidths=2.0,
+                node_shape="s",
+                alpha=0.95)
+
         if labels:
             nx.draw_networkx_labels(
                 G, pos, labels=labels, ax=ax,
@@ -264,6 +279,33 @@ def show_sweep_graph_window(parent, cidr, graph_data,
                 linewidths=2.0,
                 node_shape="o",
                 alpha=0.9)
+
+        # Routed band: hosts outside every local subnet were reached across
+        # a gateway, so a liveness hit is unverified (nmap -PA/-PS can flag a
+        # dead routed address up).  Ring them amber so they read as plainly
+        # separate from the ARP-confirmed local hosts.
+        routed_ids = [n["id"] for n in vis_nodes
+                      if n.get("type") == "host"
+                      and n.get("scope") == "routed"]
+        if routed_ids:
+            nx.draw_networkx_nodes(
+                G, pos, nodelist=routed_ids, ax=ax,
+                node_color="none",
+                node_size=540,
+                edgecolors="#E0A030",
+                linewidths=1.8,
+                node_shape="o",
+                alpha=0.95)
+
+        n_local = stats.get("local", 0)
+        n_routed = stats.get("routed", 0)
+        if n_local or n_routed:
+            ax.text(
+                0.01, 0.01,
+                f"{n_local} in your subnet   -   {n_routed} routed "
+                f"(unverified)",
+                transform=ax.transAxes, fontsize=8.5, color="#C8B070",
+                family="monospace", va="bottom", ha="left")
 
         ax.set_axis_off()
         if preserve_view:

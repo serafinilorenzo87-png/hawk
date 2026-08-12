@@ -705,8 +705,15 @@ class TargetBar(ctk.CTkFrame):
         """
         from modules.discovery import (
             build_inventory, save_inventory, load_latest_inventory,
-            merge_inventory,
+            merge_inventory, annotate_scope,
         )
+
+        # Tag every freshly probed host local (ARP-confirmed, inside one of
+        # our interface subnets) vs routed (off-subnet, reached via a
+        # gateway and so an unverified/possible-false-positive hit) BEFORE
+        # it lands in the inventory, so the graph and the count can tell the
+        # two bands apart.
+        annotate_scope(hosts)
 
         existing = load_latest_inventory(cidr)
         if existing:
@@ -720,14 +727,16 @@ class TargetBar(ctk.CTkFrame):
 
         self._sweep_inventory = inventory
         alive = [h for h in inventory.get("hosts", []) if h.get("alive")]
-        # Only the hosts this run actually probed are a fresh claim; on
-        # an aborted sweep the rest are carried over from an earlier one.
+        local_n = sum(1 for h in alive if h.get("scope") == "local")
+        routed_n = sum(1 for h in alive if h.get("scope") == "routed")
         probed = len(hosts)
         if aborted:
-            counted = (f"{probed} host(s) probed before abort, "
-                       f"{len(alive)} alive in the range so far")
+            counted = (f"{probed} probed before abort - "
+                       f"{local_n} in your subnet, "
+                       f"{routed_n} routed (unverified)")
         else:
-            counted = f"{len(alive)} hosts"
+            counted = (f"{len(alive)} alive - {local_n} in your subnet, "
+                       f"{routed_n} routed (unverified)")
         try:
             path = save_inventory(inventory)
         except OSError as e:

@@ -261,7 +261,10 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(inv["finished"], "")
         self.assertEqual(inv["aborted"], "2026-08-03T00:00:30Z")
 
-    def test_complete_sweep_ages_unseen_hosts(self):
+    def test_unworked_unseen_host_is_dropped(self):
+        """No inheritance: a new sweep must not carry the previous run's
+        hosts.  An unworked host not re-found this run is dropped, not
+        aged, so a routed false positive cannot ride forward as alive."""
         from modules.discovery import merge_inventory
         existing = {
             "range": "10.0.0.0/24",
@@ -279,12 +282,37 @@ class InventoryTests(unittest.TestCase):
         merged = merge_inventory(existing, new_hosts,
                                  finished="2026-08-03T00:05:00Z")
         by_ip = {h["ip"]: h for h in merged["hosts"]}
-        self.assertFalse(by_ip["10.0.0.9"]["alive"])
+        self.assertIn("10.0.0.1", by_ip)
+        self.assertNotIn("10.0.0.9", by_ip)
         self.assertEqual(merged["finished"], "2026-08-03T00:05:00Z")
 
-    def test_aborted_merge_does_not_age_or_stamp_finished(self):
-        """An unprobed host is not "down", and a partial run must not
-        leave the file reading as a completed sweep."""
+    def test_worked_host_kept_when_unseen(self):
+        """Never orphan a worked host: one with a session_ref survives a
+        re-sweep that did not re-find it (unlike an unworked stale host)."""
+        from modules.discovery import merge_inventory
+        existing = {
+            "range": "10.0.0.0/24",
+            "hosts": [
+                {"ip": "10.0.0.5", "alive": True, "responded_via": ["arp"],
+                 "port_hints": [], "os_hint": "unknown",
+                 "session_ref": {"session_id": "s1", "file": "/a.json"}},
+            ],
+        }
+        new_hosts = [
+            {"ip": "10.0.0.6", "alive": True, "responded_via": ["arp"],
+             "port_hints": [], "os_hint": "unknown", "session_ref": None},
+        ]
+        merged = merge_inventory(existing, new_hosts,
+                                 finished="2026-08-03T00:05:00Z")
+        by_ip = {h["ip"]: h for h in merged["hosts"]}
+        self.assertIn("10.0.0.5", by_ip)
+        self.assertIn("10.0.0.6", by_ip)
+        self.assertIsNotNone(by_ip["10.0.0.5"]["session_ref"])
+
+    def test_aborted_sweep_does_not_inherit_unworked_hosts(self):
+        """An aborted sweep starts clean too: the previous run's unworked
+        hosts are not carried forward (the confusing "39 alive" bug), and
+        no finished time is stamped on a partial run."""
         from modules.discovery import merge_inventory
         existing = {
             "range": "10.0.0.0/24",
@@ -304,7 +332,8 @@ class InventoryTests(unittest.TestCase):
                                  finished="2026-08-03T00:05:00Z",
                                  aborted="2026-08-03T00:05:00Z")
         by_ip = {h["ip"]: h for h in merged["hosts"]}
-        self.assertTrue(by_ip["10.0.0.9"]["alive"])
+        self.assertNotIn("10.0.0.9", by_ip)
+        self.assertIn(445, by_ip["10.0.0.1"]["port_hints"])
         self.assertEqual(merged["finished"], "")
         self.assertEqual(merged["aborted"], "2026-08-03T00:05:00Z")
 
@@ -317,6 +346,43 @@ class InventoryTests(unittest.TestCase):
         ref = inv["hosts"][0]["session_ref"]
         self.assertEqual(ref["session_id"], "sess123")
         self.assertEqual(ref["file"], "/path.json")
+
+
+class ScopeTaggingTests(unittest.TestCase):
+    """local vs routed banding: a host inside a local interface subnet is
+    ARP-confirmable; one outside every local subnet was reached across a
+    router and is unverified (can be an nmap false positive)."""
+
+    def test_local_vs_routed(self):
+        from modules.discovery import annotate_scope
+        hosts = [{"ip": "192.168.176.10"}, {"ip": "192.168.178.5"}]
+        annotate_scope(hosts, subnets=["192.168.176.0/24"])
+        by_ip = {h["ip"]: h for h in hosts}
+        self.assertEqual(by_ip["192.168.176.10"]["scope"], "local")
+        self.assertEqual(by_ip["192.168.178.5"]["scope"], "routed")
+
+    def test_multiple_local_subnets(self):
+        from modules.discovery import annotate_scope
+        hosts = [{"ip": "192.168.177.5"}]
+        annotate_scope(hosts,
+                       subnets=["192.168.176.0/24", "192.168.177.0/24"])
+        self.assertEqual(hosts[0]["scope"], "local")
+
+    def test_invalid_ip_is_unknown(self):
+        from modules.discovery import annotate_scope
+        hosts = [{"ip": "not-an-ip"}]
+        annotate_scope(hosts, subnets=["192.168.176.0/24"])
+        self.assertEqual(hosts[0]["scope"], "unknown")
+
+    def test_network_objects_accepted(self):
+        import ipaddress
+        from modules.discovery import annotate_scope
+        nets = [ipaddress.ip_network("10.0.0.0/24")]
+        hosts = [{"ip": "10.0.0.7"}, {"ip": "10.0.1.7"}]
+        annotate_scope(hosts, subnets=nets)
+        by_ip = {h["ip"]: h for h in hosts}
+        self.assertEqual(by_ip["10.0.0.7"]["scope"], "local")
+        self.assertEqual(by_ip["10.0.1.7"]["scope"], "routed")
 
 
 class SweepGraphTests(unittest.TestCase):
@@ -375,6 +441,57 @@ class SweepGraphTests(unittest.TestCase):
         host = [n for n in gd["nodes"] if n["type"] == "host"][0]
         self.assertIn("has_session", host["flags"])
         self.assertEqual(gd["stats"]["with_session"], 1)
+
+    def test_routed_collapsed_by_default(self):
+        from utils.sweep_graph import build_graph_data
+        inv = {
+            "range": "192.168.176.0/22",
+            "hosts": [
+                {"ip": "192.168.176.10", "alive": True,
+                 "responded_via": ["arp"], "port_hints": [],
+                 "os_hint": "unknown", "session_ref": None,
+                 "scope": "local"},
+                {"ip": "192.168.178.5", "alive": True,
+                 "responded_via": ["tcp:445"], "port_hints": [],
+                 "os_hint": "unknown", "session_ref": None,
+                 "scope": "routed"},
+            ],
+        }
+        gd = build_graph_data(inv)
+        host_labels = {n["label"] for n in gd["nodes"]
+                       if n["type"] == "host"}
+        # local drawn individually, routed collapsed away
+        self.assertIn("192.168.176.10", host_labels)
+        self.assertNotIn("192.168.178.5", host_labels)
+        summary = [n for n in gd["nodes"] if n["type"] == "routed_summary"]
+        self.assertEqual(len(summary), 1)
+        self.assertIn("1", summary[0]["label"])
+        # counts always report both bands regardless of collapse
+        self.assertEqual(gd["stats"]["local"], 1)
+        self.assertEqual(gd["stats"]["routed"], 1)
+
+    def test_show_routed_expands_individual_nodes(self):
+        from utils.sweep_graph import build_graph_data
+        inv = {
+            "range": "192.168.176.0/22",
+            "hosts": [
+                {"ip": "192.168.176.10", "alive": True,
+                 "responded_via": ["arp"], "port_hints": [],
+                 "os_hint": "unknown", "session_ref": None,
+                 "scope": "local"},
+                {"ip": "192.168.178.5", "alive": True,
+                 "responded_via": ["tcp:445"], "port_hints": [],
+                 "os_hint": "unknown", "session_ref": None,
+                 "scope": "routed"},
+            ],
+        }
+        gd = build_graph_data(inv, show_routed=True)
+        by_label = {n["label"]: n for n in gd["nodes"]
+                    if n["type"] == "host"}
+        self.assertEqual(by_label["192.168.176.10"]["scope"], "local")
+        self.assertEqual(by_label["192.168.178.5"]["scope"], "routed")
+        self.assertFalse([n for n in gd["nodes"]
+                          if n["type"] == "routed_summary"])
 
 
 class ChooseMethodTests(unittest.TestCase):

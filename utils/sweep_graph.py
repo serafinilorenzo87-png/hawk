@@ -48,10 +48,19 @@ _PORT_LABELS = {
 }
 
 
-def build_graph_data(inventory: Dict) -> Optional[Dict]:
+def build_graph_data(inventory: Dict,
+                     show_routed: bool = False) -> Optional[Dict]:
     """Convert a sweep inventory into {nodes, edges, stats}.
 
     Returns None if the inventory is empty or malformed.
+
+    Routed hosts (scope == "routed": off every local subnet, reached via a
+    gateway and so unverified) are collapsed into ONE summary node by
+    default.  On a wide sweep a router that answers ACK/RST probes for a
+    whole range can flag hundreds of dead addresses as up; drawing them all
+    buries the handful of real, ARP-confirmed local hosts in noise.  Pass
+    ``show_routed=True`` to draw them individually.  The routed COUNT is
+    always reported in stats either way.
     """
     if not inventory or not isinstance(inventory, dict):
         return None
@@ -59,6 +68,10 @@ def build_graph_data(inventory: Dict) -> Optional[Dict]:
     alive = [h for h in hosts if h.get("alive")]
     if not alive:
         return None
+
+    routed = [h for h in alive if h.get("scope") == "routed"]
+    local = [h for h in alive if h.get("scope") != "routed"]
+    drawn = alive if show_routed else local
 
     cidr = inventory.get("range", "unknown")
     nodes: List[Dict] = []
@@ -72,7 +85,8 @@ def build_graph_data(inventory: Dict) -> Optional[Dict]:
         "type": "subnet",
         "category": "normal",
         "flags": [],
-        "details": f"range  {cidr}\nhosts  {len(alive)} alive",
+        "details": f"range  {cidr}\nhosts  {len(alive)} alive"
+                   f"  ({len(local)} local, {len(routed)} routed)",
     })
 
     stats = {
@@ -85,9 +99,11 @@ def build_graph_data(inventory: Dict) -> Optional[Dict]:
         "port_3389": 0,
         "port_22": 0,
         "with_session": 0,
+        "local": len(local),
+        "routed": len(routed),
     }
 
-    for h in alive:
+    for h in drawn:
         ip = h["ip"]
         host_id = f"host:{ip}"
         port_hints = h.get("port_hints", [])
@@ -95,6 +111,7 @@ def build_graph_data(inventory: Dict) -> Optional[Dict]:
         session_ref = h.get("session_ref")
 
         cat = _host_category(port_hints)
+        scope = h.get("scope", "unknown")
         flags = []
         if session_ref:
             flags.append("has_session")
@@ -117,6 +134,7 @@ def build_graph_data(inventory: Dict) -> Optional[Dict]:
             "label": ip,
             "type": "host",
             "category": cat,
+            "scope": scope,
             "flags": flags,
             "details": _host_details(h),
         })
@@ -144,11 +162,48 @@ def build_graph_data(inventory: Dict) -> Optional[Dict]:
                 "type": "runs",
             })
 
+    # Collapse the routed band into one summary node so it never buries
+    # the real local hosts; the full list stays in the saved inventory.
+    if routed and not show_routed:
+        summary_id = "routed:summary"
+        nodes.append({
+            "id": summary_id,
+            "label": f"routed: {len(routed)} (unverified)",
+            "type": "routed_summary",
+            "category": "routed",
+            "scope": "routed",
+            "flags": [],
+            "details": _routed_summary_details(routed),
+        })
+        edges.append({
+            "src": subnet_id,
+            "dst": summary_id,
+            "type": "contains",
+        })
+
     return {
         "nodes": nodes,
         "edges": edges,
         "stats": stats,
     }
+
+
+def _routed_summary_details(routed: List[Dict]) -> str:
+    lines = [
+        f"{len(routed)} routed host(s) - off your local subnet.",
+        "",
+        "Reached across a gateway, so a liveness hit here is",
+        "UNVERIFIED: a router that answers ACK/RST probes for a",
+        "whole range flags dead addresses as up (nmap false",
+        "positives).  Collapsed to keep the graph readable; the",
+        "full list is in the saved sweep inventory JSON.",
+        "",
+    ]
+    sample = [h.get("ip", "?") for h in routed[:12]]
+    lines.append("examples: " + ", ".join(sample))
+    if len(routed) > 12:
+        lines.append(f"... and {len(routed) - 12} more")
+    return "\n".join(lines)
 
 
 def _host_category(port_hints: List[int]) -> str:
@@ -172,6 +227,11 @@ def _service_category(port: int) -> str:
 
 def _host_details(h: Dict) -> str:
     lines = [f"ip             {h['ip']}"]
+    scope = h.get("scope", "unknown")
+    if scope == "routed":
+        lines.append("scope          routed (via gateway - UNVERIFIED)")
+    elif scope == "local":
+        lines.append("scope          local subnet (ARP-confirmed)")
     if h.get("os_hint", "unknown") != "unknown":
         lines.append(f"os_hint        {h['os_hint']}")
     if h.get("responded_via"):

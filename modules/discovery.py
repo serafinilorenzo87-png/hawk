@@ -80,6 +80,65 @@ def _find_interface_for(cidr: str) -> str:
 
 # ─── Command builders ────────────────────────────────────────────────────────
 
+def local_subnets() -> List:
+    """Return the IPv4 subnets configured on local interfaces.
+
+    A discovery hit inside one of these subnets is ARP-reachable and so
+    authoritative; a hit OUTSIDE every local subnet was reached across a
+    router, where nmap's -PA/-PS probes can mark a dead address up.  This
+    is what tells the two scope bands apart.  Loopback is skipped.
+    Best-effort: an empty list on any failure so scope tagging degrades to
+    "unknown" rather than crashing a sweep.
+    """
+    nets = []
+    try:
+        import subprocess
+        r = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show"],
+            capture_output=True, text=True, timeout=3)
+        for line in (r.stdout or "").splitlines():
+            parts = line.split()
+            for i, p in enumerate(parts):
+                if p == "inet" and i + 1 < len(parts):
+                    try:
+                        net = ipaddress.ip_network(parts[i + 1], strict=False)
+                    except ValueError:
+                        continue
+                    if net.is_loopback:
+                        continue
+                    nets.append(net)
+    except Exception:
+        pass
+    return nets
+
+
+def annotate_scope(hosts: List[Dict], subnets=None) -> List[Dict]:
+    """Tag each host ``scope``: "local" when its IP falls inside one of our
+    interface subnets (ARP-confirmable), "routed" when it is outside every
+    local subnet (reached via a gateway, so a liveness hit is unverified
+    and can be an nmap false positive), or "unknown" for an unparseable IP.
+
+    Mutates and returns the same list.  ``subnets`` may be a list of CIDR
+    strings or ip_network objects; when omitted the live interface subnets
+    are read from the system.
+    """
+    raw = subnets if subnets is not None else local_subnets()
+    nets = []
+    for s in raw:
+        try:
+            nets.append(ipaddress.ip_network(str(s), strict=False))
+        except ValueError:
+            continue
+    for h in hosts:
+        try:
+            addr = ipaddress.ip_address(h.get("ip", ""))
+        except ValueError:
+            h["scope"] = "unknown"
+            continue
+        h["scope"] = "local" if any(addr in n for n in nets) else "routed"
+    return hosts
+
+
 def choose_method(cidr: str, host_count: int,
                   force_masscan: bool = False) -> str:
     """Pick the best discovery method for the given range.
@@ -325,6 +384,7 @@ def _blank_host(ip: str) -> Dict:
         "port_hints": [],
         "os_hint": "unknown",
         "session_ref": None,
+        "scope": "unknown",
     }
 
 
@@ -395,43 +455,46 @@ def load_latest_inventory(cidr: str) -> Optional[Dict]:
 def merge_inventory(existing: Dict, new_hosts: List[Dict],
                     started: str = "", finished: str = "",
                     aborted: str = "") -> Dict:
-    """Merge newly discovered hosts into an existing inventory.
+    """Fold THIS sweep's hosts into a fresh inventory for the range.
 
-    Preserves session_ref for hosts already worked on (§3: never orphan a
-    host the operator already worked).
+    A new sweep does NOT inherit the previous sweep's discoveries: a host
+    the current run did not re-find is dropped, so a routed false positive
+    or a box powered off since the last run cannot ride forward as
+    "alive" and pollute the count/graph.  This holds for both complete and
+    aborted sweeps — an abort simply means fewer fresh hosts, never that
+    the old ones are resurrected.
 
-    A COMPLETE sweep ages the hosts it did not see to `alive: False`.
-    Without that a box that answered once stayed alive:true forever and
-    the graph kept drawing machines powered off days ago.
+    The one exception is a host the operator already worked (session_ref
+    set): it is kept so the graph never orphans it (§3), but its recorded
+    state is left untouched — the current run makes no claim about a host
+    it did not probe.  A prior session_ref is also carried onto a re-found
+    host so working a box and then re-sweeping does not lose the link.
 
-    `aborted` (ISO abort time, empty when the sweep completed) says the
-    result set is PARTIAL: the silence of a host then means "never
-    probed", not "down", so `alive` is left alone — and no `finished`
-    time is stamped, because nothing about this range was verified whole.
-
-    `started` is the timestamp of the FIRST sweep of this range and is
-    kept as-is; the caller's value only fills it in when the existing
-    inventory has none.
+    `started` is stamped as THIS run's start: the file now describes this
+    sweep, not a merge of history, so a fresh run no longer reads as
+    having begun days ago.  `finished`/`aborted` are unchanged: an aborted
+    sweep still carries no `finished` time.
     """
-    by_ip = {h["ip"]: h for h in existing.get("hosts", [])}
+    prev_by_ip = {h["ip"]: h for h in existing.get("hosts", [])}
+    result: Dict[str, Dict] = {}
     seen = set()
     for nh in new_hosts:
         ip = nh["ip"]
         seen.add(ip)
-        if ip in by_ip:
-            old_ref = by_ip[ip].get("session_ref")
-            by_ip[ip].update(nh)
-            if old_ref:
-                by_ip[ip]["session_ref"] = old_ref
-        else:
-            by_ip[ip] = nh
-    if not aborted:
-        for ip, h in by_ip.items():
-            if ip not in seen:
-                h["alive"] = False
-    existing["hosts"] = sorted(by_ip.values(),
+        h = dict(nh)
+        prev = prev_by_ip.get(ip)
+        if prev and prev.get("session_ref") and not h.get("session_ref"):
+            h["session_ref"] = prev["session_ref"]
+        result[ip] = h
+    # Never orphan a host the operator already worked: keep it even when
+    # this run did not re-find it.  Not a fresh liveness claim — its state
+    # is left exactly as last recorded.
+    for ip, prev in prev_by_ip.items():
+        if ip not in seen and prev.get("session_ref"):
+            result[ip] = prev
+    existing["hosts"] = sorted(result.values(),
                                key=lambda h: _ip_sort_key(h["ip"]))
-    if started and not existing.get("started"):
+    if started:
         existing["started"] = started
     if aborted:
         existing["finished"] = ""
