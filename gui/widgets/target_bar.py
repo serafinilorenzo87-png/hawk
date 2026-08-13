@@ -17,7 +17,12 @@ Top area: IP input, platform selector, session controls.
 import os
 import re
 import customtkinter as ctk
-from utils.config import COLORS, WINDOW
+from utils.config import COLORS, WINDOW, SZ
+from utils.session import (
+    SESSION_SORT_MODES,
+    SORT_LAST_MODIFIED,
+    sort_sessions,
+)
 from utils.target_intel_sync import (
     FINDING_NON_PERSISTED_KEYS,
     strip_finding_widget_refs,
@@ -3096,12 +3101,24 @@ class TargetBar(ctk.CTkFrame):
 class _SessionPickerDialog(ctk.CTkToplevel):
     """Small dialog to pick a saved session."""
 
+    # The dialog historically hardcoded a bespoke 8–13pt scale that sat
+    # below the app-wide SZ floor (14+) and made the session file names —
+    # the operator's main pain point — hard to read.  Every string now
+    # derives from the shared SZ scale plus this dialog-local +2 bump, so
+    # the whole dialog is legible and tracks any future global font change
+    # instead of drifting on magic numbers.
+    _FONT_BUMP = 2
+
     def __init__(self, parent, app, sessions):
         super().__init__(parent)
         # Hide until layout settles (see comment in gui/dialogs._make_win)
         self.withdraw()
-        self.app      = app
-        self.sessions = sessions
+        self.app       = app
+        self.sessions  = sessions
+        # Resolve the two impure sort inputs (mtime + file name) once, up
+        # front, so re-sorting on a dropdown change is pure and cheap.
+        self._records   = self._resolve_records()
+        self._sort_mode = SORT_LAST_MODIFIED
         self.title("Load Session")
         # Bumped from 500x400 — the old default cut the LOAD button
         # off on the right of each session row (long target_domain +
@@ -3143,31 +3160,108 @@ class _SessionPickerDialog(ctk.CTkToplevel):
         except Exception:
             pass
 
+    def _font(self, key, bold=False):
+        """Dialog font: shared SZ scale + the dialog-local +2 legibility
+        bump.  Keeps every string config-driven instead of hardcoding
+        absolute point sizes."""
+        return ctk.CTkFont(
+            family="Courier New",
+            size=SZ.get(key, 14) + self._FONT_BUMP,
+            weight="bold" if bold else "normal",
+        )
+
+    def _resolve_records(self):
+        """Build the pure sort records for sort_sessions: one dict per
+        session carrying the Session plus its file name and mtime.  The
+        filesystem is touched here, once, so the sort itself stays pure."""
+        recs = []
+        for session in self.sessions:
+            path = getattr(session, "file_path", "") or ""
+            try:
+                mtime = os.path.getmtime(path) if path else 0.0
+            except OSError:
+                mtime = 0.0
+            recs.append({
+                "session":   session,
+                "file_name": os.path.basename(path) if path else "",
+                "mtime":     mtime,
+            })
+        return recs
+
     def _build(self):
         ctk.CTkLabel(
             self,
             text="SAVED SESSIONS",
-            font=ctk.CTkFont(family="Courier New", size=13, weight="bold"),
+            font=self._font("md", bold=True),
             text_color=COLORS["text_green"],
         ).pack(pady=(14, 4))
         ctk.CTkLabel(
             self,
             text=f"  {len(self.sessions)} snapshot(s) — newest first",
-            font=ctk.CTkFont(family="Courier New", size=9),
+            font=self._font("xs"),
             text_color=COLORS["text_muted"],
         ).pack(pady=(0, 6))
 
-        scroll = ctk.CTkScrollableFrame(
+        # Sort control: two modes, both newest-first (see sort_sessions).
+        sort_row = ctk.CTkFrame(self, fg_color="transparent")
+        sort_row.pack(pady=(0, 4))
+        ctk.CTkLabel(
+            sort_row, text="Sort by:",
+            font=self._font("sm"),
+            text_color=COLORS["text_dim"],
+        ).pack(side="left", padx=(0, 6))
+        ctk.CTkOptionMenu(
+            sort_row,
+            values=list(SESSION_SORT_MODES),
+            command=self._on_sort_change,
+            width=170, height=28,
+            font=self._font("sm"),
+            dropdown_font=self._font("sm"),
+            fg_color=COLORS["bg_card"],
+            button_color=COLORS["bg_card_hover"],
+            button_hover_color=COLORS["border_dim"],
+            text_color=COLORS["text_green"],
+            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_text_color=COLORS["text_bright"],
+            dropdown_hover_color=COLORS["bg_card_hover"],
+        ).pack(side="left")
+
+        self._scroll = ctk.CTkScrollableFrame(
             self,
             fg_color=COLORS["bg_secondary"],
             border_color=COLORS["border_dim"],
             border_width=1,
         )
-        scroll.pack(fill="both", expand=True, padx=16, pady=8)
+        self._scroll.pack(fill="both", expand=True, padx=16, pady=8)
+        self._populate()
 
-        for session in self.sessions:
+        ctk.CTkButton(
+            self,
+            text="CLOSE",
+            width=80,
+            fg_color="transparent",
+            border_color=COLORS["border_dim"],
+            border_width=1,
+            text_color=COLORS["text_dim"],
+            font=self._font("sm"),
+            command=self.destroy,
+        ).pack(pady=8)
+
+    def _on_sort_change(self, mode):
+        """Re-sort and rebuild the row list when the dropdown changes."""
+        self._sort_mode = mode
+        self._populate()
+
+    def _populate(self):
+        """(Re)build the session rows in the current sort order."""
+        for child in self._scroll.winfo_children():
+            child.destroy()
+
+        for rec in sort_sessions(self._records, self._sort_mode):
+            session = rec["session"]
             s = session.summary()
-            row = ctk.CTkFrame(scroll, fg_color=COLORS["bg_card"], corner_radius=4)
+            row = ctk.CTkFrame(self._scroll, fg_color=COLORS["bg_card"],
+                               corner_radius=4)
             row.pack(fill="x", padx=4, pady=3)
 
             # Left column: name + metadata
@@ -3179,7 +3273,7 @@ class _SessionPickerDialog(ctk.CTkToplevel):
                       + f"   [{s['platform'] or 'N/A'}]")
             ctk.CTkLabel(
                 left, text=header,
-                font=ctk.CTkFont(family="Courier New", size=11, weight="bold"),
+                font=self._font("sm", bold=True),
                 text_color=COLORS["text_green"], anchor="w",
             ).pack(fill="x")
 
@@ -3197,14 +3291,14 @@ class _SessionPickerDialog(ctk.CTkToplevel):
             ctk.CTkLabel(
                 left, text="  " + "  ·  ".join(meta_bits) if meta_bits
                      else "  (empty — nothing recorded yet)",
-                font=ctk.CTkFont(family="Courier New", size=9),
+                font=self._font("xs"),
                 text_color=COLORS["text_muted"], anchor="w",
             ).pack(fill="x", pady=(2, 0))
 
             if s.get("file_name"):
                 ctk.CTkLabel(
                     left, text=f"  {s['file_name']}",
-                    font=ctk.CTkFont(family="Courier New", size=8),
+                    font=self._font("xs"),
                     text_color=COLORS["text_dim"], anchor="w",
                 ).pack(fill="x")
 
@@ -3212,8 +3306,8 @@ class _SessionPickerDialog(ctk.CTkToplevel):
             btns = ctk.CTkFrame(row, fg_color="transparent")
             btns.pack(side="right", padx=8, pady=6)
             ctk.CTkButton(
-                btns, text="LOAD", width=70, height=26,
-                font=ctk.CTkFont(family="Courier New", size=9, weight="bold"),
+                btns, text="LOAD", width=76, height=30,
+                font=self._font("sm", bold=True),
                 fg_color=COLORS["bg_primary"],
                 hover_color="#003000",
                 border_color=COLORS["border_green"],
@@ -3223,8 +3317,8 @@ class _SessionPickerDialog(ctk.CTkToplevel):
                 command=lambda s=session: self._load(s),
             ).pack(side="left", padx=2)
             ctk.CTkButton(
-                btns, text="🗑", width=30, height=26,
-                font=ctk.CTkFont(family="Courier New", size=10),
+                btns, text="🗑", width=34, height=30,
+                font=self._font("sm"),
                 fg_color=COLORS["bg_primary"],
                 hover_color="#2A0505",
                 border_color=COLORS["text_red"],
@@ -3233,18 +3327,6 @@ class _SessionPickerDialog(ctk.CTkToplevel):
                 corner_radius=3,
                 command=lambda s=session, r=row: self._delete_snapshot(s, r),
             ).pack(side="left", padx=2)
-
-        ctk.CTkButton(
-            self,
-            text="CLOSE",
-            width=80,
-            fg_color="transparent",
-            border_color=COLORS["border_dim"],
-            border_width=1,
-            text_color=COLORS["text_dim"],
-            font=ctk.CTkFont(family="Courier New", size=10),
-            command=self.destroy,
-        ).pack(pady=8)
 
     def _delete_snapshot(self, session, row_widget):
         """Delete a single snapshot file from disk."""
@@ -3260,6 +3342,10 @@ class _SessionPickerDialog(ctk.CTkToplevel):
                 self.app.terminal.write(
                     f"  [!] Delete failed: {e}", "error")
                 return
+        # Drop the record too, so a later re-sort doesn't resurrect the
+        # row (the list is rebuilt from self._records on every sort).
+        self._records = [r for r in self._records
+                         if r.get("session") is not session]
         try:
             row_widget.destroy()
         except Exception:

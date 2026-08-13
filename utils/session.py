@@ -1216,6 +1216,60 @@ class Session:
         }
 
 
+# ─── LOAD-dialog session ordering ─────────────────────────────────────────────
+# Pure, Tk-free ordering used by the LOAD picker dialog and its headless
+# tests.  The dialog resolves the two impure inputs (a file's mtime via
+# os.path.getmtime, and its base name) and hands plain records to
+# sort_sessions, so the ordering itself stays deterministic and unit-testable
+# with no disk and no display.
+#
+# Session files are named '{ip}-{YYYY-MM-DD}-{HH-MM-SS}.json'.  The embedded
+# stamp is when the session was FIRST created; the file mtime is when it was
+# LAST written.  The two intentionally differ — an old session re-saved today
+# carries an old name-date but a fresh mtime — so the two sort modes are
+# genuinely distinct and are kept apart.
+_SESSION_NAME_TS_RE = re.compile(
+    r'(?P<date>\d{4}-\d{2}-\d{2})-(?P<time>\d{2}-\d{2}-\d{2})')
+
+SORT_LAST_MODIFIED = "Last modified"
+SORT_DATE          = "Date"
+SESSION_SORT_MODES = (SORT_LAST_MODIFIED, SORT_DATE)
+
+
+def session_name_timestamp(file_name: str) -> str:
+    """Return the embedded '{YYYY-MM-DD}-{HH-MM-SS}' stamp of a session file
+    name as a lexically-sortable string.  Zero-padded ISO-like fields make a
+    plain string compare equal a chronological one.  Names without a parseable
+    stamp yield '' — which sorts oldest, so they drop to the bottom of a
+    newest-first list rather than jumping to the top."""
+    m = _SESSION_NAME_TS_RE.search(file_name or "")
+    return f"{m.group('date')}-{m.group('time')}" if m else ""
+
+
+def sort_sessions(records: list, mode: str) -> list:
+    """Order LOAD-dialog rows newest-first.  Pure: no disk, no Tk.
+
+    `records` — an iterable of dicts, each carrying at least:
+        'file_name' : str    the snapshot file name
+        'mtime'     : float   os.path.getmtime() of that file
+    plus whatever else the caller threads through (e.g. the Session object
+    under a 'session' key).  The dicts are returned as-is, only reordered.
+
+    `mode`:
+        'Last modified' — by file mtime        (when it was last written)
+        'Date'          — by in-name timestamp (when it was created)
+    An unrecognised mode falls back to 'Last modified'.  Both modes are
+    newest-first.  The sort is stable, so records tying on the primary key
+    keep their incoming order."""
+    records = list(records)
+    if mode == SORT_DATE:
+        key = lambda r: session_name_timestamp(r.get("file_name", ""))
+    else:
+        key = lambda r: r.get("mtime", 0.0)
+    records.sort(key=key, reverse=True)
+    return records
+
+
 class SessionManager:
     def __init__(self):
         self.current: Session = None
