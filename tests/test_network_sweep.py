@@ -494,6 +494,79 @@ class SweepGraphTests(unittest.TestCase):
                           if n["type"] == "routed_summary"])
 
 
+class RoutedFalsePositiveTests(unittest.TestCase):
+    """Leva C — the routed-range phantom hosts come from nmap's TCP ACK
+    ping (-PA80) drawing RSTs from the stateful gateway that fronts a
+    routed range.  The fix removes that probe so the phantoms are never
+    generated, while the SYN/ICMP probes that find genuinely-live hosts
+    stay and on-link ARP discovery is untouched.  Each test fails on the
+    pre-fix command (which carried -PA80)."""
+
+    RANGE = "10.10.0.0/22"        # a /22 that spills past a /24 local subnet
+    GNMAP = "/tmp/hawk_routed_test.gnmap"
+
+    def test_ack_ping_removed_from_discovery(self):
+        from modules.discovery import build_phase1_cmd
+        cmd = build_phase1_cmd(self.RANGE, "nmap-sn", self.GNMAP)
+        # -PA (ACK ping) is the phantom source and must be gone.
+        self.assertNotIn("-PA", cmd)
+
+    def test_liveness_probes_retained(self):
+        # Removing the ACK ping must not gut discovery: the SYN and ICMP
+        # probes that detect real hosts stay, so true hosts aren't lost.
+        from modules.discovery import build_phase1_cmd
+        cmd = build_phase1_cmd(self.RANGE, "nmap-sn", self.GNMAP)
+        self.assertIn(" -sn ", cmd)
+        self.assertIn("-PE", cmd)
+        self.assertIn("-PP", cmd)
+        self.assertIn("-PS445,3389,443,80,22", cmd)
+
+    @staticmethod
+    def _simulate_routed_gnmap(cmd, local_ip, phantom_routed_ips, path):
+        """Model nmap -sn greppable output for a range fronted by a
+        stateful gateway.  The gateway RSTs *ACK* probes for every routed
+        address (dead or not), so nmap reports them Up ONLY when the
+        command sends an ACK ping (-PA...).  The real on-link host answers
+        regardless (ARP).  This encodes the exact mechanism the fix
+        targets, so the parsed result tracks the command: with -PA80 the
+        phantoms appear, without it they don't."""
+        lines = [f"Host: {local_ip} ()\tStatus: Up"]
+        if "-PA" in cmd:
+            lines += [f"Host: {ip} ()\tStatus: Up"
+                      for ip in phantom_routed_ips]
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+
+    def test_routed_range_reports_no_phantoms(self):
+        from modules.discovery import build_phase1_cmd, parse_nmap_gnmap
+        fd, path = tempfile.mkstemp(suffix=".gnmap")
+        os.close(fd)
+        try:
+            cmd = build_phase1_cmd(self.RANGE, "nmap-sn", path)
+            self._simulate_routed_gnmap(
+                cmd, "10.10.0.5",
+                ["10.10.1.7", "10.10.2.9", "10.10.3.3"], path)
+            hosts = parse_nmap_gnmap(path)
+        finally:
+            os.unlink(path)
+        ips = {h["ip"] for h in hosts}
+        # The real on-link host is still detected...
+        self.assertIn("10.10.0.5", ips)
+        # ...and no routed phantom rides along.  Pre-fix, -PA80 in the
+        # command makes the simulator emit the phantoms and this fails.
+        self.assertEqual(ips, {"10.10.0.5"})
+
+    def test_local_arp_host_still_detected(self):
+        # On-link discovery is ARP-based and wholly independent of the
+        # probe set the fix touches.
+        from modules.discovery import parse_arp_scan
+        hosts = parse_arp_scan(
+            ["192.168.1.10\t00:11:22:33:44:55\tVendor, Inc."])
+        self.assertEqual(len(hosts), 1)
+        self.assertTrue(hosts[0]["alive"])
+        self.assertEqual(hosts[0]["responded_via"], ["arp"])
+
+
 class ChooseMethodTests(unittest.TestCase):
 
     def test_small_range_uses_nmap(self):

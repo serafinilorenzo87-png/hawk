@@ -185,10 +185,38 @@ def build_phase1_cmd(cidr: str, method: str,
             f"-oL {list_path}"
         )
 
-    # nmap-sn: multi-probe, NO -Pn
+    # nmap-sn: multi-probe, NO -Pn.
+    #
+    # The TCP ACK ping (-PA80) is deliberately OMITTED — it is the source
+    # of the routed false positives.  nmap marks a host "up" on any RST
+    # reply, but a bare unsolicited ACK draws an RST from every stateful
+    # device on the path: the gateway / firewall fronting a routed range
+    # RSTs on behalf of addresses that are dead or don't even exist.  So an
+    # ACK "hit" only proves that *something on the path* answers, not that
+    # the target host is up.  On ranges that spill past the local subnet
+    # this reported hundreds of phantom hosts and inflated the alive count
+    # at its source.  Removing the probe kills that noise where it starts,
+    # instead of only labelling it downstream (the routed banding from
+    # 0662669 still handles whatever genuinely responds).
+    #
+    # Real hosts are NOT lost.  On-link hosts are found by ARP — nmap -sn
+    # uses ARP automatically for a directly-connected subnet, independent
+    # of these -P* probes — so ARP-confirmed local hosts are untouched.  A
+    # routed host that is actually up still answers the SYN ping (-PS is
+    # forwarded to the host, far more host-authoritative than a bare ACK)
+    # or ICMP (-PE/-PP).  The only host an ACK ping adds is one that
+    # filters SYN to all five ports AND blocks both ICMP types yet would
+    # still RST an ACK — a negligible corner case, and one whose firewall
+    # would drop the inbound ACK anyway.
+    #
+    # Per-host routed VERIFICATION was considered instead of removal and
+    # rejected: nmap's -sn greppable output records no probe reason, so a
+    # gateway-RST phantom and a real ICMP-only host parse to an identical
+    # {alive, no ports} record — they cannot be told apart without a whole
+    # extra scan phase, which would risk dropping genuinely-up hosts.
     return (
         f"sudo nmap -sn "
-        f"-PE -PP -PS445,3389,443,80,22 -PA80 "
+        f"-PE -PP -PS445,3389,443,80,22 "
         f"-T4 "
         f"-oG {gnmap_path} "
         f"{cidr}"
