@@ -18,7 +18,7 @@ terminal banner, report generator, status bar.
 
 APP_NAME       = "HAWK"
 APP_FULL_NAME  = "Hostile Assessment War-Kit"
-APP_VERSION    = "1.5.0"
+APP_VERSION    = "1.0.0"
 APP_AUTHOR     = "HAWK Project — Open Source"
 APP_GITHUB     = "https://github.com/yourusername/hawk"
 APP_DISCLAIMER = "Authorized use only · Educational & CTF purposes"

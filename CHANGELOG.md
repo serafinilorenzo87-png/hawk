@@ -4,14 +4,28 @@ All notable changes to HAWK are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.5.0] — 2026-05-01
+## [1.0.0] — 2026-08-13
 
-This release introduces the **plugin architecture** that the ARGUS
-commercial plugin (and any future plugin) installs into. HAWK itself
-remains 100% open source under Apache 2.0; plugins are independent
-artifacts with their own license terms.
+First stable release. HAWK is a complete, portable pentest orchestration
+suite: a customtkinter GUI on Kali that drives the full engagement
+kill-chain from a single console, with no cloud dependency and no AI
+component. 100% open source under Apache 2.0. This entry consolidates
+the project's history into one baseline; earlier development entries
+remain in the git history.
 
-### Added
+### Engagement workflow
+- Full ten-phase kill-chain UI (recon → reporting), each phase wiring the
+  relevant tooling behind a consistent console.
+- Tooling integration: nmap, gobuster, hydra, msfconsole, certipy,
+  bloodhound, oracle, et al.
+- Network sweep with local-vs-routed host banding: on ranges that spill
+  into routed networks, off-subnet hosts are labelled and collapsed so
+  the alive count reflects reachable, on-link targets.
+- Stealth mode toggle and proxychains integration.
+- Session manager with autosave and atomic snapshots; the LOAD dialog
+  offers sort-by last-modified and sort-by in-name timestamp.
+
+### Plugin architecture
 - `utils/plugin_loader.py` — generic loader for HAWK plugins. Discovers
   installed plugin packages, verifies the contract version
   (`HAWK_API_VERSION`), instantiates the plugin via its `create_plugin()`
@@ -20,47 +34,15 @@ artifacts with their own license terms.
   `incompatible`, `no_license`, `expired`, `active`. Never raises into
   HAWK — all failure modes are reported via state + a human-readable
   `error` field.
-- `HAWK_API_VERSION = "1.0.0"` constant in `utils/config.py`. The plugin
-  contract is published in the ARGUS repository at
-  `argus/docs/plugin-contract.md`.
-- ARGUS button on the target bar is now **state-aware**: it discovers
-  the ARGUS plugin at boot and renders one of four visual buckets:
-  - grey lock (plugin missing or import error)
-  - amber lock (license required)
-  - amber clock (license expired)
-  - cyan functional (active — opens the ARGUS tab in a Toplevel window)
-  Each non-active state surfaces a state-specific dialog explaining
-  the next step.
-- `tests/test_plugin_loader.py` — 13 unit tests covering every state
-  transition, including contract violations (raised from
-  `verify_license`, `mount_in`).
-- `tests/test_argus_button.py` — 6 visual-state tests verifying the
-  button accent colour and icon match the underlying plugin state.
+- `HAWK_API_VERSION = "1.0.0"` constant in `utils/config.py` — the
+  plugin contract, independent from the app version. The contract is
+  published in the ARGUS repository at `argus/docs/plugin-contract.md`.
+- State-aware ARGUS button on the target bar: it discovers the ARGUS
+  plugin at boot and renders one of four visual buckets — grey lock
+  (missing / import error), amber lock (license required), amber clock
+  (license expired), cyan functional (active). Each non-active state
+  surfaces a dialog explaining the next step. HAWK remains fully open
+  source; plugins are independent artifacts with their own license terms.
 
-### Changed
-- `gui/widgets/target_bar.py`: the legacy ARGUS teaser button was
-  replaced by the state-aware variant. The teaser-button helper
-  (`_make_coming_soon_button`) gained three optional, non-breaking
-  parameters (`accent_color`, `lock_icon`, `on_click`) so it can be
-  reused by the ARGUS state-specific renders. The COMMAND AND CONTROL
-  teaser button is unchanged.
-
-### Notes for plugin developers
-- The plugin contract is at `argus/docs/plugin-contract.md` (versioned
-  v1.0.0).
-- A minimal hello-world plugin example is in §7 of that document.
-- Plugins are distributed as Python wheels and discovered by
-  `pip install`-style availability of the `hawk_argus` (or other)
-  package in HAWK's Python environment.
-
-## [1.0.0] — 2026-04-15
-
-Initial public release.
-
-### Added
-- Full ten-phase kill-chain UI (recon → reporting).
-- Tooling integration: nmap, gobuster, hydra, msfconsole, certipy,
-  bloodhound, oracle, et al.
-- Stealth mode toggle, proxychains integration.
-- Session manager with autosave and atomic snapshots.
-- Customisable banner, config-driven colour scheme, font scale.
+### Presentation
+- Customisable banner, config-driven colour scheme, and font scale.
