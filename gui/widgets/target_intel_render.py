@@ -1904,8 +1904,8 @@ class TargetIntelRenderMixin:
           • Title selection now skips ERROR / META lines so a junk
             line never becomes the user-visible finding title.
           • Strict gate: a finding is only produced when at least one
-            non-error description line contains the literal token
-            "VULNERABLE".
+            non-error description line carries a POSITIVE "VULNERABLE"
+            token — a "NOT VULNERABLE" verdict does not count.
           • Failed scripts are aggregated into a single optional
             diagnostic info-finding at the end of the parse.
         """
@@ -1931,7 +1931,17 @@ class TargetIntelRenderMixin:
                     d for d in current_desc
                     if not self._NSE_ERROR_RE.search(d)
                 ]
-                if any("VULNERABLE" in d for d in clean_for_check):
+                # The evidence must be a POSITIVE verdict.  nmap prints
+                # "NOT VULNERABLE" for a script that ran and cleared the
+                # target (e.g. smtp-vuln-cve2010-4344 against Postfix:
+                # "The SMTP server is not Exim: NOT VULNERABLE", or a full
+                # "NOT VULNERABLE:" block) — and the bare `"VULNERABLE" in d`
+                # substring counts that as a hit, emitting a cleared
+                # script as a finding.  Reject lines whose only match is a
+                # negated one.
+                if any("VULNERABLE" in d
+                       and not re.search(r"NOT\s+VULNERABLE", d, re.I)
+                       for d in clean_for_check):
                     self._add_vuln_finding(
                         current_vuln, current_cve,
                         clean_for_check, current_refs)

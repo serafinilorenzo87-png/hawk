@@ -343,5 +343,82 @@ class NseDiagnosticFindingTests(unittest.TestCase):
         self.assertFalse(_is_diagnostic_source("nmap vuln scripts"))
 
 
+# ─── "NOT VULNERABLE" verdicts must not become findings ────────────
+#
+# nmap runs a vuln script, clears the target, and prints its negative
+# verdict on the same line as the token — e.g. Metasploitable2's Postfix
+# against the Exim CVE:
+#     | smtp-vuln-cve2010-4344:
+#     |_  The SMTP server is not Exim: NOT VULNERABLE
+# The commit gate keyed off `"VULNERABLE" in line`, which the substring
+# "NOT VULNERABLE" satisfies — so a cleared script was emitted as a
+# HIGH finding with a degenerate title.  These samples are the real
+# nmap shapes, exercised through the real flow.
+
+_NMAP_VULN_SMTP_NOT_EXIM = """\
+Nmap scan report for 192.168.177.134
+Host is up (0.00042s latency).
+PORT   STATE SERVICE
+25/tcp open  smtp
+| smtp-vuln-cve2010-4344:
+|_  The SMTP server is not Exim: NOT VULNERABLE
+| ssl-poodle:
+|   VULNERABLE:
+|   SSL POODLE information leak
+|     State: VULNERABLE
+|       TLS_RSA_WITH_AES_128_CBC_SHA
+|     IDs:  CVE:CVE-2014-3566
+|_    References:
+"""
+
+# The standard multi-line negative block: the script DID run its
+# VULNERABLE table and concluded NOT VULNERABLE.  Every "VULNERABLE"
+# occurrence here is a "NOT VULNERABLE".
+_NMAP_VULN_CCS_NEGATIVE = """\
+Nmap scan report for 10.10.10.5
+Host is up (0.00051s latency).
+PORT    STATE SERVICE
+443/tcp open  https
+| ssl-ccs-injection:
+|   NOT VULNERABLE:
+|   SSL/TLS MITM vulnerability (CCS Injection)
+|     State: NOT VULNERABLE
+|     IDs:  CVE:CVE-2014-0224
+|_    References:
+"""
+
+
+class NotVulnerableVerdictTests(unittest.TestCase):
+    def setUp(self):
+        self._old_ctk = sys.modules.get("customtkinter")
+        _install_customtkinter_stub()
+
+    def tearDown(self):
+        if self._old_ctk is None:
+            sys.modules.pop("customtkinter", None)
+        else:
+            sys.modules["customtkinter"] = self._old_ctk
+
+    def test_smtp_not_exim_is_not_a_finding(self):
+        intel = _build_intel()
+        intel.update_from_vuln_scripts(_NMAP_VULN_SMTP_NOT_EXIM.splitlines())
+        self.assertIsNone(_find(intel, "2010-4344"), _titles(intel))
+        self.assertIsNone(_find(intel, "smtp-vuln"), _titles(intel))
+
+    def test_positive_vuln_in_same_scan_survives(self):
+        """The fix must not swallow a real vuln that shares the parse."""
+        intel = _build_intel()
+        intel.update_from_vuln_scripts(_NMAP_VULN_SMTP_NOT_EXIM.splitlines())
+        f = _find(intel, "CVE-2014-3566")
+        self.assertIsNotNone(f, _titles(intel))
+        self.assertEqual(f["severity"], "medium")
+
+    def test_multiline_not_vulnerable_block_is_not_a_finding(self):
+        intel = _build_intel()
+        intel.update_from_vuln_scripts(_NMAP_VULN_CCS_NEGATIVE.splitlines())
+        self.assertIsNone(_find(intel, "CVE-2014-0224"), _titles(intel))
+        self.assertIsNone(_find(intel, "ccs-injection"), _titles(intel))
+
+
 if __name__ == "__main__":
     unittest.main()
