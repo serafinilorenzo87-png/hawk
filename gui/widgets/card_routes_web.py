@@ -818,7 +818,10 @@ class CardWebRoutesMixin:
             callback=_on_run,
             show_extensions=True,
             show_threads=True,
-            default_threads="20",
+            # gobuster's own default is 10; 20 saturates fragile lab / HTB
+            # virtual networks (EHOSTUNREACH mid-scan).  Operator can raise
+            # it in the dialog when the path can take it.
+            default_threads="10",
             extra_widgets_fn=_add_antifp_widgets,
             show_base_path=True,
             default_base_path=default_base_path)
@@ -968,7 +971,8 @@ class CardWebRoutesMixin:
             callback=_on_run,
             show_extensions=False,
             show_threads=True,
-            default_threads="20",
+            # Aligned with gobuster's default (10); see _route_gobuster_dir.
+            default_threads="10",
             extra_widgets_fn=_add_domain_widget)
 
     def _route_ffuf(self, tool, base_url):
