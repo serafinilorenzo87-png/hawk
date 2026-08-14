@@ -878,33 +878,43 @@ class TargetIntelAdminMixin:
     def _blink_start(self, count_as_new: bool = True):
         """Pulse the Target Intel tab to draw the user's attention.
 
-        `count_as_new=False` updates the visual pulse WITHOUT incrementing
-        the "(N new)" badge counter — used by callers that only refresh
-        existing data (e.g. update_from_nmap merging nmap output into the
-        cached fingerprint, which produces no actionable finding).  Used
-        to be a hidden source of off-by-one badge counts: the user saw
-        "(2 new)" but only one row had the NEW highlight.
+        The "(N new)" badge always mirrors the number of unread (fresh)
+        findings — see _refresh_new_badge — so it can never drift from the
+        highlighted rows.  The old incrementing counter did drift: a
+        mark-read or a removal cleared a row's highlight but left the
+        badge stuck showing e.g. "(2 new)" over a single live row.
+        ``count_as_new`` is kept for call-site compatibility.
         """
         if not self._tab_label:
             return
-        if count_as_new:
-            self._new_findings += 1
-        # Update badge text immediately (only when there's something to count)
-        if self._new_findings > 0:
-            try:
-                badge = (f"{self._tab_base_text}  "
-                         f"({self._new_findings} new)")
-                self._tab_label.configure(text=badge)
-            except Exception:
-                pass
-        # If already blinking, just bump the counter and let the existing
-        # animation continue (the new badge text is already applied).
+        self._refresh_new_badge()
+        # If already blinking, restart the cycle; the badge text is
+        # already up to date, so just let the animation continue.
         if self._blink_active:
-            self._blink_count = 0          # restart the cycle
+            self._blink_count = 0
             return
         self._blink_active = True
         self._blink_count  = 0
         self._blink_tick()
+
+    def _refresh_new_badge(self):
+        """Set the "(N new)" badge to the current number of unread (fresh)
+        findings, so it always equals the number of highlighted rows.
+        No-op until the tab label exists.  Callers: every add / merge
+        (via _blink_start), every removal, and mark-read."""
+        if not self._tab_label:
+            return
+        n = sum(1 for f in getattr(self, "_auto_findings", [])
+                if f.get("_fresh"))
+        self._new_findings = n
+        try:
+            if n > 0:
+                self._tab_label.configure(
+                    text=f"{self._tab_base_text}  ({n} new)")
+            else:
+                self._tab_label.configure(text=self._tab_base_text)
+        except Exception:
+            pass
 
     def _blink_tick(self):
         if not self._blink_active or self._blink_count >= 24:
@@ -931,15 +941,16 @@ class TargetIntelAdminMixin:
         self.after(320, self._blink_tick)
 
     def _blink_stop(self):
-        """Called when the user opens the Target Intel tab — clears the
-        'new' badge and stops any running blink animation."""
-        self._blink_active  = False
-        self._new_findings  = 0
+        """Called when the user opens the Target Intel tab — stops the
+        attention pulse.  The '(N new)' badge is NOT cleared here: opening
+        the tab is not the same as reading the findings, so the count
+        stays and shrinks only as findings are marked read (keeping it in
+        lock-step with the highlighted rows)."""
+        self._blink_active = False
+        self._refresh_new_badge()          # badge text = live unread count
         if self._tab_label and self._tab_label.winfo_exists():
             try:
-                self._tab_label.configure(
-                    text=self._tab_base_text,
-                    text_color=COLORS["text_green"])
+                self._tab_label.configure(text_color=COLORS["text_green"])
             except Exception:
                 pass
 

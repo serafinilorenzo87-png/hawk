@@ -47,9 +47,16 @@ from utils.session import Credential
 from gui.widgets.card_common import *
 
 class CardWebParserMixin:
-    def _parse_gobuster_to_intel(self, tool, log: list) -> bool:
+    def _parse_gobuster_to_intel(self, tool, log: list,
+                                 returncode: int = 0) -> bool:
         """Parse gobuster / dirb / ffuf output into a structured Target
         Intel finding.
+
+        ``returncode`` is the tool's exit code (STOP / stale-session runs
+        are already short-circuited upstream, so a non-zero value here is
+        a genuine tool failure).  It gates the empty-result branch: a
+        failed run that produced no path rows must not be reported as a
+        clean "0 paths found".
 
         Gobuster:    /admin                (Status: 200) [Size: 1234]
         Dirb:        + http://target/admin (CODE:200|SIZE:1234)
@@ -211,7 +218,7 @@ class CardWebParserMixin:
                     f"http://<target-ip>/")
                 self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
                     title=title, description=desc,
-                    severity="info", source="ffuf-vhost"))
+                    severity="info", source="ffuf-vhost", replace=True))
                 self.app.terminal.write(
                     f"  [*] {tool.name} — 0 vhosts on {dom}.", "dim")
                 return True
@@ -261,13 +268,28 @@ class CardWebParserMixin:
             severity = "medium" if entries else "info"
             self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
                 title=title, description="\n".join(parts),
-                severity=severity, source="ffuf-vhost"))
+                severity=severity, source="ffuf-vhost", replace=True))
             self.app.terminal.write(
                 f"  [+] {tool.name} — {len(entries)} vhost(s) on {dom} "
                 f"added to Target Intel.", "success")
             return True
 
         if not entries:
+            # A non-zero exit with no hits means the run FAILED — the tool
+            # aborted (connect: no route to host, wildcard bail-out, missing
+            # wordlist) and never tested anything.  Reporting that as
+            # "0 paths found — target really has no content" sells a failure
+            # as a clean empty scan.  Say it failed and add no finding;
+            # _on_done already printed the exit code + reason.  (STOP and
+            # stale-session runs are short-circuited before the parser, so
+            # this code path only sees genuine tool failures.)
+            if returncode != 0:
+                self.app.terminal.write(
+                    f"  [!] {tool.name} produced no scan data — the run "
+                    f"failed (exit {returncode}); no requests completed. "
+                    "Not recording an empty-result finding.", "warn")
+                return True
+
             # Zero paths found — produce a clear "empty" finding instead
             # of returning False (which would let the generic output
             # parser dump the gobuster banner into Target Intel).
@@ -314,7 +336,7 @@ class CardWebParserMixin:
             title = f"{tool.name} on {web_label}"
             self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
                 title=title, description=desc,
-                severity="info", source=tool.name))
+                severity="info", source=tool.name, replace=True))
             self.app.terminal.write(
                 f"  [*] {tool.name} — no paths matched. "
                 "See Target Intel for next-step suggestions.", "dim")
@@ -544,7 +566,7 @@ class CardWebParserMixin:
 
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=title, description=desc,
-            severity=severity, source=tool.name))
+            severity=severity, source=tool.name, replace=True))
 
         self.app.terminal.write(
             f"  [+] {tool.name} — {len(entries)} paths added to "

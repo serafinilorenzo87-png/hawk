@@ -1717,7 +1717,7 @@ class CardRuntimeMixin:
             if tool.binary in ("gobuster", "dirb", "ffuf") and log:
                 try:
                     used_specialized = self._parse_gobuster_to_intel(
-                        tool, log) or used_specialized
+                        tool, log, returncode) or used_specialized
                 except Exception as e:
                     self.app.terminal.write(
                         f"  [!] gobuster parser error: {e}", "error")

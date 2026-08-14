@@ -2397,11 +2397,43 @@ class TargetIntelRenderMixin:
             return ""
         return str(n)
 
+    def remove_auto_findings_by_source(self, source: str) -> int:
+        """Drop every auto-finding emitted by ``source`` (case-insensitive).
+
+        Snapshot enumerators (enum4linux / rpcclient) call this right
+        before writing their fresh finding so a re-run leaves exactly ONE
+        card for the tool instead of stacking a new one beside the
+        previous run's — including a stale card left by an earlier HAWK
+        version whose title carried a now-changed count.  Returns the
+        number removed.  Main-thread only (callers wrap it in ui_call /
+        ``after``); it mutates the finding list and re-renders.
+        """
+        src = (source or "").strip().lower()
+        if not src:
+            return 0
+        keep, removed = [], 0
+        for f in self._auto_findings:
+            if (f.get("source") or "").strip().lower() == src:
+                removed += 1
+            else:
+                keep.append(f)
+        if removed:
+            self._auto_findings = keep
+            try:
+                self._render_auto_findings()
+            except Exception:
+                pass
+            _rb = getattr(self, "_refresh_new_badge", None)
+            if _rb:
+                _rb()
+        return removed
+
     def add_auto_finding(self, title: str, description: str,
                          severity: str = "info", source: str = "",
                          linked_run_id: str = "",
                          port: "int | None" = None,
-                         raw_description: str = ""):
+                         raw_description: str = "",
+                         replace: bool = False):
         """Add or UPDATE an auto-finding in Target Intel.
 
         If a finding with the same title AND the same port already
@@ -2434,6 +2466,13 @@ class TargetIntelRenderMixin:
         session-save time, never written to disk).  The Info dialog's
         SHOW RAW toggle uses it to swap the EVIDENCE block locally.
 
+        ``replace`` makes a merge OVERWRITE the existing description and
+        severity with this call's values instead of appending — for
+        snapshot tools (gobuster/dirb/ffuf) whose every run reports the
+        complete current state, so appending stacked contradictory
+        summaries ("0 paths found" next to "Discovered 22 paths").  The
+        per-run ``occurrences`` history is kept either way.
+
         Thread-safe by construction: pushing a finding rerenders Tk
         widgets, so a call arriving from a worker thread (tool job,
         xterm watcher) is re-dispatched to the UI thread and returns.
@@ -2444,7 +2483,7 @@ class TargetIntelRenderMixin:
                 ui(self.add_auto_finding, title, description,
                    severity=severity, source=source,
                    linked_run_id=linked_run_id, port=port,
-                   raw_description=raw_description)
+                   raw_description=raw_description, replace=replace)
                 return
 
         from utils.session import Finding
@@ -2502,6 +2541,38 @@ class TargetIntelRenderMixin:
                 # title) shouldn't blank out the previous raw.
                 if raw_description:
                     existing["_raw_description"] = raw_description
+
+                if replace:
+                    # Snapshot tools (gobuster/dirb/ffuf) report the
+                    # CURRENT complete state each run, so the new
+                    # description SUPERSEDES the old instead of being
+                    # appended — appending stacked contradictory cards
+                    # ("0 paths found" next to "Discovered 22 paths").
+                    # The occurrences recorded above keep the per-run
+                    # history; the visible description + severity track
+                    # the latest run.
+                    existing["description"] = description
+                    existing["severity"] = severity
+                    if source:
+                        existing["source"] = source
+                    if linked_run_id:
+                        existing["linked_run_id"] = linked_run_id
+                    existing["_fresh"] = True
+                    existing["_update_note"] = f"REFRESHED #{run_no}"
+                    self._render_auto_findings()
+                    self._blink_start(count_as_new=True)
+                    self.app.terminal.write(
+                        f"  [+] Target Intel refreshed: {title}  "
+                        f"(run #{run_no})", "success")
+                    try:
+                        self._kb_correlate(
+                            title, description,
+                            port=existing.get("port"), source=source)
+                    except Exception as e:
+                        import sys as _s
+                        print(f"[HAWK] CVE KB correlation (replace) "
+                              f"failed: {e}", file=_s.stderr)
+                    return
 
                 old_lines = existing.get("description", "").splitlines()
                 new_lines = description.splitlines()
@@ -3222,6 +3293,9 @@ class TargetIntelRenderMixin:
         finding.pop("_fresh", None)
         finding.pop("_update_note", None)
         self._apply_read_style(finding)
+        _rb = getattr(self, "_refresh_new_badge", None)
+        if _rb:
+            _rb()
 
     def _apply_read_style(self, finding: dict) -> None:
         """Repaint an individual finding card to the non-fresh style.
@@ -3271,6 +3345,9 @@ class TargetIntelRenderMixin:
                 f.pop("_update_note", None)
                 self._apply_read_style(f)
                 touched += 1
+        _rb = getattr(self, "_refresh_new_badge", None)
+        if _rb:
+            _rb()
         if touched == 0:
             try:
                 self.app.terminal.write(
