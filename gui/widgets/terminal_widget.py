@@ -114,22 +114,36 @@ def _explain_smb_signing(low: str) -> str:
             "(ntlmrelayx). Capture a hash and relay it to other hosts.")
 
 
-def _explain(line: str) -> str:
+def _explain(line: str, seen=None) -> str:
     low = line.lower()
     # SMB signing is relay-relevant only when NOT required — decide from
     # the line itself instead of a flat keyword (W-01).
     if "message signing" in low or "message_signing" in low:
-        return _explain_smb_signing(low)
-    for kw, expl in EXPLANATIONS.items():
-        if kw in low:
-            return expl
-    return ""
+        expl = _explain_smb_signing(low)
+    else:
+        expl = ""
+        for kw, e in EXPLANATIONS.items():
+            if kw in low:
+                expl = e
+                break
+    if not expl:
+        return ""
+    # Show each distinct hint at most ONCE per tool run.  A verbose tool
+    # (dirb testing /phpMyAdmin/setup/<word> for every wordlist entry)
+    # would otherwise repeat "Database admin panel exposed" dozens of
+    # times — drowning the output and faking many exposed panels.
+    if seen is not None:
+        if expl in seen:
+            return ""
+        seen.add(expl)
+    return expl
 
 
 # ─── Smart parsers ────────────────────────────────────────────────────────────
 
 def _parse_nmap(lines):
     out = []
+    seen = set()
     open_ports = []
     for line in lines:
         l = _strip(line.strip())
@@ -137,7 +151,7 @@ def _parse_nmap(lines):
         if m:
             port, proto, svc, rest = int(m.group(1)), m.group(2), m.group(3), m.group(4)
             out.append(("finding", f"  {proto.upper():3}  {port:<6} {svc:<12} {rest.strip()}"))
-            exp = _explain(l)
+            exp = _explain(l, seen)
             if exp:
                 out.append(("dim", f"       → {exp}"))
             open_ports.append((port, proto, svc))
@@ -147,7 +161,7 @@ def _parse_nmap(lines):
             out.append(("info", f"  {l}"))
         elif l.startswith("|") or "script output" in l.lower():
             out.append(("dim", f"  {l}"))
-            exp = _explain(l)
+            exp = _explain(l, seen)
             if exp:
                 out.append(("dim", f"       → {exp}"))
     return out, open_ports
@@ -155,6 +169,7 @@ def _parse_nmap(lines):
 
 def _parse_gobuster(lines):
     out = []
+    seen = set()
     import re as _re
     # Gobuster: /path (Status: 200) [Size: 1234]
     GB_RE = _re.compile(
@@ -184,14 +199,14 @@ def _parse_gobuster(lines):
                 icon = "·"
             out.append((tag,
                         f"  {icon} {path:<40} [{status}]  {size}B"))
-            exp = _explain(l)
+            exp = _explain(l, seen)
             if exp:
                 out.append(("dim", f"       → {exp}"))
             entries.append(path)
         elif "(Status:" in l or (l.startswith("/") and "Status" in l):
             # Fallback for non-standard format
             out.append(("finding", f"  {l}"))
-            exp = _explain(l)
+            exp = _explain(l, seen)
             if exp:
                 out.append(("dim", f"       → {exp}"))
     # Summary line at the end
@@ -207,11 +222,12 @@ def _parse_gobuster(lines):
 
 def _parse_nikto(lines):
     out = []
+    seen = set()
     for line in lines:
         l = _strip(line.strip())
         if l.startswith("+ ") and "Target" not in l and "0 error" not in l:
             out.append(("finding", f"  {l}"))
-            exp = _explain(l)
+            exp = _explain(l, seen)
             if exp:
                 out.append(("dim", f"       → {exp}"))
         elif l.startswith("- Nikto"):
@@ -221,6 +237,7 @@ def _parse_nikto(lines):
 
 def _parse_enum4linux(lines):
     out = []
+    seen = set()
     keys = ["domain name:", "domain sid:", "server:", "os:", "share",
             "user:", "group", "password policy", "workgroup",
             "membership", "native os", "netbios"]
@@ -228,7 +245,7 @@ def _parse_enum4linux(lines):
         l = _strip(line.strip())
         if any(k in l.lower() for k in keys) and l:
             out.append(("finding", f"  {l}"))
-            exp = _explain(l)
+            exp = _explain(l, seen)
             if exp:
                 out.append(("dim", f"       → {exp}"))
     return out
@@ -523,11 +540,12 @@ def _parse_wafw00f(lines):
 
 def _parse_nuclei(lines):
     out = []
+    seen = set()
     for line in lines:
         l = _strip(line.strip())
         if re.search(r'\[(critical|high|medium|low)\]', l, re.I):
             out.append(("finding", f"  {l}"))
-            exp = _explain(l)
+            exp = _explain(l, seen)
             if exp:
                 out.append(("dim", f"       → {exp}"))
         elif "[INF]" in l and "http" in l.lower():
@@ -537,6 +555,7 @@ def _parse_nuclei(lines):
 
 def _parse_generic(lines):
     out = []
+    seen = set()
     for line in lines:
         l = _strip(str(line).strip() if not isinstance(line, tuple)
                    else line[1].strip())
@@ -548,7 +567,7 @@ def _parse_generic(lines):
                                    "critical", "[high]", "[medium]",
                                    "vulnerable"]):
             out.append(("finding", l))
-            exp = _explain(l)
+            exp = _explain(l, seen)
             if exp:
                 out.append(("dim", f"  → {exp}"))
         elif any(k in low for k in ["error", "failed", "[!]", "denied",
