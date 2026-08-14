@@ -2498,10 +2498,26 @@ class TargetBar(ctk.CTkFrame):
         _btn(row, "CANCEL", lambda: _safe_destroy(win))
 
     def _do_save_current(self):
-        """Perform the actual save. Called either directly (no bg jobs)
-        or from the bg-job warning dialog after the user confirms."""
-        sess = self.app.session_manager.current
+        """SAVE pressed.  Overwrite the session's own file, or — on the
+        user's choice — write it under a new name.  A fresh session with
+        no file on disk yet is saved straight away (no prompt).
 
+        The explicit SAVE used to always create a fresh timestamped
+        snapshot (session.save(new_file=True)), so pressing it twice on
+        the same target left two files on disk for one session.  Now it
+        reuses the session's own file unless the user asks otherwise.
+        """
+        sess = self.app.session_manager.current
+        import os as _os
+        has_file = bool(sess.file_path and _os.path.isfile(sess.file_path))
+        if has_file:
+            self._show_save_choice(sess)
+        else:
+            self._commit_save(sess, lambda: sess.save(new_file=False))
+
+    def _commit_save(self, sess, do_save):
+        """Sync Target Intel, run the chosen save, and report the result.
+        ``do_save`` is a 0-arg callable returning the written path."""
         # Capture a snapshot of the Target Intel panel so it can be
         # restored on reload.  Same helper the autosave tick and the
         # report path use, so the three can never disagree on what the
@@ -2509,7 +2525,7 @@ class TargetBar(ctk.CTkFrame):
         sync_target_intel(self.app, sess)
 
         try:
-            path = sess.save(new_file=True)
+            path = do_save()
             import os as _os
             fname = _os.path.basename(path)
         except Exception as e:
@@ -2533,6 +2549,74 @@ class TargetBar(ctk.CTkFrame):
                 f"line(s) and {_s.get('tools_dropped', 0)} tool record(s) "
                 f"were dropped from this snapshot — full output is in "
                 f"outputs/.", "warn")
+
+    def _show_save_choice(self, sess):
+        """SAVE on a session that already has a file: overwrite it, or
+        write a new file under a name the user types.  Overwrite is the
+        default (Return)."""
+        from gui.dialogs import (_make_win, _title, _note_box,
+                                 _btn_row, _btn, _safe_destroy)
+        import os as _os
+        fname = _os.path.basename(sess.file_path)
+        win = _make_win(self, "Save session", 560, 300)
+        _title(win, "💾  SAVE SESSION")
+        _note_box(win,
+                  "A saved file for this session already exists:\n\n"
+                  f"    {fname}\n\n"
+                  "Overwrite it, or save under a new file name?",
+                  COLORS["text_yellow"])
+
+        def _overwrite():
+            _safe_destroy(win)
+            self._commit_save(sess, lambda: sess.save(new_file=False))
+
+        def _save_as():
+            _safe_destroy(win)
+            self._prompt_save_as(sess)
+
+        row = _btn_row(win)
+        _btn(row, "OVERWRITE", _overwrite, primary=True, w=150)
+        _btn(row, "SAVE AS NEW NAME", _save_as, w=190)
+        _btn(row, "CANCEL", lambda: _safe_destroy(win))
+        try:
+            win.bind("<Return>", lambda _e: _overwrite())
+        except Exception:
+            pass
+
+    def _prompt_save_as(self, sess):
+        """Ask for a file name and write a NEW session file under it."""
+        from gui.dialogs import (_make_win, _title, _note_box,
+                                 _btn_row, _btn, _safe_destroy)
+        win = _make_win(self, "Save as new name", 560, 300)
+        _title(win, "💾  SAVE AS NEW NAME")
+        _note_box(win,
+                  "Enter a name for the new session file\n"
+                  "(the .json extension is added automatically).",
+                  COLORS["text_dim"])
+        name_var = ctk.StringVar(value=sess.default_save_stem())
+        entry = ctk.CTkEntry(
+            win, width=500, height=30, textvariable=name_var,
+            font=ctk.CTkFont(family="Courier New", size=14),
+            fg_color="#050505", text_color=COLORS["text_bright"],
+            border_color=COLORS["border_green"], border_width=1,
+            corner_radius=3)
+        entry.pack(fill="x", padx=24, pady=(4, 8))
+
+        def _do():
+            name = name_var.get().strip()
+            if not name:
+                return
+            _safe_destroy(win)
+            self._commit_save(sess, lambda: sess.save_as(name))
+
+        row = _btn_row(win)
+        _btn(row, "SAVE", _do, primary=True, w=150)
+        _btn(row, "CANCEL", lambda: _safe_destroy(win))
+        try:
+            entry.focus_set()
+            win.bind("<Return>", lambda _e: _do())
+        except Exception:
+            pass
 
     # ── Autosave ───────────────────────────────────────────────────────────
 

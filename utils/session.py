@@ -1012,6 +1012,34 @@ class Session:
         self.file_path = path
         return path
 
+    def default_save_stem(self) -> str:
+        """Timestamped stem suggested in the SAVE-AS name field.
+        Matches _make_snapshot_path: ``{target}_{date}_{time}``."""
+        return (f"{self._safe_target_slug()}_"
+                f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}")
+
+    def save_as(self, name: str) -> str:
+        """Save under a user-chosen file name in SESSIONS_DIR and ADOPT
+        that file as the session's own going forward, so later autosaves
+        overwrite it instead of spawning a fresh snapshot.
+
+        The name is sanitised to a filesystem-safe stem; a ``.json`` tail
+        is stripped (re-added below); an empty result falls back to the
+        target slug; and a name that collides with a DIFFERENT existing
+        file gets a ``(n)`` suffix so nothing is silently clobbered.
+        """
+        stem = re.sub(r"[^A-Za-z0-9._-]+", "_", (name or "").strip()).strip("._")
+        if stem.lower().endswith(".json"):
+            stem = stem[:-5].strip("._")
+        stem = stem or self._safe_target_slug()
+        candidate = os.path.join(SESSIONS_DIR, f"{stem}.json")
+        n = 1
+        while os.path.exists(candidate):
+            candidate = os.path.join(SESSIONS_DIR, f"{stem}({n}).json")
+            n += 1
+        self.file_path = candidate
+        return self.save(new_file=False)
+
     def delete_files(self) -> list:
         """Permanently erase every JSON snapshot on disk that belongs
         to this session (same session_id).  Returns the list of deleted
@@ -1146,15 +1174,16 @@ class Session:
     def _make_snapshot_path(self) -> str:
         """Build a new snapshot filename using the current date+time.
 
-        Format: ``{target}-{YYYY-MM-DD}-{HH-MM-SS}.json``
-        Example: ``192.168.156.162-2026-04-15-17-45-12.json``
+        Format: ``{target}_{YYYY-MM-DD}_{HH-MM-SS}.json``
+        Example: ``192.168.156.162_2026-04-15_17-45-12.json``
 
-        Dashes everywhere (no underscore mix) so the name is easy to read
-        and sort. If the exact same second is already taken, append
-        ``(1)``, ``(2)`` … to disambiguate."""
+        Underscores separate target / date / time so the three parts read
+        as distinct (dashes stay INSIDE the date and the time). If the
+        exact same second is already taken, append ``(1)``, ``(2)`` … to
+        disambiguate."""
         safe = self._safe_target_slug()
-        ts   = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-        base = f"{safe}-{ts}"
+        ts   = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        base = f"{safe}_{ts}"
         candidate = os.path.join(SESSIONS_DIR, f"{base}.json")
         n = 1
         while os.path.exists(candidate):
@@ -1228,8 +1257,11 @@ class Session:
 # LAST written.  The two intentionally differ — an old session re-saved today
 # carries an old name-date but a fresh mtime — so the two sort modes are
 # genuinely distinct and are kept apart.
+# The separator between date and time is `_` in the current naming
+# scheme (`ip_date_time`) and `-` in the legacy all-dashes scheme —
+# accept both so old snapshots still sort by their in-name date.
 _SESSION_NAME_TS_RE = re.compile(
-    r'(?P<date>\d{4}-\d{2}-\d{2})-(?P<time>\d{2}-\d{2}-\d{2})')
+    r'(?P<date>\d{4}-\d{2}-\d{2})[-_](?P<time>\d{2}-\d{2}-\d{2})')
 
 SORT_LAST_MODIFIED = "Last modified"
 SORT_DATE          = "Date"
