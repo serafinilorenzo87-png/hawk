@@ -278,24 +278,35 @@ def probe_redis(host, port):
     return None
 
 
-def probe_memcached(host, port):
-    """Identify Memcached via the `version\\r\\n` text-protocol command.
-
-    Response: VERSION 1.6.21\\r\\n  (always — protocol-mandatory).
-    Unknown verbs respond with `ERROR\\r\\n`, also distinctive.
-    """
-    data = _tcp_send_recv(host, port, b"version\r\n", timeout=2)
-    if data is None or not data:
+def _classify_memcached(data):
+    """Classify a memcached `version\\r\\n` reply → (svc, ver, conf) | None."""
+    if not data:
         return None
     if data.startswith(b"VERSION "):
         ver = data[8:].decode("latin-1", "replace").strip()
         # Trim any trailing \r/\n
         ver = ver.split("\r", 1)[0].split("\n", 1)[0]
         return ("memcached", ver, "high")
-    if data.startswith(b"ERROR"):
-        # Generic memcached error — still distinctive
+    # memcached's unknown-verb reply is EXACTLY "ERROR\r\n".  Match only
+    # that — an IRC server (UnrealIRCd on 6667/6697) answering our junk
+    # line with "ERROR :Closing Link: ... (Throttled: ...)" ALSO starts
+    # with "ERROR", and the old startswith() check re-classified those
+    # IRC ports as memcached, overwriting nmap's correct 'irc' label.
+    if data.split(b"\n", 1)[0].strip() == b"ERROR":
         return ("memcached", "", "medium")
     return None
+
+
+def probe_memcached(host, port):
+    """Identify Memcached via the `version\\r\\n` text-protocol command.
+
+    Response: VERSION 1.6.21\\r\\n  (always — protocol-mandatory).
+    memcached's unknown-verb reply is exactly `ERROR\\r\\n`.
+    """
+    data = _tcp_send_recv(host, port, b"version\r\n", timeout=2)
+    if data is None or not data:
+        return None
+    return _classify_memcached(data)
 
 
 def probe_mongodb(host, port):
