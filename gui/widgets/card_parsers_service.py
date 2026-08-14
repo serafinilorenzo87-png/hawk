@@ -657,6 +657,15 @@ class CardServiceParserMixin:
         is_dc          = False
 
         USER_RE   = re.compile(r'user:\[([^\]]+)\]\s+rid:\[([^\]]+)\]', re.I)
+        # enum4linux-ng (the binary HAWK actually runs) prints each
+        # account on its own line as "username: <name>" — the classic
+        # "user:[name] rid:[..]" form USER_RE catches never appears in
+        # -ng output, so without this every account (system + real:
+        # root/msfadmin/user/service/postgres/…) was parsed as 0 users.
+        # Anchored to the line start so the target-config echo
+        # "[*] Username ......... ''" and the "name:" GECOS line are
+        # NOT mistaken for accounts.
+        USER_NG_RE = re.compile(r'^username:\s*(\S+)', re.I)
         GROUP_RE  = re.compile(r'S-1-5-[\d\-]+\s+([^\s]+\\[^(]+)\s+\(([^)]+)\)', re.I)
         SHARE_RE  = re.compile(r'^\s*(\w[\w$\-]*)\s+(Disk|IPC|Printer)\s*(.*)', re.I)
         SHARE_NG_RE = re.compile(r'Testing share\s+(\S+)', re.I)
@@ -692,6 +701,10 @@ class CardServiceParserMixin:
 
             # Users
             m = USER_RE.search(s)
+            if m:
+                users.append(m.group(1))
+                continue
+            m = USER_NG_RE.match(s)
             if m:
                 users.append(m.group(1))
                 continue
@@ -1006,12 +1019,26 @@ class CardServiceParserMixin:
         flag_txt = (" — " + ", ".join(flags)) if flags else ""
         host_txt = computer_name or target
         tool_label = (getattr(tool, "name", "") or "ENUM4LINUX").upper()
-        title = (f"{tool_label} — {len(users)} users, "
-                 f"{len(shares)} shares on {host_txt}{flag_txt}")
+        # Stable title WITHOUT per-run counts: the counts used to live in
+        # the title, so a 0-users run and a 35-users run produced two
+        # separate cards.  Counts stay in the description; the title is
+        # stable so re-runs collapse onto one card.
+        title = f"{tool_label} on {host_txt}{flag_txt}"
 
-        self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
-            title=title, description=desc,
-            severity=severity, source=tool.name))
+        _source = tool.name
+
+        def _emit():
+            # Snapshot tool: this run's card is the whole truth, so drop
+            # any earlier card from the same tool (incl. a stale one from
+            # a pre-fix HAWK version whose title carried a count) before
+            # writing the fresh one.  Result: exactly ONE enum4linux /
+            # rpcclient card, always the latest, re-highlighted each run.
+            self.app.target_intel.remove_auto_findings_by_source(_source)
+            self.app.target_intel.add_auto_finding(
+                title=title, description=desc,
+                severity=severity, source=_source, replace=True)
+
+        self.app.after(0, _emit)
         return True
 
     def _parse_kerbrute_to_intel(self, tool, log: list) -> bool:

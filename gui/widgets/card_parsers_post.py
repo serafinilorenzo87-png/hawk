@@ -46,6 +46,34 @@ from utils.runner import ToolRunner, MultiRunner, MetasploitRunner, GreenBoneRun
 from utils.session import Credential
 from gui.widgets.card_common import *
 
+
+# Administrative / hidden SMB shares are never reachable over an
+# anonymous (`-N`) session — suggesting a connect to one just yields
+# NT_STATUS_ACCESS_DENIED.  MS2 exposes ADMIN$ as a share, which is how
+# the old picker (C$/ADMIN$ first in its preference list) landed on it.
+_SMB_ADMIN_SHARES = frozenset({"C$", "ADMIN$", "IPC$"})
+_SMB_ANON_PREF = ("Users", "Public", "Documents", "Shared", "Share",
+                  "tmp", "opt", "data", "www")
+
+
+def _pick_anon_connect_share(share_names):
+    """Best share to suggest for an anonymous ``smbclient -N`` connect.
+
+    Prefers a readable Disk share (see ``_SMB_ANON_PREF``), then any
+    share that isn't administrative/hidden.  Returns "" when ONLY admin
+    shares exist, so the caller suggests re-listing instead of a connect
+    that is doomed anonymously.
+    """
+    for pref in _SMB_ANON_PREF:
+        for s in share_names:
+            if s.lower() == pref.lower():
+                return s
+    for s in share_names:
+        if s.upper() not in _SMB_ADMIN_SHARES:
+            return s
+    return ""
+
+
 class CardPostParserMixin:
     def _parse_winpeas_output(self, tool, log: list):
         """Parse winpeas.bat/exe exfiltrated output and push findings to
@@ -477,7 +505,7 @@ class CardPostParserMixin:
             try:
                 sess = self.app.session_manager.current
                 if sess is not None:
-                    sess.add_credential(Credential(
+                    anon_cred = Credential(
                         username="anonymous",
                         password="",
                         cred_type="cleartext",
@@ -488,11 +516,19 @@ class CardPostParserMixin:
                                f"{tool.name} on {target}."),
                         # The anonymous session itself succeeded —
                         # that IS the credential working.
-                        verified=True))
-                    sess.save()
+                        verified=True)
+                    # Route through the store, NOT sess.add_credential:
+                    # the store normalises password ""→"anonymous" and
+                    # dedups.  A bare sess.add_credential with password=""
+                    # never matches the normalised "anonymous/anonymous"
+                    # row, so a re-run of SMBCLIENT List stacked a
+                    # duplicate anon credential on every pass.
                     cs = getattr(self.app, "cred_store", None)
                     if cs:
-                        cs.refresh()
+                        cs.add_credential(anon_cred)
+                    else:
+                        sess.add_credential(anon_cred)
+                        sess.save()
             except Exception as e:
                 print(f"[HAWK] smb anon cred push failed: {e}")
 
@@ -553,27 +589,12 @@ class CardPostParserMixin:
                     # A previous custom check here ignored the password,
                     # which blocked upgrading legacy password="" entries.
                     if True:
-                        # Pick the best concrete share to suggest in the
-                        # connect command (prefer readable ones over IPC$).
-                        pref_order = ("C$", "ADMIN$", "Users", "Public",
-                                      "Documents", "Shared", "Share", "tmp")
+                        # Pick the best concrete share for an anonymous
+                        # connect — administrative/hidden shares (C$,
+                        # ADMIN$, IPC$) are excluded because -N can't reach
+                        # them (see _pick_anon_connect_share).
                         share_names = [s for s, _ in shares]
-                        chosen_share = ""
-                        for p in pref_order:
-                            for s in share_names:
-                                if s.lower() == p.lower():
-                                    chosen_share = s
-                                    break
-                            if chosen_share:
-                                break
-                        if not chosen_share:
-                            # Fall back to the first non-IPC$ share, or just
-                            # the first one, or a generic placeholder.
-                            non_ipc = [s for s in share_names
-                                       if s.upper() != "IPC$"]
-                            chosen_share = (non_ipc[0] if non_ipc
-                                            else (share_names[0]
-                                                  if share_names else ""))
+                        chosen_share = _pick_anon_connect_share(share_names)
 
                         if chosen_share:
                             connect_cmd = (f"smbclient //{target}/"
