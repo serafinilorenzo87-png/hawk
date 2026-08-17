@@ -325,13 +325,22 @@ class CardAssaultRoutesMixin:
             if wl_choice == "wallarm" and installed:
                 wordlist_path = wallarm_path
             else:
-                wordlist_path = None  # use built-in
+                # Sentinel that FORCES the built-in list.  Passing None
+                # makes analyze_token auto-detect the 700k wallarm list
+                # (when installed) and silently ignore this "built-in"
+                # choice — so a user who picked the fast ~100-word list
+                # got a 700k brute instead.  A non-file value skips the
+                # autodetect and routes straight to the built-in fallback.
+                wordlist_path = "<builtin>"
             _safe_destroy(win)
 
             self._set_tool_status(tool.id, "running")
             self.set_status(STATUS_RUNNING)
             self.app.terminal.section(
                 f"JWT ANALYZER  ·  {token[:32]}…")
+            # Record in executed_tools (dot restore on reload); the finish
+            # is applied by the shared _on_done reached via _jwt_finalize.
+            self._record_tool_start(tool, "jwt_analyzer")
 
             self._run_jwt_analyzer(
                 tool, token,
@@ -441,32 +450,90 @@ class CardAssaultRoutesMixin:
                   else ("JWT Analyzer — analysis cancelled" if cancelled
                         else "JWT Analyzer — token analysis")))
 
+        # Batch the finding pushes: without this, each add_auto_finding
+        # re-renders the whole Target Intel panel, so pushing the index
+        # card + per-finding cards in one burst rebuilt the panel N times
+        # on the main thread and froze the app for several seconds.  One
+        # render at the end instead.
+        ti = self.app.target_intel
+        _suspend = getattr(ti, "_suspend_finding_render", None)
+        _resume = getattr(ti, "_resume_finding_render", None)
+        if _suspend:
+            _suspend()
         try:
-            self.app.target_intel.add_auto_finding(
-                title=title, description="\n".join(parts),
-                severity=worst, source="JWT Analyzer")
-        except Exception as e:
-            terminal.write(f"  [!] Could not push JWT finding: {e}",
-                           "warn")
-
-        # Per-finding entries (alg:none, secret recovered, etc.)
-        for f in result.findings:
-            if f.get("title") == "JWT decoded":
-                continue   # the index card already has the decode
-            ev = "\n".join(f.get("evidence", []) or [])
-            desc = ev
-            if f.get("impact"):
-                desc += f"\n\nImpact: {f['impact']}"
-            if f.get("remediation"):
-                desc += f"\n\nRemediation: {f['remediation']}"
             try:
-                self.app.target_intel.add_auto_finding(
-                    title=f.get("title", "JWT finding"),
-                    description=desc,
-                    severity=f.get("severity", "info"),
-                    source="JWT Analyzer")
-            except Exception:
-                pass
+                # replace=True: each run is a COMPLETE current analysis,
+                # so the card shows only the latest run instead of
+                # stacking lines that vary run-to-run (Elapsed, wordlist).
+                # Per-run history is kept in occurrences.
+                ti.add_auto_finding(
+                    title=title, description="\n".join(parts),
+                    severity=worst, source="JWT Analyzer",
+                    replace=True)
+            except Exception as e:
+                terminal.write(f"  [!] Could not push JWT finding: {e}",
+                               "warn")
+
+            # Per-finding entries (alg:none, secret recovered, etc.)
+            for f in result.findings:
+                if f.get("title") == "JWT decoded":
+                    continue   # the index card already has the decode
+                ev = "\n".join(f.get("evidence", []) or [])
+                desc = ev
+                if f.get("impact"):
+                    desc += f"\n\nImpact: {f['impact']}"
+                if f.get("remediation"):
+                    desc += f"\n\nRemediation: {f['remediation']}"
+                try:
+                    ti.add_auto_finding(
+                        title=f.get("title", "JWT finding"),
+                        description=desc,
+                        severity=f.get("severity", "info"),
+                        source="JWT Analyzer", replace=True)
+                except Exception:
+                    pass
+        finally:
+            if _resume:
+                _resume()
+
+        # A recovered signing secret IS a high-value credential — it lets
+        # you forge any token (auth bypass / privilege escalation).  The
+        # findings only carry a MASKED copy and the raw value is stripped
+        # at session-save time, so without this the crack is unusable
+        # after the run.  Push the full secret to the Credential Store
+        # (deduped there by user+host+password), where it persists, is
+        # revealable, and reaches the report.
+        if result.cracked_secret:
+            try:
+                from utils.session import Credential
+                payload = result.payload or {}
+                subject = (payload.get("sub") or payload.get("user")
+                           or payload.get("username") or "jwt")
+                cs = getattr(self.app, "cred_store", None)
+                cred = Credential(
+                    username=str(subject),
+                    password=result.cracked_secret,
+                    cred_type="jwt-secret",
+                    services=["JWT"],
+                    source_phase=getattr(self, "phase_id", ""),
+                    host=self._get_target() or "",
+                    notes=(f"JWT {result.algorithm or 'HS256'} signing "
+                           f"secret recovered "
+                           f"({len(result.cracked_secret)} chars, "
+                           f"wordlist: {result.wordlist_used or 'n/a'}). "
+                           f"Forge any token -> admin escalation / "
+                           f"session hijack."),
+                    verified=True)
+                if cs is not None:
+                    cs.add_credential(cred)
+                    terminal.write(
+                        f"  [+] JWT signing secret -> Credential Store "
+                        f"(subject: {subject}, service: JWT).",
+                        "success")
+            except Exception as e:
+                terminal.write(
+                    f"  [!] Could not push JWT secret to Credential "
+                    f"Store: {e}", "warn")
 
         state = getattr(self.app, "assault_state", None)
         if state is not None:
@@ -711,6 +778,9 @@ class CardAssaultRoutesMixin:
             self.set_status(STATUS_RUNNING)
             self.app.terminal.section(
                 f"INJECTION TESTER  ·  mode={mode}")
+            # Record in executed_tools (dot restore on reload); the finish
+            # is applied by the shared _on_done reached via _inject_finalize.
+            self._record_tool_start(tool, f"injection_tester mode={mode}")
 
             self._run_injection_tester(
                 tool, chosen_keys=chosen_keys, manual=manual,
