@@ -1377,13 +1377,19 @@ class CardOracleRoutesMixin:
                     if _SEV_RANK.get(_s, 4) < _SEV_RANK.get(_max_sev,
                                                               4):
                         _max_sev = _s
+                # Stable title (no counts) so re-running Oracle on the
+                # same URL updates this one summary card instead of
+                # stacking a new one every time the exposure/CVE count
+                # changes (e.g. 1 -> 20 exposures between runs).  The
+                # counts live in the description; replace=True refreshes
+                # it to the latest run.  Same fix shape as the dir-buster
+                # / enum4linux stable-title findings.
                 intel.add_auto_finding(
-                    title=f"ORACLE — {url} "
-                          f"({len(cves)} CVEs, "
-                          f"{len(expos)} exposures)",
+                    title=f"ORACLE — {url}",
                     description="\n".join(desc_lines),
                     severity=_max_sev,
                     source="Web Oracle",
+                    replace=True,
                     linked_run_id=base_rid)
 
                 # One finding per CVE so severity / search work.
