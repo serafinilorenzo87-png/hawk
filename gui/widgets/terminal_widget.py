@@ -1271,6 +1271,30 @@ class TerminalWidget(ctk.CTkFrame):
         except Exception:
             pass
 
+    def _abort_progress(self, tool_name: str = "", reason: str = ""):
+        """Stop this scan's bar in a distinct 'ran, but did not succeed'
+        state.
+
+        Unlike _finish_progress (100% green check, which reads as
+        success) this leaves an empty amber bar carrying the real reason
+        — used when a probe completed but the service is absent/
+        unreachable (e.g. SNMP 161/udp closed), where a green tick would
+        misreport a dead port as a successful scan.
+        """
+        entry = self._progress_labels.pop(tool_name, None)
+        self._progress_max.pop(tool_name, None)
+        self._port_scan_seen.pop(tool_name, None)
+        if not entry:
+            return
+        try:
+            lbl, var = entry
+            if lbl.winfo_exists():
+                tail = f"  — {reason}" if reason else "  — stopped"
+                var.set(f"  [{'░' * 20}]{tail}")
+                lbl.configure(fg="#C08040")   # amber: ran, no service
+        except Exception as e:
+            print(f"[HAWK] abort progress error: {e}")
+
     def restore_lines(self, lines: list):
         """Reload terminal output from a session snapshot.
 

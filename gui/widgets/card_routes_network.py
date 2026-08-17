@@ -768,8 +768,16 @@ class CardNetworkRoutesMixin:
                                          text, _re.I)
             closed         = _re.search(r"161/udp\s+closed", text, _re.I)
 
+            # The probe drives nmap's --stats-every bar directly through
+            # ToolRunner and never reaches flush_tool_output, so we must
+            # close the bar here or it freezes at its last % (e.g. 50%).
+            # Open outcomes finish it (green, we go on to SNMPWALK); a
+            # closed/filtered port aborts it (amber, no false success).
+            probe_bar = "NMAP UDP 161 probe"
+
             def _on_ui():
                 if open_match:
+                    self.app.terminal._finish_progress(probe_bar)
                     self.app.terminal.write(
                         "  [+] SNMP port OPEN (161/udp answered the "
                         "probe) — opening SNMPWALK to enumerate.",
@@ -782,6 +790,7 @@ class CardNetworkRoutesMixin:
                     # It is the NORMAL result for UDP, and calling it
                     # "port reachable" told the operator a fact nmap
                     # never established.
+                    self.app.terminal._finish_progress(probe_bar)
                     self.app.terminal.write(
                         "  [?] 161/udp open|filtered — no reply. nmap "
                         "cannot tell an open silent port from a "
@@ -792,14 +801,20 @@ class CardNetworkRoutesMixin:
                     self._show_snmp_dialog(tool, target, 161,
                                            state_confirmed=False)
                 elif filtered_only:
+                    self.app.terminal._abort_progress(
+                        probe_bar, "161/udp filtered (firewall)")
                     self.app.terminal.write(
                         "  [!] SNMP port filtered by firewall. Skip "
                         "SNMP on this target.", "warn")
                 elif closed:
+                    self.app.terminal._abort_progress(
+                        probe_bar, "161/udp closed (no service)")
                     self.app.terminal.write(
                         "  [!] SNMP port closed — service not running.",
                         "warn")
                 else:
+                    self.app.terminal._abort_progress(
+                        probe_bar, "state not parseable")
                     self.app.terminal.write(
                         "  [!] SNMP scan returned no parseable state. "
                         "Check the raw nmap output above.", "warn")
