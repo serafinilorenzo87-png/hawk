@@ -1040,6 +1040,30 @@ class CardRuntimeMixin:
         runner.run(cmd, tool.name, cwd=cwd,
                    timeout=getattr(tool, "timeout", None))
 
+    def _record_tool_start(self, tool, cmd: str):
+        """Open a session execution record for a run launched OUTSIDE the
+        standard _run_raw path (background jobs, ORACLE, Bloody Crawl).
+
+        These paths used to skip start_tool_execution, so they never
+        landed in session.executed_tools — the log that drives the
+        tool-status dot restore on session reload (target_bar.apply_
+        session) and the session tool-history / reports.  We stash the
+        exec_id where _on_done already looks for it, so the finish is
+        handled by the same _on_done every one of these paths calls.
+        """
+        exec_id = None
+        try:
+            sess = self.app.session_manager.current
+            if sess is not None:
+                exec_id = sess.start_tool_execution(
+                    tool_id=tool.id, tool_name=tool.name,
+                    phase_id=self.phase_id, command=cmd)
+        except Exception as e:
+            print(f"[HAWK] start_tool_execution failed: {e}")
+        if tool.id in self._tool_widgets:
+            self._tool_widgets[tool.id]["_exec_id"] = exec_id
+        return exec_id
+
     def _run_in_background(self, tool, cmd: str, estimated_secs: int):
         import uuid
         job_id = str(uuid.uuid4())[:8]
@@ -1062,6 +1086,11 @@ class CardRuntimeMixin:
         session_token = self.app.session_token()
         if tool.id in self._tool_widgets:
             self._tool_widgets[tool.id]["_session_token"] = session_token
+
+        # Record this run in the session (executed_tools) so its dot is
+        # restored on reload and it shows in the tool history / report.
+        # The finish is applied by _on_done, called at the end of _done.
+        self._record_tool_start(tool, cmd)
 
         def _done(name, rc, log):
             if not self.app.session_token_valid(

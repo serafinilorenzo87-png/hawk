@@ -243,6 +243,9 @@ class CardOracleRoutesMixin:
             self._set_tool_status(tool.id, "running")
             self.set_status(STATUS_RUNNING)
             self.app.terminal.section(f"ORACLE  ·  {url}")
+            # Record the run in executed_tools (dot restore on reload +
+            # tool history); finish is applied by the _on_done below.
+            self._record_tool_start(tool, f"web_oracle {url}")
 
             # Bind shared state to this target.  If the user changed
             # target since the last pipeline run, AssaultState wipes
@@ -492,6 +495,9 @@ class CardOracleRoutesMixin:
             self._set_tool_status(tool.id, "running")
             self.set_status(STATUS_RUNNING)
             self.app.terminal.section(f"BLOODY CRAWL  ·  {final_url}")
+            # Record the run in executed_tools (dot restore on reload +
+            # tool history); finish is applied by _on_done (worker/crash).
+            self._record_tool_start(tool, f"bloody_crawl {final_url}")
 
             # The worker has no top-level try/except — if it raises
             # (network blip, parser error, …) the thread dies silently
