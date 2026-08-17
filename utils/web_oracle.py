@@ -1084,7 +1084,23 @@ class WebOracleRunner:
 
         from urllib.parse import urlparse as _up, urljoin as _urljoin
 
-        tech_lower = " ".join(t.lower() for t in profile.get("tech", []))
+        # profile["tech"] is a list of dicts ({name, version, source}) —
+        # built that way in _build_profile.  The old code did t.lower()
+        # treating each entry as a string, which raised AttributeError on
+        # the first element and silently killed the entire framework-aware
+        # phase (no probes, no swagger/graphql, empty API surface) behind
+        # a single warn.  Build the signature from the dict fields.
+        # profile["tech"] is a list of dicts ({name, version, source}) —
+        # built that way in _build_profile.  The old code did t.lower()
+        # treating each entry as a string, which raised AttributeError on
+        # the first element and silently killed the entire framework-aware
+        # phase (no probes, no swagger/graphql, empty API surface) behind
+        # a single warn.  Build the signature from the dict fields.
+        tech_lower = " ".join(
+            f"{t.get('name', '')} {t.get('version', '')}"
+            for t in (profile.get("tech") or [])
+            if isinstance(t, dict)
+        ).lower()
         framework = self._detect_framework(tech_lower)
 
         # ── Baseline (soft-404 fingerprint) ─────────────────────
