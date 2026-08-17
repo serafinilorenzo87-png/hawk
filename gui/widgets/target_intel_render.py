@@ -2428,6 +2428,30 @@ class TargetIntelRenderMixin:
                 _rb()
         return removed
 
+    def _render_and_blink(self, count_as_new: bool = True):
+        """Re-render the findings panel + refresh the badge — UNLESS a
+        batch push is in progress (see _suspend_finding_render).
+
+        Every add_auto_finding path routes its render through here so a
+        caller pushing several findings at once (e.g. JWT Analyzer's
+        finalize) pays for ONE panel rebuild instead of N.  N full
+        rebuilds in a single main-thread burst froze the app for several
+        seconds on a large panel (the JWT "can't click for ~5s" report).
+        """
+        if getattr(self, "_render_suspended", False):
+            return
+        self._render_auto_findings()
+        self._blink_start(count_as_new=count_as_new)
+
+    def _suspend_finding_render(self):
+        """Start a batch: per-finding renders are held until resume."""
+        self._render_suspended = True
+
+    def _resume_finding_render(self):
+        """End a batch and do the single deferred render + badge refresh."""
+        self._render_suspended = False
+        self._render_and_blink(count_as_new=True)
+
     def add_auto_finding(self, title: str, description: str,
                          severity: str = "info", source: str = "",
                          linked_run_id: str = "",
@@ -2559,8 +2583,7 @@ class TargetIntelRenderMixin:
                         existing["linked_run_id"] = linked_run_id
                     existing["_fresh"] = True
                     existing["_update_note"] = f"REFRESHED #{run_no}"
-                    self._render_auto_findings()
-                    self._blink_start(count_as_new=True)
+                    self._render_and_blink(count_as_new=True)
                     self.app.terminal.write(
                         f"  [+] Target Intel refreshed: {title}  "
                         f"(run #{run_no})", "success")
@@ -2616,8 +2639,7 @@ class TargetIntelRenderMixin:
                 if added:
                     existing["_fresh"]       = True
                     existing["_update_note"] = f"UPDATED #{run_no}"
-                self._render_auto_findings()
-                self._blink_start(count_as_new=bool(added))
+                self._render_and_blink(count_as_new=bool(added))
                 if added:
                     self.app.terminal.write(
                         f"  [+] Target Intel updated: {title}  "
@@ -2668,8 +2690,7 @@ class TargetIntelRenderMixin:
             # _FINDING_NON_PERSISTED_KEYS in target_bar.py.
             new_finding["_raw_description"] = raw_description
         self._auto_findings.append(new_finding)
-        self._render_auto_findings()
-        self._blink_start()
+        self._render_and_blink()
         self.app.terminal.write(
             f"  [+] Finding added to Target Intel: {title}  (run #1)",
             "success")
