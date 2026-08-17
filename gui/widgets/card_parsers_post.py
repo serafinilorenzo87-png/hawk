@@ -387,7 +387,13 @@ class CardPostParserMixin:
 
         # netexec -u USER -p PASS style.
         if not auth_user:
-            mu = re.search(r"\s-u\s+(?:\"([^\"]+)\"|'([^']+)'|(\S+))",
+            # `*` (not `+`) inside the quotes so an explicit null session
+            # — netexec's default `-u '' -p ''` — matches the quoted
+            # branch with an EMPTY capture instead of falling through to
+            # (\S+), which would grab the literal two-char token "''" as
+            # the username and misfile the anonymous bind as an
+            # authenticated run for a user named ''.  Mirrors the -p regex.
+            mu = re.search(r"\s-u\s+(?:\"([^\"]*)\"|'([^']*)'|(\S+))",
                             cmd)
             mp = re.search(r"\s-p\s+(?:\"([^\"]*)\"|'([^']*)'|(\S+))",
                             cmd)
