@@ -1102,9 +1102,13 @@ class CardWebParserMixin:
         # Stable title — count + filtered details go in the description.
         title = f"{tool.name} on {web_label}"
 
+        # replace=True: each nikto run is a COMPLETE scan snapshot, so a
+        # rerun (esp. with a different -Tuning) must SUPERSEDE the previous
+        # card instead of appending its items — otherwise the card stacks
+        # two runs' item lists.  Per-run history stays in occurrences.
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=title, description=desc,
-            severity=severity, source=tool.name))
+            severity=severity, source=tool.name, replace=True))
         self.app.terminal.write(
             f"  [+] {tool.name} — {real_count} real + "
             f"{len(noise_items)} noise items → Target Intel.", "success")
@@ -1214,11 +1218,15 @@ class CardWebParserMixin:
         # Stable title — count + top severity stay in the description.
         title = f"NUCLEI on {web_label}"
 
+        # replace=True: each nuclei run is a COMPLETE scan snapshot, so a
+        # rerun SUPERSEDES the card instead of appending its match list
+        # (which would stack two runs' findings).  Per-run history stays
+        # in occurrences.  Same fix shape as nikto / the dir-busters.
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=title, description=desc,
             severity=top_sev if top_sev in (
                 "critical","high","medium","low","info") else "info",
-            source=tool.name))
+            source=tool.name, replace=True))
 
         self.app.terminal.write(
             f"  [+] Nuclei — {len(findings)} template match"

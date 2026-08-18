@@ -1313,9 +1313,20 @@ class CardRuntimeMixin:
                 # the success line so the dialog stays minimal — it
                 # already lives in the Target Intel finding when it
                 # matters.
+                # Only the dir-busters (gobuster/dirb/ffuf) produce the
+                # path table this branch counts.  Other bg tools that flow
+                # here — nikto, nuclei, sqlmap, wpscan — push their findings
+                # to Target Intel via their own parser, so `hits` is always
+                # 0 for them and "No paths found" is wrong + confusing (the
+                # operator sees a full NIKTO card yet a "No paths" popup).
+                _PATH_BINS = {"gobuster", "dirb", "ffuf"}
+                _is_path_tool = (tool.binary or "").lower() in _PATH_BINS
                 _word = "path" if hits == 1 else "paths"
                 if rc == 0:
-                    if hits == 0:
+                    if not _is_path_tool:
+                        summary = ("Scan complete — findings (if any) are "
+                                   "in Target Intel.")
+                    elif hits == 0:
                         summary = "No paths found."
                     else:
                         summary = (f"{hits} {_word} found — "
@@ -1323,7 +1334,10 @@ class CardRuntimeMixin:
                 else:
                     # Non-zero exit: be explicit so the user knows the
                     # tool itself failed (not a clean empty result).
-                    if hits == 0:
+                    if not _is_path_tool:
+                        summary = (f"Exited rc={rc} — scan incomplete; "
+                                   f"see Target Intel / terminal.")
+                    elif hits == 0:
                         summary = (f"Exited rc={rc}; no paths captured.")
                     else:
                         summary = (f"Exited rc={rc}; "
@@ -1588,11 +1602,54 @@ class CardRuntimeMixin:
             # carry the flag; other runners fall through unchanged.
             runner = self._tool_runners.get(tool.id)
             if getattr(runner, "_kill_requested", False):
-                self._set_tool_status(tool.id, "error")
+                # Scanners that STREAM already-confirmed match lines
+                # (nuclei/nikto) keep their partial results on STOP: their
+                # parsers only lift explicit "[template] … URL" / "+ [code]
+                # …" matches, so a partial buffer cannot produce the
+                # phantom findings an inference-based parser (nmap "No open
+                # ports") would.  A long scan the operator aborts at 99%
+                # still surfaces what it already found — everything else
+                # keeps the original discard (F-03).
+                _binlow = (tool.binary or "").lower()
+                _kept = False
+                if _binlow in ("nuclei", "nikto") and log:
+                    try:
+                        if _binlow == "nuclei":
+                            _kept = bool(
+                                self._parse_nuclei_to_intel(tool, log))
+                        else:
+                            _kept = bool(
+                                self._parse_nikto_to_intel(tool, log))
+                    except Exception as e:
+                        self.app.terminal.write(
+                            f"  [!] {tool.name} partial parse error: {e}",
+                            "error")
+                self._set_tool_status(tool.id, "done" if _kept else "error")
                 self._toggle_run_btn(tool, False)
-                self.app.terminal.write(
-                    f"  [*] {tool.name} stopped — output not parsed.",
-                    "dim")
+                if _kept:
+                    self.app.terminal.write(
+                        f"  [*] {tool.name} stopped — partial results kept "
+                        f"(matches found before STOP are in Target Intel).",
+                        "success")
+                else:
+                    self.app.terminal.write(
+                        f"  [*] {tool.name} stopped — output not parsed.",
+                        "dim")
+                # Finalize the execution record — the STOP path used to
+                # leave it "running" forever, so the dot never restored and
+                # it was missing from history.
+                try:
+                    sess = self.app.session_manager.current
+                    if sess is not None:
+                        w = self._tool_widgets.get(tool.id) or {}
+                        exec_id = w.get("_exec_id")
+                        if exec_id:
+                            sess.finish_tool_execution(
+                                exec_id, returncode,
+                                [ln for _, ln in (log or [])],
+                                "done" if _kept else "aborted")
+                except Exception as e:
+                    print(f"[HAWK] stop finish_tool_execution failed: {e}")
                 self._raw_logs.pop(tool.id, None)
                 return
 

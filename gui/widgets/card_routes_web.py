@@ -46,6 +46,17 @@ from utils.runner import ToolRunner, MultiRunner, MetasploitRunner, GreenBoneRun
 from utils.session import Credential
 from gui.widgets.card_common import *
 
+
+def _sanitize_nikto_tuning(raw: str) -> str:
+    """Keep only valid nikto -Tuning characters from a free-form entry.
+
+    nikto tuning classes are 0-9, a, b, c, and x (exclude).  Sanitising
+    lets the operator type "2,3,4" / "2 3 4" / "234" (or "x06", "1289b")
+    and get a clean tuning string, dropping commas/spaces/typos.
+    """
+    return "".join(re.findall(r"[0-9abcxABCX]", raw or "")).lower()
+
+
 class CardWebRoutesMixin:
     def _route_certipy(self, tool):
         """Interactive Certipy launcher.
@@ -1749,7 +1760,13 @@ class CardWebRoutesMixin:
 
             cmd = update_step + scan_cmd
             _safe_destroy(win)
-            self._run_raw(tool, cmd)
+            # Background job (like gobuster/nikto): a full nuclei run is
+            # thousands of templates over several minutes and can grind on
+            # its slow tail — foreground left the operator with no STOP
+            # handle when it hung at ~99%.  The bg-jobs bar gives OPEN/STOP
+            # and keeps the internal terminal usable; the nuclei parser
+            # still runs via _on_done regardless of exit code.
+            self._run_in_background(tool, cmd, estimated_secs=900)
 
         row = _btn_row(win)
         _btn(row, "RUN NUCLEI", _run, primary=True, w=150)
@@ -1887,6 +1904,28 @@ class CardWebRoutesMixin:
             dropdown_text_color=COLORS["text_bright"],
             text_color=COLORS["text_bright"], corner_radius=3,
         ).pack(fill="x", padx=14, pady=(0, 8))
+
+        # Custom tuning — ANY combination of nikto tuning classes
+        # (0-9 a b c; x = exclude).  Overrides the preset above when
+        # non-empty, so the operator isn't limited to one class or the
+        # canned [common]/[default] sets (e.g. "234", "x06", "1289b").
+        tuning_custom_var = ctk.StringVar(value="")
+        _tc_row = ctk.CTkFrame(body, fg_color="transparent")
+        _tc_row.pack(fill="x", padx=14, pady=(0, 8))
+        ctk.CTkLabel(
+            _tc_row, text="  custom (overrides preset):",
+            font=_f("sm"), text_color=COLORS["text_dim"],
+            anchor="w").pack(side="left")
+        _tc_entry = ctk.CTkEntry(
+            _tc_row, textvariable=tuning_custom_var,
+            font=_f("sm"), height=28, width=200,
+            placeholder_text="any combo, e.g.  234   x06   1289b",
+            fg_color=COLORS["bg_card"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_green"], border_width=1,
+            corner_radius=3)
+        _tc_entry.pack(side="left", padx=(6, 0))
+        add_context_menu(_tc_entry)
 
         # ── Evasion technique ────────────────────────────────────
         EVASION_PRESETS = [
@@ -2098,7 +2137,12 @@ class CardWebRoutesMixin:
             parts = ["nikto", "-h", scan_url]
             if ssl_mode and not nossl_var.get():
                 parts.append("-ssl")
-            t = _selected_preset_value(tuning_var, TUNING_PRESETS)
+            custom_t = (tuning_custom_var.get() or "").strip()
+            if custom_t:
+                # Free-form override wins over the preset dropdown.
+                t = _sanitize_nikto_tuning(custom_t)
+            else:
+                t = _selected_preset_value(tuning_var, TUNING_PRESETS)
             if t:
                 parts += ["-Tuning", t]
             ev = _selected_preset_value(evasion_var, EVASION_PRESETS)
@@ -2136,7 +2180,7 @@ class CardWebRoutesMixin:
 
         def _refresh_preview(*_):
             preview_var.set(_build_cmd())
-        for v in (tuning_var, evasion_var, format_var,
+        for v in (tuning_var, tuning_custom_var, evasion_var, format_var,
                   nolookup_var, display404_var, nossl_var,
                   maxtime_var, ua_var, extras_var, bp_var):
             v.trace_add("write", _refresh_preview)
