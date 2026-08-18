@@ -81,6 +81,14 @@ ALLOWED_WRITES = {
     ("tools/recover_session.py", "dst"):
         "Standalone CLI: recovers the file the operator names on argv "
         "and writes the result next to it.  Not part of the app.",
+    ("utils/config.py", "external_tmp"):
+        "Subprocess TMPDIR env var handed to child tools (NOT HAWK's own "
+        "temp).  Leaves the tree ONLY when the operator sets HAWK_TMPDIR "
+        "or when BASE_DIR is on a temp-hostile filesystem (shared folder "
+        "/ network mount) whose per-process temp I/O blocks and hangs "
+        "tools like nuclei at shutdown.  Ephemeral tool scratch only; the "
+        "default TMPDIR stays TMP_DIR and HAWK's explicit temp files never "
+        "come here.  See utils.config.resolve_tool_tmpdir().",
 }
 
 # ── Files allowed to mention a non-contained path at all ─────────────
@@ -429,6 +437,50 @@ class ShellArtifactContainmentTests(unittest.TestCase):
             offenders, [],
             "download templates must write into a HAWK directory "
             "(`-o {payloads}/name`):\n  " + "\n  ".join(offenders))
+
+
+class TmpdirResolutionTests(unittest.TestCase):
+    """utils.config.resolve_tool_tmpdir() keeps the subprocess TMPDIR
+    contained (TMP_DIR) by default, and only leaves the tree for the two
+    documented reasons: an explicit HAWK_TMPDIR, or BASE_DIR sitting on a
+    temp-hostile filesystem whose temp I/O hangs tools (nuclei)."""
+
+    def setUp(self):
+        import utils.config as cfg
+        self.cfg = cfg
+        self._old_fstype = cfg._mount_fstype
+        self._old_env = os.environ.get("HAWK_TMPDIR")
+        os.environ.pop("HAWK_TMPDIR", None)
+        cfg._TMPDIR_RELAX_WARNED = False
+
+    def tearDown(self):
+        self.cfg._mount_fstype = self._old_fstype
+        if self._old_env is None:
+            os.environ.pop("HAWK_TMPDIR", None)
+        else:
+            os.environ["HAWK_TMPDIR"] = self._old_env
+
+    def test_default_tmpdir_is_contained(self):
+        self.cfg._mount_fstype = lambda _p: "ext4"
+        got = self.cfg.resolve_tool_tmpdir()
+        self.assertEqual(got, self.cfg.TMP_DIR)
+        self.assertTrue(self.cfg.is_within_base(got))
+
+    def test_hostile_fs_falls_back_to_local(self):
+        import tempfile
+        self.cfg._mount_fstype = lambda _p: "fuse.vmhgfs-fuse"
+        got = self.cfg.resolve_tool_tmpdir()
+        self.assertFalse(
+            self.cfg.is_within_base(got),
+            "a temp-hostile BASE_DIR must fall back OUTSIDE the tree")
+        self.assertTrue(got.startswith(tempfile.gettempdir()))
+
+    def test_explicit_override_wins_even_on_hostile_fs(self):
+        import tempfile
+        d = tempfile.mkdtemp(prefix="hawk_ovr_")
+        os.environ["HAWK_TMPDIR"] = d
+        self.cfg._mount_fstype = lambda _p: "vboxsf"
+        self.assertEqual(self.cfg.resolve_tool_tmpdir(), d)
 
 
 if __name__ == "__main__":

@@ -489,6 +489,7 @@ SERVICE_PORT_MAP = {
 
 # ─── PATHS ────────────────────────────────────────────────────────────────────
 import os
+import tempfile
 BASE_DIR     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
 ASSETS_DIR   = os.path.join(BASE_DIR, "assets")
@@ -546,6 +547,94 @@ for _dir in RUNTIME_DIRS:
     os.makedirs(_dir, exist_ok=True)
 
 _BASE_DIR_REAL = os.path.realpath(os.path.abspath(BASE_DIR))
+
+
+# ─── Subprocess TMPDIR resolution ────────────────────────────────────
+# HAWK's OWN temp files stay under TMP_DIR (BASE_DIR/tmp) — contained, no
+# host traces.  The TMPDIR *env var* handed to child tools is separate:
+# some tools (nuclei) do temp I/O during shutdown that BLOCKS on shared-
+# folder / network filesystems (VMware hgfs, VirtualBox vboxsf, CIFS/SMB,
+# NFS, 9p), hanging the tool at ~99%.  When BASE_DIR is on such a
+# filesystem we hand tools a real LOCAL temp instead.  The default is
+# unchanged (TMP_DIR); the fallback is documented in
+# tests/test_containment_static.py.
+_TEMP_HOSTILE_FSTYPES = {
+    "vboxsf", "cifs", "smbfs", "smb3", "nfs", "nfs4", "9p",
+    "vmhgfs", "fuse.vmhgfs-fuse", "prl_fs", "fuse.sshfs", "afpfs",
+}
+_TMPDIR_RELAX_WARNED = False
+
+
+def _mount_fstype(path: str) -> str:
+    """Best-effort filesystem type of the mount that contains `path`
+    (Linux /proc/mounts).  Returns '' when it can't be determined (e.g.
+    not Linux) — callers then keep the contained default."""
+    try:
+        real = os.path.realpath(os.path.abspath(path))
+    except OSError:
+        real = path
+    best_mp = best_fs = ""
+    try:
+        with open("/proc/mounts", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mp, fstype = parts[1], parts[2]
+                if ((real == mp or real.startswith(mp.rstrip("/") + "/"))
+                        and len(mp) >= len(best_mp)):
+                    best_mp, best_fs = mp, fstype
+    except OSError:
+        return ""
+    return best_fs
+
+
+def _is_temp_hostile(fstype: str) -> bool:
+    """True for filesystems where per-process temp I/O is unreliable and
+    can block — shared folders and network mounts."""
+    if not fstype:
+        return False
+    return (fstype in _TEMP_HOSTILE_FSTYPES
+            or fstype.startswith("fuse.vmhgfs")
+            or fstype.startswith("vmhgfs"))
+
+
+def resolve_tool_tmpdir() -> str:
+    """The TMPDIR env var to hand to subprocesses.  Resolution order:
+      1. an explicit HAWK_TMPDIR override, if set;
+      2. a real LOCAL temp (<tempdir>/hawk-<uid>) when BASE_DIR is on a
+         temp-hostile filesystem — those block the temp I/O some tools do
+         at shutdown and hang them (nuclei at ~99%);
+      3. the contained default TMP_DIR (BASE_DIR/tmp).
+    Only (1) and (2) leave the tree, both ephemeral tool scratch; HAWK's
+    own explicit temp files always go to TMP_DIR.  Prints one line when
+    it has to relax containment."""
+    global _TMPDIR_RELAX_WARNED
+    override = os.environ.get("HAWK_TMPDIR", "").strip()
+    fstype = "" if override else _mount_fstype(BASE_DIR)
+    hostile = _is_temp_hostile(fstype)
+    if override:
+        external_tmp = override
+    elif hostile:
+        try:
+            uid = os.getuid()
+        except AttributeError:      # non-POSIX dev host — never reached on
+            uid = os.getpid()       # a hostile FS, which is Linux-only
+        external_tmp = os.path.join(tempfile.gettempdir(), f"hawk-{uid}")
+    else:
+        return TMP_DIR              # contained default (already created)
+    try:
+        os.makedirs(external_tmp, exist_ok=True)
+    except OSError:
+        pass
+    if hostile and not _TMPDIR_RELAX_WARNED:
+        _TMPDIR_RELAX_WARNED = True
+        print(f"[hawk] BASE_DIR is on a temp-hostile filesystem "
+              f"({fstype}); tool TMPDIR redirected to {external_tmp} — "
+              f"temp containment relaxed for subprocess scratch "
+              f"(set HAWK_TMPDIR to override).")
+    return external_tmp
+
 
 # The complete list of files HAWK may write outside its own tree.  Every
 # one of them is a system-integration file that only works at a fixed

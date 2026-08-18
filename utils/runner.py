@@ -18,7 +18,7 @@ Ping -Pn: only adds -Pn flag, no extra scan parameters.
 import ipaddress
 import subprocess, threading, shutil, os, re, signal, time
 from datetime import datetime
-from utils.config import CACHE_DIR, CONFIGS_DIR, TMP_DIR
+from utils.config import CACHE_DIR, CONFIGS_DIR, TMP_DIR, resolve_tool_tmpdir
 
 
 import socket
@@ -73,7 +73,9 @@ def _hawk_env():
     env["XDG_CONFIG_HOME"] = CONFIGS_DIR
     env["XDG_CACHE_HOME"] = CACHE_DIR
     env["XDG_DATA_HOME"] = xdg_data
-    env["TMPDIR"] = TMP_DIR
+    # TMP_DIR by default; a real local temp only when BASE_DIR is on a
+    # shared/network filesystem whose temp I/O hangs tools (nuclei).
+    env["TMPDIR"] = resolve_tool_tmpdir()
 
     _hawk_env_cache = env
     return env

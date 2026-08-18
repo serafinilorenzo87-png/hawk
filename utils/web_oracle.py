@@ -45,8 +45,10 @@ import shlex
 import shutil
 import threading
 import subprocess
+import signal
+import time
 from typing import Optional
-from utils.config import CACHE_DIR, CONFIGS_DIR, TMP_DIR
+from utils.config import CACHE_DIR, CONFIGS_DIR, TMP_DIR, resolve_tool_tmpdir
 
 
 def _tool_env() -> dict:
@@ -60,8 +62,40 @@ def _tool_env() -> dict:
     env["XDG_CONFIG_HOME"] = CONFIGS_DIR
     env["XDG_CACHE_HOME"] = CACHE_DIR
     env["XDG_DATA_HOME"] = xdg_data
-    env["TMPDIR"] = TMP_DIR
+    # TMP_DIR by default; a real local temp only when BASE_DIR is on a
+    # shared/network filesystem whose temp I/O hangs tools (nuclei).
+    env["TMPDIR"] = resolve_tool_tmpdir()
     return env
+
+
+def _kill_proc_group(p):
+    """SIGTERM then SIGKILL the child's whole process group.  A tool that
+    ignores SIGTERM (nuclei during a stuck shutdown) still dies on
+    SIGKILL, and tearing the group down closes its stdout — which
+    unblocks a read that was waiting on it.  Direct-PID kill is the
+    fallback when the process was not put in its own group."""
+    try:
+        pgid = os.getpgid(p.pid)
+    except (ProcessLookupError, PermissionError, OSError, AttributeError):
+        pgid = None
+    if pgid is not None and hasattr(os, "killpg"):
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+        for _ in range(20):          # 2 s grace before SIGKILL
+            if p.poll() is not None:
+                break
+            time.sleep(0.1)
+        if p.poll() is None:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+    try:
+        p.kill()
+    except Exception:
+        pass
 
 
 # ─── Binary discovery ────────────────────────────────────────────────
@@ -438,7 +472,11 @@ class WebOracleRunner:
             p = subprocess.Popen(
                 argv, stdout=subprocess.PIPE, stderr=stderr_to,
                 stdin=subprocess.PIPE if stdin_data else subprocess.DEVNULL,
-                text=True, bufsize=1, env=_tool_env())
+                text=True, bufsize=1, env=_tool_env(), close_fds=True,
+                # Own process group so a hung tool (and any child it
+                # spawned) can be killed as a unit.  preexec_fn is POSIX
+                # only; None on non-POSIX keeps Popen happy on the dev host.
+                preexec_fn=(os.setsid if os.name == "posix" else None))
             if stdin_data is not None:
                 try:
                     p.stdin.write(stdin_data + "\n")
@@ -449,6 +487,31 @@ class WebOracleRunner:
             self._emit(f"  [oracle:{label}] spawn failed: {e}",
                        tool_name, "error")
             return ""
+
+        # Watchdog: kill the whole process group on cancel or after
+        # `timeout` s.  Checking the flag INSIDE the read loop was not
+        # enough — a hung tool (e.g. nuclei stalling in shutdown) keeps
+        # stdout open and emits no more lines, so the loop never returned
+        # and the process was orphaned.  A separate timer thread kills it
+        # regardless of whether any output is still flowing.
+        stop_watch = threading.Event()
+        killed = {"why": None}
+
+        def _watch():
+            deadline = time.monotonic() + max(1, timeout)
+            while not stop_watch.wait(0.25):
+                if self._cancelled:
+                    killed["why"] = "cancel"
+                elif time.monotonic() >= deadline:
+                    killed["why"] = "timeout"
+                else:
+                    continue
+                _kill_proc_group(p)
+                return
+
+        watcher = threading.Thread(target=_watch, daemon=True)
+        watcher.start()
+
         buf = []
         # Nuclei JSONL embeds the full HTTP request+response per finding.
         # Streaming the raw line floods the terminal (one ~20 KB HTML body
@@ -457,29 +520,24 @@ class WebOracleRunner:
         is_nuclei_jsonl = (label == "nuclei")
         try:
             for line in p.stdout:
-                if self._cancelled:
-                    try:
-                        p.terminate()
-                    except Exception:
-                        pass
-                    break
                 line = line.rstrip("\n")
                 buf.append(line)
                 display = line
                 if is_nuclei_jsonl and line.startswith("{"):
                     display = _summarize_nuclei_line(line) or line
                 self._emit(f"  [{label}] {display}", tool_name, "info")
-            p.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            self._emit(f"  [oracle:{label}] timeout — killing.",
-                       tool_name, "warn")
-            try:
-                p.kill()
-            except Exception:
-                pass
         except Exception as e:
             self._emit(f"  [oracle:{label}] read error: {e}",
                        tool_name, "error")
+        finally:
+            stop_watch.set()
+            try:
+                p.wait(timeout=5)
+            except Exception:
+                _kill_proc_group(p)
+        if killed["why"] == "timeout":
+            self._emit(f"  [oracle:{label}] timeout after {timeout}s — "
+                       f"killed.", tool_name, "warn")
         out = "\n".join(buf)
         with self._results_lock:
             self._binary_results[label] = out
