@@ -48,12 +48,17 @@ from gui.widgets.card_common import *
 
 class CardServiceParserMixin:
     def _parse_sqlmap_to_intel(self, tool, log: list) -> bool:
-        """Parse sqlmap output — only emit a finding when injection was
-        actually confirmed.  Returns True (consumed) even on failure so
-        the generic parser doesn't create a false-positive card."""
+        """Parse sqlmap output — only emit a confirmed-injection finding
+        when injection was actually confirmed, an escalation hint when a
+        parameter looked reactive but nothing was confirmed, and nothing
+        otherwise.  Returns True (consumed) even on the non-injectable
+        paths so the generic parser doesn't create a false-positive card."""
         import re
         text = "\n".join(ln for _, ln in log)
+        low = text.lower()
+        target = self._get_target() or "target"
 
+        # No parameters to test at all.
         if re.search(r"\[CRITICAL\]\s*no parameter", text, re.I):
             self.app.terminal.write(
                 "  [!] sqlmap found no injectable parameters in this URL.\n"
@@ -62,23 +67,79 @@ class CardServiceParserMixin:
                 "warn")
             return True
 
-        injectable = re.findall(
-            r"Parameter:\s*['\"]?(\S+?)['\"]?\s.*?is vulnerable", text, re.I)
+        # Injectable parameter names.  sqlmap prints them two ways and the
+        # old single regex ("Parameter:...is vulnerable") required both
+        # tokens on ONE line and matched NEITHER real form — so a
+        # confirmed injection lost its parameter name and was mis-scored
+        # as high instead of critical.  Read both forms:
+        #   "Parameter: username (GET)"      (injection-point summary)
+        #   "GET parameter 'username' is vulnerable"
+        injectable = re.findall(r"Parameter:\s*([^\s(]+)\s*\(", text)
+        injectable += re.findall(r"parameter\s+'([^']+)'\s+is vulnerable",
+                                 text, re.I)
+        injectable = sorted({p for p in injectable if p})
+        confirmed = bool(injectable) or "sqlmap identified the following" in low
+
+        if not confirmed:
+            # Reactive-but-not-injectable: sqlmap's heuristic flagged the
+            # parameter and it advises raising level/risk.  Tailor the
+            # advice to the level/risk actually USED (sqlmap echoes
+            # "extending provided level (N) and risk (M)") — telling
+            # someone who already ran level 3 / risk 2 to "re-run at level
+            # 3" is noise.
+            heuristic_hit = re.search(
+                r"heuristic.*might be injectable", text, re.I) is not None
+            advises = ("increase values for '--level'" in low
+                       or 'increase values for "--level"' in low)
+            if heuristic_hit or advises:
+                m = re.search(
+                    r"extending provided level \((\d+)\) and risk \((\d+)\)",
+                    text, re.I)
+                if m:
+                    lvl, rsk = int(m.group(1)), int(m.group(2))
+                    lr = f"level {lvl} / risk {rsk}"
+                    escalated = lvl >= 3 and rsk >= 2
+                else:
+                    lr, escalated = "the tested level/risk", False
+                if escalated:
+                    nxt = (f"You already escalated to {lr} and it still "
+                           f"won't inject - it is likely genuinely not "
+                           f"injectable here, or filtered/WAF'd.  Try "
+                           f"--tamper=space2comment and --random-agent, or "
+                           f"move on to another parameter / target.")
+                    warn = (f"  [!] sqlmap: reactive but not injectable at "
+                            f"{lr} - already escalated; try "
+                            f"--tamper/--random-agent or move on.")
+                else:
+                    nxt = ("Escalate: re-run in Direct mode at Level 3 / "
+                           "Risk 2 (and --tamper=space2comment / "
+                           "--random-agent if a WAF is suspected) before "
+                           "concluding it's safe.")
+                    warn = (f"  [!] sqlmap: parameter looks reactive but "
+                            f"not injectable at {lr} - escalate to Level 3 "
+                            f"/ Risk 2 before concluding it's safe.")
+                desc = (f"sqlmap's heuristic flagged a reactive parameter "
+                        f"but confirmed NO injection at {lr}.\n"
+                        f"This is NOT proof the target is safe.\n\n{nxt}")
+                self.app.after(0,
+                    lambda d=desc: self.app.target_intel.add_auto_finding(
+                        title=f"SQLi — inconclusive on {target}",
+                        description=d, severity="info",
+                        source=tool.name, replace=True))
+                self.app.terminal.write(warn, "warn")
+            return True
+
+        # ── Confirmed injection ──────────────────────────────────────
         dbs = re.findall(
             r"available databases\s*\[.*?\]:\s*(.*?)(?:\n\n|\Z)",
             text, re.S)
-        tables = re.findall(
-            r"Database:\s*(\S+)\s+Table:\s*(\S+)", text)
+        tables = re.findall(r"Database:\s*(\S+)\s+Table:\s*(\S+)", text)
 
-        if not injectable and "sqlmap identified" not in text.lower():
-            return True
-
-        target = self._get_target() or "target"
         parts = []
         if injectable:
-            parts.append(f"Injectable parameter(s): {', '.join(set(injectable))}")
+            parts.append(f"Injectable parameter(s): {', '.join(injectable)}")
         if dbs:
-            db_list = re.findall(r"\[\*\]\s+(\S+)", dbs[0]) if dbs else []
+            db_list = re.findall(r"\[\*\]\s+(\S+)", dbs[0])
             if db_list:
                 parts.append(f"\nDatabases ({len(db_list)}):")
                 parts += [f"  • {d}" for d in db_list[:20]]
@@ -89,10 +150,13 @@ class CardServiceParserMixin:
 
         sev = "critical" if injectable else "high"
         desc = "\n".join(parts) if parts else "SQL injection confirmed."
+        # replace=True: each sqlmap run is a complete snapshot of one
+        # target — a rerun must refresh the card, not stack duplicates
+        # (same fix applied to nuclei/nikto/wpscan/enum4linux).
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=f"SQL Injection — {target}",
-            description=desc, severity=sev,
-            source=tool.name))
+            description=desc, severity=sev, source=tool.name,
+            replace=True))
         return True
 
     def _parse_ssh_banner_to_intel(self, tool, log: list) -> bool:

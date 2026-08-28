@@ -2657,6 +2657,14 @@ class CardWebRoutesMixin:
                                  wraplength=600, justify="left")
         warn_lbl.pack(anchor="w", padx=26, pady=(0, 2))
 
+        # Keep sqlmap's session DB + output off any shared/network FS:
+        # HGFS rewrites the per-request session on every test → slow and
+        # fragile.  resolve_tool_tmpdir() gives a real LOCAL temp when
+        # BASE_DIR is on such a filesystem, else the contained TMP_DIR.
+        import shlex as _shlex
+        from utils.config import resolve_tool_tmpdir as _resolve_tmp
+        _sqlmap_out = os.path.join(_resolve_tmp(), "sqlmap")
+
         def _build_cmd() -> tuple:
             """Return (cmd, warning) tuple. warning is "" if no issue."""
             url  = url_var.get().strip()
@@ -2684,6 +2692,9 @@ class CardWebRoutesMixin:
                 parts = [f"echo 'Edit {req_path} first, then rerun sqlmap -r {req_path}' && ",
                          f"printf 'POST / HTTP/1.1\\nHost: {target}\\nContent-Type: application/json\\n\\n{{\"id\":1}}\\n' > {req_path} && ",
                          f"sqlmap -r {req_path} --batch"]
+
+            # sqlmap session/output to a local dir (see _sqlmap_out above).
+            parts.append(f"--output-dir={_shlex.quote(_sqlmap_out)}")
 
             if dbs_var.get():    parts.append("--dbs")
             if tables_var.get(): parts.append("--tables")
@@ -2748,7 +2759,12 @@ class CardWebRoutesMixin:
 
             def _go():
                 _safe_destroy(win)
-                self._run_raw(tool, cmd)
+                # bg-job (STOP handle) like nuclei/nikto/wpscan — an
+                # enumerate/crawl/dump scan can run for minutes and must be
+                # interruptible.  --batch (always prepended) auto-answers
+                # sqlmap's prompts, so it is bg-safe.  Findings parse on
+                # completion AND on STOP via _parse_sqlmap_to_intel.
+                self._run_in_background(tool, cmd, estimated_secs=900)
 
             if host_in_url and host_in_url != target:
                 from gui.widgets.card_common import verify_host_or_prompt
@@ -2763,7 +2779,8 @@ class CardWebRoutesMixin:
                         rebuilt = cmd.replace(url_var.get().strip(),
                                               new_url, 1)
                         _safe_destroy(win)
-                        self._run_raw(tool, rebuilt)
+                        self._run_in_background(tool, rebuilt,
+                                                estimated_secs=900)
                     else:
                         _go()
 
