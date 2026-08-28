@@ -1747,9 +1747,13 @@ def _greenbone_creds():
                 password = password or str(cfg.get("password") or "")
         except Exception:
             pass
-    # Preserve the previous Kali lab default when the user has not opted
-    # into explicit credentials, but keep the literals in one place.
-    return (user or "admin", password or "admin")
+    # Lab default when the operator has not set explicit creds.  Must
+    # match the password the UI's reset helpers set (Access Panel /
+    # dialog notes use admin123) — otherwise is_running() and every GMP
+    # call authenticate with the wrong password, HAWK thinks gvmd is down
+    # and pushes the operator into the setup path even though the web UI
+    # (which uses the real password) works fine.
+    return (user or "admin", password or "admin123")
 
 
 class GreenBoneRunner:
@@ -2017,18 +2021,41 @@ class GreenBoneInstaller:
         self.output_callback=output_callback or (lambda *a:None)
 
     def install_in_xterm(self):
+        # Idempotent: if GVM is already installed AND set up, skip the
+        # slow apt + gvm-setup (which re-syncs the multi-GB feeds) and go
+        # straight to starting services.  Only a genuinely missing/broken
+        # install runs the full setup.
         script = (
-            "echo '=== HAWK: Installing Greenbone/GVM ===' && "
-            "sudo apt-get update && "
-            "sudo apt-get install -y gvm && "
-            "sudo gvm-setup && "
-            "sudo gvm-start && "
-            "sudo gvm-check-setup && "
+            "echo '=== HAWK: Greenbone/GVM setup ===' && "
+            "if command -v gvm-cli >/dev/null 2>&1 && "
+            "sudo gvm-check-setup >/dev/null 2>&1; then "
+            "echo '[i] GVM already installed and set up - skipping "
+            "install, starting services...' && sudo gvm-start ; "
+            "else "
+            "echo '[*] Installing GVM (10-20 min, downloads feeds)...' && "
+            "sudo apt-get update && sudo apt-get install -y gvm && "
+            "sudo gvm-setup && sudo gvm-start && sudo gvm-check-setup ; "
+            "fi && "
             "echo '' && "
             "echo '=== Done! Return to HAWK and click RUN again. ===' && "
             "read -p 'Press ENTER to close...'"
         )
         return _open_terminal("HAWK — Installing Greenbone/GVM", script)
+
+    def start_in_xterm(self):
+        # Already installed → only bring the services up.  NEVER runs
+        # gvm-setup, so no multi-GB feed re-download; this is what the
+        # dialog's START button uses when gvm-check-setup already passed.
+        script = (
+            "echo '=== HAWK: Starting Greenbone/GVM ===' && "
+            "sudo gvm-start && "
+            "echo '' && "
+            "echo '=== GVM services started. "
+            "Web UI: https://127.0.0.1:9392 ===' && "
+            "echo '=== Return to HAWK - the browser opens when ready. ===' && "
+            "read -p 'Press ENTER to close...'"
+        )
+        return _open_terminal("HAWK — Starting Greenbone/GVM", script)
 
 
 class MultiRunner:

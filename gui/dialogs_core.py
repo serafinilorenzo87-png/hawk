@@ -1856,8 +1856,35 @@ class GreenboneDialog:
         self._show_checking_modal(
             parent, "Checking Greenbone daemon status…",
             lambda: GreenBoneRunner.is_running(),
-            lambda running: (self._show_scan_dialog(parent) if running
+            lambda running: (self._open_web_and_panel(parent) if running
                              else self._show_start_dialog(parent)))
+
+    def _open_web_and_panel(self, parent):
+        """GVM is up.  The operator drives scans from the Greenbone web
+        UI, so RUN just opens the dashboard and shows the access panel
+        (URL + login helpers) — HAWK does NOT launch a GMP scan.  This
+        avoids the whole create_target/create_task/poll/parse path (and
+        its GMP-version fragility); the web UI is the real interface."""
+        import webbrowser
+        url = "https://127.0.0.1:9392"
+        app = getattr(self, "_app", None) or getattr(parent, "app", None)
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        try:
+            if app and hasattr(app, "terminal"):
+                app.terminal.write(
+                    f"  [*] Greenbone is running — opening {url}.  Drive "
+                    f"your scans from the web UI.", "info")
+        except Exception:
+            pass
+        if self._callback_setup_complete:
+            try:
+                self._callback_setup_complete(self._tool)
+            except Exception as e:
+                print(f"[HAWK] greenbone setup_complete cb failed: {e}")
+        self._show_access_panel(parent)
 
     # ─── Threaded "Checking…" modal ───────────────────────────────────────
     def _show_checking_modal(self, parent, label, worker, on_done):
@@ -1950,19 +1977,40 @@ class GreenboneDialog:
             return errors
 
         def _after_check(errors):
-            if errors:
+            # SCAP / CERT feed data drive CVE and advisory MATCHING, not
+            # the NVT-based scan itself — a "Full and fast" scan runs fine
+            # without them.  Treat those (and the rollup "installation not
+            # yet complete" summary) as non-blocking, so a throttled
+            # community feed sync doesn't prevent scanning; scanner /
+            # gvmd / cert-infrastructure / redis errors still hard-block.
+            def _soft(e):
+                low = e.lower()
+                return ("scap" in low or "cert-bund" in low
+                        or "cert data" in low or "not yet complete" in low)
+            blockers = [e for e in errors if not _soft(e)]
+            soft = [e for e in errors if _soft(e)]
+            if blockers:
                 self._show_check_and_fix_dialog(parent, errors)
                 return
-            self._show_ready_to_start(parent)
+            self._show_ready_to_start(parent, soft)
 
         self._show_checking_modal(
             parent, "Running gvm-check-setup…", _check, _after_check)
 
-    def _show_ready_to_start(self, parent):
-        win = _make_win(parent, "Greenbone — Start", 600, 440)
+    def _show_ready_to_start(self, parent, warnings=None):
+        win = _make_win(parent, "Greenbone — Start", 600, 460)
         _title(win, "Greenbone installed but not running")
-        _note_box(win, "All checks passed. Ready to start GVM services.",
-                  COLORS["text_green"])
+        if warnings:
+            _note_box(win,
+                      "Scanner ready.  Non-blocking feed data missing — the "
+                      "NVT scan runs, but CVE/advisory matching is disabled "
+                      "until you sync it:\n" +
+                      "\n".join(f"  • {w}" for w in warnings[:4]) +
+                      "\n  Later:  sudo greenbone-feed-sync --type scap",
+                      COLORS["text_yellow"])
+        else:
+            _note_box(win, "All checks passed. Ready to start GVM services.",
+                      COLORS["text_green"])
         _note_box(win,
                   "After START:\n"
                   "  • Wait ~30s for services to finish coming up.\n"
@@ -2161,8 +2209,12 @@ class GreenboneDialog:
         _btn(row, "CLOSE", lambda: _safe_destroy(win), w=100)
 
     def _start_xterm(self):
+        # START (already installed, gvm-check-setup passed) must ONLY
+        # bring services up — NOT re-run the installer, which re-runs
+        # gvm-setup and re-downloads the multi-GB feeds (10-20 min) and
+        # made the browser open before the service was ready.
         from utils.runner import GreenBoneInstaller
-        GreenBoneInstaller().install_in_xterm()
+        GreenBoneInstaller().start_in_xterm()
 
     def _show_install_dialog(self, parent):
         win = _make_win(parent, "Greenbone — Install", 580, 440)
