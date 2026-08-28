@@ -1114,6 +1114,167 @@ class CardWebParserMixin:
             f"{len(noise_items)} noise items → Target Intel.", "success")
         return True
 
+    def _parse_wpscan_to_intel(self, tool, log: list) -> bool:
+        """Parse wpscan (default CLI) output into a Target Intel finding.
+
+        UNVALIDATED ON A LIVE TARGET — MS2 has no WordPress, so this is
+        written against wpscan's documented output format and covered by
+        a unit test with representative sample output.  Validate on a real
+        WordPress box (e.g. an HTB WP machine) before trusting the
+        severity buckets on edge cases.
+
+        Runs regardless of exit code (called from _on_done's specialized
+        dispatch, before the rc==0-gated generic parser): wpscan exits 5
+        precisely when it FINDS vulnerabilities, so gating on rc==0 would
+        discard exactly the runs that matter.
+
+        Kept from the output:
+          [+] WordPress version X identified (Insecure, released ...)
+          |  [!] Title: <vuln>            (core / plugin / theme findings)
+          |  References:  | - cve: 2021-24xxx
+          [i] User(s) Identified:  →  [+] admin
+          [+] XML-RPC seems to be enabled / readme / dir-listing ...
+        """
+        import re
+        lines = [self._strip_ansi(raw).rstrip() for _, raw in log]
+        text_low = "\n".join(l.lower() for l in lines)
+        web_label = self._extract_web_target_label(tool)
+        title = f"{tool.name} on {web_label}"
+
+        # Target is not WordPress → say so, don't fabricate findings.
+        if ("does not seem to be running wordpress" in text_low):
+            self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
+                title=title,
+                description="wpscan: target is not running WordPress — "
+                            "nothing to enumerate.",
+                severity="info", source=tool.name, replace=True))
+            self.app.terminal.write(
+                f"  [i] {tool.name} — not a WordPress target.", "warn")
+            return True
+
+        # Hard failure surface (parallel to the nikto parser).
+        if ("the target seems to be down" in text_low
+                or "scan aborted" in text_low):
+            self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
+                title=f"{tool.name} — scan failed on {web_label}",
+                description="wpscan could not complete (target down / "
+                            "aborted). Confirm the HTTP service and re-run.",
+                severity="info", source=tool.name, replace=True))
+            self.app.terminal.write(
+                f"  [!] {tool.name} — scan aborted / unreachable.", "warn")
+            return True
+
+        VER_RE   = re.compile(r"WordPress version ([\d.]+) identified", re.I)
+        TITLE_RE = re.compile(r"\[!\]\s*Title:\s*(.+?)\s*$")
+        # wpscan prints CVEs as "cve: 2020-35489" (no CVE- prefix); also
+        # accept a plain "CVE-2020-35489" if it shows up in a title.
+        CVE_RE   = re.compile(r"(?:cve:\s*|CVE-)(\d{4}-\d{3,7})", re.I)
+        USER_RE  = re.compile(r"^\[\+\]\s+([A-Za-z0-9._-]+)\s*$")
+        INTERESTING = (
+            ("xml-rpc seems to be enabled",
+             "XML-RPC enabled (xmlrpc.php) — brute-force / pingback surface"),
+            ("wordpress readme found",
+             "readme.html exposed (version disclosure)"),
+            ("upload directory has listing",
+             "wp-content/uploads directory listing enabled"),
+            ("directory listing is enabled", "Directory listing enabled"),
+            ("registration is enabled", "User registration enabled"),
+            ("debug log found", "debug.log exposed"),
+            ("wp-cron.php", "WP-Cron reachable (DoS amplifier)"),
+        )
+        _USER_STOPWORDS = {"finished", "requests", "cached", "data",
+                           "memory", "elapsed"}
+
+        wp_version = ""
+        version_insecure = False
+        vulns, users, interesting = [], [], []
+        cves = set()
+        in_users = False
+
+        for line in lines:
+            if not line:
+                continue
+            low = line.lower()
+
+            mv = VER_RE.search(line)
+            if mv and not wp_version:
+                wp_version = mv.group(1)
+                version_insecure = any(
+                    k in low for k in
+                    ("insecure", "out of date", "latest version is"))
+                continue
+
+            mt = TITLE_RE.search(line)
+            if mt:
+                vulns.append(mt.group(1).strip())
+
+            for c in CVE_RE.findall(line):
+                cves.add("CVE-" + c)
+
+            # Enumerated users: bare "[+] name" lines under the
+            # "User(s) Identified" header, until the next [i] section.
+            if "user(s) identified" in low:
+                in_users = True
+                continue
+            if in_users:
+                if line.startswith("[i]"):
+                    in_users = False
+                else:
+                    mu = USER_RE.match(line)
+                    if mu and mu.group(1).lower() not in _USER_STOPWORDS:
+                        users.append(mu.group(1))
+
+            for kw, label in INTERESTING:
+                if kw in low and label not in interesting:
+                    interesting.append(label)
+
+        if not (wp_version or vulns or users or interesting or cves):
+            return False        # nothing structured — let the caller decide
+
+        severity = "info"
+        if vulns or cves:
+            severity = "high"
+        elif version_insecure or users or interesting:
+            severity = "medium"
+
+        parts = []
+        if wp_version:
+            flag = "  — OUTDATED / INSECURE" if version_insecure else ""
+            parts.append(f"WordPress core: v{wp_version}{flag}")
+            parts.append("")
+        if vulns:
+            parts.append(f"Vulnerabilities ({len(vulns)}):")
+            for t in vulns[:25]:
+                parts.append(f"  [!] {t}")
+            if len(vulns) > 25:
+                parts.append(f"  ... and {len(vulns) - 25} more")
+            parts.append("")
+        if cves:
+            shown = sorted(cves)[:20]
+            parts.append("CVEs: " + ", ".join(shown)
+                         + (" …" if len(cves) > 20 else ""))
+            parts.append("")
+        if users:
+            parts.append(f"Enumerated users ({len(users)}): "
+                         + ", ".join(users[:30]))
+            parts.append("  → wpscan/hydra password attack: "
+                         "-U users.txt -P rockyou.txt")
+            parts.append("")
+        if interesting:
+            parts.append("Exposures:")
+            for it in interesting:
+                parts.append(f"  • {it}")
+
+        desc = "\n".join(parts).rstrip()
+        self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
+            title=title, description=desc,
+            severity=severity, source=tool.name, replace=True))
+        self.app.terminal.write(
+            f"  [+] {tool.name} — WordPress scan → Target Intel "
+            f"({len(vulns)} vuln, {len(users)} users, {len(cves)} CVE).",
+            "success")
+        return True
+
     def _parse_nuclei_to_intel(self, tool, log: list) -> bool:
         """Extract nuclei template matches into Target Intel.
 

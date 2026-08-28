@@ -2294,10 +2294,25 @@ class CardWebRoutesMixin:
             # detection.
             # --disable-tls-checks: tolerate self-signed certs on
             # lab / HTB targets; no-op on plain HTTP.
-            self._run_raw(tool,
-                f"wpscan --url {base_url} --enumerate u,p,t "
-                f"--no-update --no-banner --random-user-agent "
-                f"--disable-tls-checks")
+            # --api-token: WPScan's vulnerability-database lookups (the
+            # whole point of the tool) only run when a token is supplied.
+            # The operator sets it in the API Key Manager; without it the
+            # scan still enumerates but prints "No WPVulnDB API Token
+            # given" and maps nothing to CVEs.  Injected here because
+            # apikeys.write_all_configs() has no wpscan writer.
+            import shlex as _shlex
+            from utils.apikeys import keys_for_tool
+            _wp_token = keys_for_tool("wpscan").get("wpscan", "")
+            _token_arg = (f" --api-token {_shlex.quote(_wp_token)}"
+                          if _wp_token else "")
+            cmd = (f"wpscan --url {base_url} --enumerate u,p,t "
+                   f"--no-update --no-banner --random-user-agent "
+                   f"--disable-tls-checks{_token_arg}")
+            # bg-job (STOP handle) like nuclei/nikto — an enumerate scan
+            # can run for minutes and must be interruptible.  Findings are
+            # parsed on completion AND on STOP (rc-independent) by
+            # card_parsers_web._parse_wpscan_to_intel.
+            self._run_in_background(tool, cmd, estimated_secs=600)
 
         def _cancel():
             _safe_destroy(win)
@@ -2324,7 +2339,10 @@ class CardWebRoutesMixin:
         `evidence` is a short human string describing what was seen
         (for the UI note box)."""
         import urllib.request, urllib.error, re as _re, socket
-        socket.setdefaulttimeout(4)
+        # NOTE: deliberately NOT calling socket.setdefaulttimeout(4) — it
+        # mutates the PROCESS-WIDE default and would silently cap every
+        # other socket in the session at 4 s.  The per-request timeout=4
+        # on urlopen() below is enough and stays local to this probe.
 
         # Paths to probe.  Order matters — the first positive short-
         # circuits the rest for speed.
@@ -2358,7 +2376,8 @@ class CardWebRoutesMixin:
                         low = (hname + ": " + (hval or "")).lower()
                         if any(m in low for m in HEADER_MARKERS):
                             return ("detected",
-                                    f"HTTP header `{hname}: {hval[:60]}`")
+                                    f"HTTP header `{hname}: "
+                                    f"{(hval or '')[:60]}`")
                     body = r.read(65536).decode(
                         "utf-8", errors="replace")
                     low = body.lower()

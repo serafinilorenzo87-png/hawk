@@ -1922,6 +1922,19 @@ class CardRuntimeMixin:
                     self.app.terminal.write(
                         f"  [!] nikto parser error: {e}", "error")
 
+            # wpscan → WordPress version, vulnerable plugins/themes with
+            # CVEs, enumerated users.  Runs regardless of exit code —
+            # wpscan exits 5 exactly when it FINDS vulnerabilities, which
+            # the rc==0-gated generic fallback below would otherwise
+            # discard (findings lost precisely when they exist).
+            if (not used_specialized and log
+                    and tool.binary == "wpscan"):
+                try:
+                    used_specialized = self._parse_wpscan_to_intel(tool, log)
+                except Exception as e:
+                    self.app.terminal.write(
+                        f"  [!] wpscan parser error: {e}", "error")
+
             # getcap → parse Linux capabilities, flag dangerous combos
             if (not used_specialized and log
                     and tool.id == "capabilities_check"):
