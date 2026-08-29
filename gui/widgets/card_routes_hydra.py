@@ -465,13 +465,10 @@ class CardHydraRoutesMixin:
                                      border_width=1, corner_radius=3)
         threads_entry.pack(side="left", padx=8)
         add_context_menu(threads_entry)
-        bg_var = ctk.BooleanVar(value=True)
-        ctk.CTkCheckBox(opt_row, text="Run in background",
-                        variable=bg_var, font=_f("md"),
-                        text_color=COLORS["text_dim"],
-                        fg_color=COLORS["border_green"],
-                        border_color=COLORS["border_dim"],
-                        checkmark_color=COLORS["bg_primary"]).pack(side="left", padx=20)
+        # No "Run in background" toggle: hydra ALWAYS runs as a background
+        # job (see _start).  Its credential extraction / verification /
+        # Credential Store save lives only on the background completion
+        # path, so a foreground run would report creds yet save nothing.
 
         def _start():
             # Resolve username
@@ -511,10 +508,9 @@ class CardHydraRoutesMixin:
             _safe_destroy(win)
             self.app.terminal.section(f"BRUTE FORCE  ·  {tool.name}")
             self.app.terminal.write(f"  $ {cmd}", "cmd")
-            if bg_var.get():
-                self._run_in_background(tool, cmd, 3600)
-            else:
-                self._run_raw(tool, cmd)
+            # Always background: cred save happens only on the bg path.
+            # The bg job still mirrors live output to the main terminal.
+            self._run_in_background(tool, cmd, 3600)
 
         row = _btn_row(win)
         _btn(row, "START", _start, primary=True, w=120)
@@ -1057,10 +1053,10 @@ class CardHydraRoutesMixin:
             _safe_destroy(win)
             self.app.terminal.section(f"BRUTE FORCE  ·  {tool.name}")
             self.app.terminal.write(f"  $ {cmd}", "cmd")
-            if bg_var.get():
-                self._run_in_background(tool, cmd, 3600)
-            else:
-                self._run_raw(tool, cmd)
+            # Hydra always runs as a background job: cred save happens only
+            # on the bg path.  (The FFUF ALTERNATIVE below still honours the
+            # "Run in background" checkbox — it is not a cred-store tool.)
+            self._run_in_background(tool, cmd, 3600)
 
         def _start_ffuf():
             """Generate and run an ffuf command as JSON brute-force alternative."""

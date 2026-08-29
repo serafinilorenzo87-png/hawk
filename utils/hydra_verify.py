@@ -77,6 +77,13 @@ _HYDRA_URL_RE = re.compile(
     re.I,
 )
 _HYDRA_S_PORT_RE = re.compile(r"\s-s\s+(\d+)")
+# Scheme-less web-form shape: the form dialog builds the command as
+# "HOST -s PORT http-post-form <triplet>" (no proto://), so _HYDRA_URL_RE
+# matches nothing.  Recognise the bare hydra web module and take the host
+# token immediately before -s.
+_HYDRA_WEBMOD_RE = re.compile(
+    r"\b(https?-(?:get|post|head)-form|https?-(?:get|post|head))\b", re.I)
+_HYDRA_HOST_BEFORE_S_RE = re.compile(r"(\S+)\s+-s\s+\d+")
 _HYDRA_HTTPS_PROTOS = {"https-get", "https-post", "https-head",
                         "https-form-get", "https-form-post"}
 
@@ -113,6 +120,19 @@ def parse_hydra_cmd(cmd: str) -> HydraCmdInfo:
                 info.port = int(port_str)
             except ValueError:
                 pass
+    # Fallback for the scheme-less web-form shape (see _HYDRA_WEBMOD_RE):
+    # no proto:// means the URL regex found nothing, so without this the
+    # cascade counter-check ran against an empty host and printed a
+    # nonsensical "://:0" target.  Recover proto (the web module) and host
+    # (the token before -s) here.  is_form is derived below and keeps the
+    # form off the Basic-Auth GET probe.
+    if not info.proto:
+        mod_m = _HYDRA_WEBMOD_RE.search(cmd)
+        if mod_m:
+            info.proto = mod_m.group(1).lower()
+            host_m = _HYDRA_HOST_BEFORE_S_RE.search(cmd)
+            if host_m:
+                info.host = host_m.group(1)
     # -s <port> overrides the inline port if present
     sm = _HYDRA_S_PORT_RE.search(cmd)
     if sm:
@@ -367,7 +387,15 @@ def detect_false_positive_cascade(
 
     cascade = False
     try:
-        if cmd_info.is_http:
+        if cmd_info.is_form:
+            # Form logins POST a body HAWK can't reconstruct from the
+            # command line, so a Basic-Auth GET counter-check is the wrong
+            # probe — it would see the same login page for the real and the
+            # fake password and falsely flag a cascade.  Fall back to the
+            # multi-user heuristic, the only signal that holds without
+            # replaying the form POST.
+            cascade = bool(multi_user)
+        elif cmd_info.is_http:
             cascade = _http_check()
         elif proto in ("ftp", "ftps"):
             cascade = _ftp_check()

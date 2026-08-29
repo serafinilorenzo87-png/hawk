@@ -1395,6 +1395,43 @@ class CardRuntimeMixin:
                     svc_tag = f"HTTP-{method}"
             else:
                 svc_tag = tool.id.split("_")[-1].upper()
+            # Weak-credentials finding.  A successful hydra brute used to
+            # raise NOTHING in Target Intel (only the false-positive
+            # cascade path did), so a real compromise — e.g.
+            # msfadmin:msfadmin on MS2 SSH — never showed in the panel or
+            # the report even though the cred was saved.  Push a stable-
+            # titled HIGH finding so re-runs UPDATE (merge key = title+port)
+            # instead of stacking a new card.
+            if is_hydra and kept and not cascade_reason:
+                try:
+                    from utils.hydra_verify import parse_hydra_cmd as _phc
+                    _ci = _phc(cmd)
+                    _fhost = _ci.host or self._get_target() or "target"
+                    _fport = _ci.port or None
+                except Exception:
+                    _fhost = self._get_target() or "target"
+                    _fport = None
+                _n_ver = sum(1 for _, _, v in kept if v is True)
+                _cred_lines = "\n".join(
+                    f"  - {u}:{p}"
+                    + ("  [verified]" if v is True else "  [unverified]")
+                    for u, p, v in kept)
+                try:
+                    self.app.target_intel.add_auto_finding(
+                        title=f"Weak credentials — {svc_tag} on {_fhost}",
+                        description=(
+                            f"hydra recovered {len(kept)} credential(s) "
+                            f"({_n_ver} verified by HAWK's own probe) on "
+                            f"{svc_tag} {_fhost}"
+                            + (f":{_fport}" if _fport else "")
+                            + ".\n" + _cred_lines
+                            + "\n\nSaved to the Credential Store."),
+                        severity="high",
+                        source="hydra",
+                        port=_fport,
+                        replace=True)
+                except Exception as e:
+                    print(f"[HAWK] hydra success finding push failed: {e}")
             for u, p, probe in kept:
                 # VERIFIED only when HAWK's own probe authenticated
                 # the credential — hydra saying so is not proof (see
