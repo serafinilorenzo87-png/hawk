@@ -1305,12 +1305,28 @@ class TerminalWidget(ctk.CTkFrame):
         """
         try:
             self._textbox.configure(state="normal")
-            self._textbox._textbox.delete("1.0", "end")
+            tb = self._textbox._textbox
+            tb.delete("1.0", "end")
             self._lines.clear()
-            for entry in lines or []:
+            entries = lines or []
+            # ONE insert for the whole history, then colour each line via
+            # tag ranges.  The old per-line insert() forced a Text-widget
+            # relayout PER LINE, freezing LOAD for 20-30 s on a session
+            # with a few thousand lines (a single nuclei/sqlmap run).  A
+            # single insert relays out once; tag_add just marks ranges.
+            if entries:
+                tb.insert("end",
+                          "".join(e.get("text", "") + "\n" for e in entries))
+            line_no = 1
+            for entry in entries:
                 lvl  = entry.get("level", "info")
                 text = entry.get("text", "")
-                self._textbox._textbox.insert("end", text + "\n", lvl)
+                span = text.count("\n") + 1
+                try:
+                    tb.tag_add(lvl, f"{line_no}.0", f"{line_no + span}.0")
+                except Exception:
+                    pass
+                line_no += span
                 # Parse ts back to datetime for the in-memory buffer
                 try:
                     ts = datetime.fromisoformat(entry.get("ts", ""))
@@ -1318,7 +1334,7 @@ class TerminalWidget(ctk.CTkFrame):
                     ts = datetime.now()
                 self._lines.append((lvl, text, ts))
             self._textbox.configure(state="disabled")
-            self._textbox._textbox.see("end")
+            tb.see("end")
         except Exception as e:
             print(f"[HAWK] terminal restore failed: {e}")
 
