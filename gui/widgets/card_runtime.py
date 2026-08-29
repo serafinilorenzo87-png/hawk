@@ -2084,6 +2084,12 @@ class CardRuntimeMixin:
                 "sqlmap",
                 "enum4linux", "enum4linux-ng",
                 "kerbrute",
+                # hydra — its cred extraction, false-positive verification
+                # and the "Weak credentials" finding all run on the
+                # background completion path; the generic fallback would
+                # double-post a bland raw-output card ("HYDRA FTP on
+                # <host>", just the banner + attempt log) on top.
+                "hydra",
                 "whatweb",
                 "nuclei",
                 "nikto",
