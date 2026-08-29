@@ -3798,7 +3798,20 @@ class TargetIntelRenderMixin:
                 (f.get("severity") or "info").lower(), 4))
 
         current_sev = None
-        for finding in sorted_findings:
+        for _fi, finding in enumerate(sorted_findings):
+            # Progressive paint: building each finding is ~a dozen
+            # customtkinter widgets, so a large findings set is a
+            # multi-second layout.  Flush the idle queue every few cards
+            # so they appear in batches instead of the whole panel
+            # freezing blank until the last one is built.  (update_idletasks
+            # only drains pending redraws — it does not re-enter event
+            # handling, so it can't recurse into another render.)
+            if _fi and _fi % 8 == 0:
+                try:
+                    self.update_idletasks()
+                except Exception:
+                    pass
+
             sev = (finding.get("severity") or "info").lower()
             sev_color = sev_colors.get(sev, COLORS["text_dim"])
 

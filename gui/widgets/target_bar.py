@@ -2881,7 +2881,14 @@ class TargetBar(ctk.CTkFrame):
 
                 self.app.target_intel._auto_findings = (
                     list(intel_state.get("auto_findings", []) or []))
-                self.app.target_intel._render_all()
+                # Defer the Target Intel repaint off the LOAD critical
+                # path.  Rendering many findings is a multi-second
+                # customtkinter widget build; doing it inline kept the
+                # LOAD dialog open (frozen) for its whole duration.  The
+                # render itself now paints progressively — see
+                # _render_auto_findings_section.
+                self.app.target_intel.after(
+                    0, self.app.target_intel._render_all)
         except Exception as e:
             print(f"[HAWK] target_intel restore failed: {e}")
 
