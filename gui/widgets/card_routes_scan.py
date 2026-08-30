@@ -144,6 +144,12 @@ class CardScanRoutesMixin:
             self._run_ping(tool)
             return
 
+        # Ncrack SSH — legacy-capable SSH brute (hydra can't negotiate
+        # old crypto).  Own dialog with a Concurrency (CL) field.
+        if tool.id == "ncrack_ssh":
+            self._route_ncrack_ssh(tool)
+            return
+
         # Hydra — port-aware with wordlist dialog
         if tool.binary == "hydra":
             self._route_hydra(tool)

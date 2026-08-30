@@ -238,6 +238,41 @@ class CardHydraRoutesMixin:
                          font=_f("sm"), text_color=COLORS["text_green"],
                          anchor="w").pack(fill="x", padx=24, pady=(0,4))
 
+        # ── Legacy-SSH heads-up ─────────────────────────────────────────
+        # hydra's libssh can't negotiate the old KEX/MAC/cipher algos that
+        # pre-2016 OpenSSH (4.x/5.x — Metasploitable2, appliances, IoT)
+        # speaks, so it dies at key-exchange before trying a password.
+        # When the SSH banner looks that old, steer the operator to the
+        # NCRACK SSH card, which speaks legacy crypto.
+        if tool.id == "hydra_ssh":
+            _is_legacy, _ssh_banner = self._ssh_is_legacy(port)
+            if _is_legacy:
+                from gui.dialogs import _note_box
+                _note_box(
+                    win,
+                    f"Legacy SSH detected ({_ssh_banner}). hydra can't "
+                    f"negotiate its old crypto and will fail with "
+                    f"'kex error: no match for method' before trying any "
+                    f"password. Use NCRACK SSH instead — it speaks legacy "
+                    f"ciphers.",
+                    COLORS["text_yellow"])
+
+                def _open_ncrack():
+                    nt = self.module.get_tool("ncrack_ssh")
+                    _safe_destroy(win)
+                    if nt:
+                        self._route_ncrack_ssh(nt)
+                ctk.CTkButton(
+                    win, text="▶  Open NCRACK SSH (legacy-capable)",
+                    height=30, font=_f("md", True),
+                    fg_color="transparent",
+                    hover_color=COLORS["bg_card_hover"],
+                    border_color=COLORS.get("text_cyan", "#7EC8E3"),
+                    border_width=1,
+                    text_color=COLORS.get("text_cyan", "#7EC8E3"),
+                    corner_radius=4,
+                    command=_open_ncrack).pack(padx=24, pady=(0, 6))
+
         # Username mode
         _sub(win, "Username:")
         user_mode_var = ctk.StringVar(value="single")
@@ -1112,6 +1147,212 @@ class CardHydraRoutesMixin:
         row = _btn_row(win)
         _btn(row, "START HYDRA", _start, primary=True, w=140)
         _btn(row, "FFUF ALTERNATIVE", _start_ffuf, w=160)
+        _btn(row, "CANCEL", lambda: _safe_destroy(win))
+
+    def _ssh_is_legacy(self, port):
+        """Best-effort: True when the target's SSH banner is an old OpenSSH
+        (major < 6) — the servers whose legacy KEX/MAC/cipher algorithms
+        hydra's libssh can't negotiate.  Returns (is_legacy, banner)."""
+        fp = getattr(getattr(self.app, "target_intel", None), "_fp", None)
+        if not fp:
+            return (False, "")
+        try:
+            # 1) Precise: an old OpenSSH banner (major < 6) on the SSH port.
+            for p, _proto, svc, banner in getattr(fp, "open_ports", []):
+                if not banner:
+                    continue
+                if p == port or "ssh" in (svc or "").lower():
+                    m = re.search(r"OpenSSH[_ ](\d+)\.", banner)
+                    if m and int(m.group(1)) < 6:
+                        return (True, banner.strip())
+            # 2) Fallback: the target is classified "legacy" overall (the
+            #    same call CONNECT uses for its compat flags) and an SSH
+            #    service is present — old boxes almost always run old SSH.
+            gen = ""
+            try:
+                gen = fp.classify_generation_for_port(port)
+            except Exception:
+                try:
+                    gen = fp.classify_generation()
+                except Exception:
+                    gen = ""
+            if gen == "legacy":
+                for p, _proto, svc, banner in getattr(fp, "open_ports", []):
+                    if p == port or "ssh" in (svc or "").lower():
+                        return (True, (banner or "legacy SSH").strip())
+        except Exception:
+            pass
+        return (False, "")
+
+    def _route_ncrack_ssh(self, tool):
+        # Legacy-capable SSH brute — see the tool note in
+        # modules/exploitation.py.  ncrack has its own SSH stack and
+        # negotiates the old crypto hydra can't.
+        if not tool.is_available():
+            self._show_install_dialog(tool)
+            return
+        target = self._get_target()
+        if not target:
+            return
+        port, _ = self._require_service(tool.name, "ssh")
+        if port is None:
+            return
+        self._show_ncrack_ssh_dialog(tool, target, port)
+
+    def _show_ncrack_ssh_dialog(self, tool, target, port):
+        from gui.dialogs import (_make_win, _title, _sub, _note_box,
+                                 _btn_row, _btn, _safe_destroy)
+        from tkinter import filedialog as fd
+
+        win = _make_win(self, f"{tool.name} — legacy-capable SSH brute",
+                        640, 660)
+        _title(win, f"{tool.name}  —  ssh://{target}:{port}")
+        _note_box(
+            win,
+            "ncrack speaks legacy SSH crypto (OpenSSH 4.x/5.x) where hydra "
+            "fails at key-exchange, and works on modern servers too. On a "
+            "legacy target the server is the bottleneck (old crypto + "
+            "MaxAuthTries) — prefer a TARGETED wordlist over a huge one.",
+            COLORS["text_cyan"])
+
+        # Username (single) — the common case for a targeted SSH brute.
+        _sub(win, "Username (single):")
+        user_single_var = ctk.StringVar(value="root")
+        ue = ctk.CTkEntry(win, textvariable=user_single_var, font=_f("md"),
+                          height=28, fg_color=COLORS["bg_card"],
+                          text_color=COLORS["text_bright"],
+                          border_color=COLORS["border_dim"],
+                          border_width=1, corner_radius=3)
+        ue.pack(fill="x", padx=24, pady=(0, 4))
+        add_context_menu(ue)
+
+        # …or a user list (optional; overrides the single user).
+        _sub(win, "…or user list (optional — overrides the single user):")
+        user_file_var = ctk.StringVar(value="")
+        ufr = ctk.CTkFrame(win, fg_color="transparent")
+        ufr.pack(fill="x", padx=24, pady=2)
+        ufe = ctk.CTkEntry(ufr, textvariable=user_file_var, font=_f("sm"),
+                           height=28, fg_color=COLORS["bg_card"],
+                           text_color=COLORS["text_bright"],
+                           border_color=COLORS["border_dim"],
+                           border_width=1, corner_radius=3)
+        ufe.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        add_context_menu(ufe)
+
+        def _browse_user():
+            p = fd.askopenfilename(title="Select username wordlist",
+                                   filetypes=[("Text", "*.txt"),
+                                              ("All", "*")])
+            if p:
+                user_file_var.set(p)
+        ctk.CTkButton(ufr, text="📂", width=32, height=28, font=_f("sm"),
+                      fg_color=COLORS["bg_card"],
+                      hover_color=COLORS["bg_card_hover"],
+                      border_color=COLORS["border_dim"], border_width=1,
+                      text_color=COLORS["text_dim"], corner_radius=3,
+                      command=_browse_user).pack(side="left")
+
+        # Password wordlist — same discovery as the hydra dialog.
+        _sub(win, "Password wordlist:")
+        pass_wl = _get_pass_wordlists()
+        pass_wl_map = dict(pass_wl)
+        pass_wl_var = ctk.StringVar(
+            value=next((p for l, p in pass_wl if "rockyou" in l.lower()),
+                       (pass_wl[0][1] if pass_wl else "")))
+        pfr = ctk.CTkFrame(win, fg_color="transparent")
+        pfr.pack(fill="x", padx=24, pady=2)
+        pe = ctk.CTkEntry(pfr, textvariable=pass_wl_var, font=_f("sm"),
+                          height=28, fg_color=COLORS["bg_card"],
+                          text_color=COLORS["text_bright"],
+                          border_color=COLORS["border_dim"],
+                          border_width=1, corner_radius=3)
+        pe.pack(side="left", fill="x", expand=True, padx=(0, 4))
+        add_context_menu(pe)
+
+        def _browse_pass():
+            p = fd.askopenfilename(title="Select password wordlist",
+                                   filetypes=[("Text", "*.txt"),
+                                              ("All", "*")])
+            if p:
+                pass_wl_var.set(p)
+        ctk.CTkButton(pfr, text="📂", width=32, height=28, font=_f("sm"),
+                      fg_color=COLORS["bg_card"],
+                      hover_color=COLORS["bg_card_hover"],
+                      border_color=COLORS["border_dim"], border_width=1,
+                      text_color=COLORS["text_dim"], corner_radius=3,
+                      command=_browse_pass).pack(side="left")
+        pq = ctk.CTkScrollableFrame(win, height=72,
+                                    fg_color=COLORS["bg_card"],
+                                    border_color=COLORS["border_dim"],
+                                    border_width=1, corner_radius=3)
+        pq.pack(fill="x", padx=24, pady=(0, 4))
+        for label, path in pass_wl[:8]:
+            ctk.CTkButton(pq, text=label, anchor="w", height=22,
+                          font=_f("xs"), fg_color="transparent",
+                          hover_color=COLORS["bg_card_hover"],
+                          text_color=COLORS["text_dim"], corner_radius=2,
+                          command=lambda p=path: pass_wl_var.set(p)
+                          ).pack(fill="x", padx=4, pady=1)
+
+        # Concurrency (CL) + when-to-change guidance.
+        cl_row = ctk.CTkFrame(win, fg_color="transparent")
+        cl_row.pack(fill="x", padx=24, pady=(6, 2))
+        ctk.CTkLabel(cl_row, text="Concurrency (CL):", font=_f("md"),
+                     text_color=COLORS["text_dim"]).pack(side="left")
+        cl_var = ctk.StringVar(value="4")
+        cle = ctk.CTkEntry(cl_row, textvariable=cl_var, width=50, height=28,
+                           font=_f("md"), fg_color=COLORS["bg_card"],
+                           text_color=COLORS["text_bright"],
+                           border_color=COLORS["border_dim"],
+                           border_width=1, corner_radius=3)
+        cle.pack(side="left", padx=8)
+        add_context_menu(cle)
+        _note_box(
+            win,
+            "Parallel SSH connections. Default 4 is a safe middle.\n"
+            "  Lower (1-2): fragile/old/embedded or production targets that "
+            "choke; fail2ban / IDS / rate-limiting present; unstable or "
+            "pivoted link; or to stay stealthy.\n"
+            "  Raise (8-10): robust/modern target you control on a fast LAN "
+            "with a big list. Past ~10 the server's MaxStartups drops the "
+            "extra connections (slower, not faster).",
+            COLORS["text_muted"])
+
+        def _start():
+            u_file = user_file_var.get().strip()
+            u_single = user_single_var.get().strip()
+            if u_file:
+                user_arg = f"-U {_shq(u_file)}"
+            elif u_single:
+                user_arg = f"--user {_shq(u_single)}"
+            else:
+                self.app.terminal.write(
+                    "[!] NCRACK SSH cancelled — no username or user list.",
+                    "warn")
+                return
+            pass_path = pass_wl_map.get(
+                pass_wl_var.get(), pass_wl_var.get()).strip()
+            if not pass_path:
+                self.app.terminal.write(
+                    "[!] NCRACK SSH cancelled — no password wordlist.",
+                    "warn")
+                return
+            cl = cl_var.get().strip() or "4"
+            if not cl.isdigit() or int(cl) < 1:
+                cl = "4"
+            # --connection-limit caps concurrent SSH connections (ncrack's
+            # "CL"): more = faster, up to the server's MaxStartups ceiling.
+            cmd = (f"ncrack --connection-limit {cl} -p {port} {user_arg} "
+                   f"-P {_shq(pass_path)} {target}")
+            _safe_destroy(win)
+            self.app.terminal.section(f"BRUTE FORCE  ·  {tool.name}")
+            self.app.terminal.write(f"  $ {cmd}", "cmd")
+            # Background job: long-running, gets a STOP handle, and the
+            # ncrack cred parser runs on completion (see _on_done).
+            self._run_in_background(tool, cmd, 3600)
+
+        row = _btn_row(win)
+        _btn(row, "START", _start, primary=True, w=120)
         _btn(row, "CANCEL", lambda: _safe_destroy(win))
 
     def _show_hydra_smb_139_warning(self, tool, target):

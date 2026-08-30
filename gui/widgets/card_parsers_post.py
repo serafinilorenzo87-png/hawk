@@ -956,6 +956,27 @@ class CardPostParserMixin:
             return  # don't follow up with per-tool advice — this is the
                      # root cause, not the symptom
 
+        # ── hydra SSH vs legacy servers ───────────────────────────────
+        # hydra's libssh can't negotiate the old KEX/MAC/cipher algorithms
+        # a pre-2016 OpenSSH offers, so it aborts at key-exchange before
+        # trying a single password.  Detect that signature and steer the
+        # operator to the NCRACK SSH card, which speaks legacy crypto.
+        if tool.binary == "hydra" and (
+                "no match for method" in joined
+                or "kex error" in joined
+                or ("could not connect" in joined and "ssh" in joined)):
+            self.app.terminal.write(
+                "  -> hydra SSH failed at key-exchange (kex/MAC/cipher\n"
+                "     mismatch): this target runs a legacy SSH that only\n"
+                "     offers old algorithms, and hydra's libssh can't\n"
+                "     negotiate them (it has no option to force them).\n"
+                "     This is NOT a wordlist or credential problem.\n"
+                "     Use the NCRACK SSH card instead - it speaks legacy\n"
+                "     crypto (OpenSSH 4.x/5.x) and brute-forces this target\n"
+                "     fine.",
+                "warn")
+            return
+
         # ── ldapsearch ────────────────────────────────────────────────
         if tool.binary == "ldapsearch":
             if returncode == 255:

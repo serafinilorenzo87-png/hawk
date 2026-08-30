@@ -1105,6 +1105,66 @@ class CardServiceParserMixin:
         self.app.after(0, _emit)
         return True
 
+    def _parse_ncrack_to_intel(self, tool, log: list) -> bool:
+        """Parse ncrack SSH output → Credential Store + one stable Target
+        Intel finding.  ncrack prints hits as:
+
+            192.168.177.134 22/tcp ssh: 'msfadmin' 'msfadmin'
+
+        ncrack proves the login by actually authenticating, so creds are
+        stored verified=True.  The finding title matches the hydra
+        "Weak credentials — SSH on <host>" card so the two tools collapse
+        onto one card instead of stacking.
+        """
+        import re as _re
+        line_re = _re.compile(
+            r"(\S+)\s+(\d+)/tcp\s+ssh:\s*'([^']*)'\s+'([^']*)'", _re.I)
+        host = self._get_target() or ""
+        port = 22
+        creds = []
+        seen = set()
+        for _, ln in log:
+            m = line_re.search(ln or "")
+            if not m:
+                continue
+            host = m.group(1) or host
+            try:
+                port = int(m.group(2))
+            except ValueError:
+                pass
+            u, p = m.group(3), m.group(4)
+            if (u, p) in seen:
+                continue
+            seen.add((u, p))
+            creds.append((u, p))
+        if not creds:
+            return False
+
+        from utils.session import Credential
+        for u, p in creds:
+            try:
+                self.app.cred_store.add_credential(Credential(
+                    username=u, password=p, cred_type="cleartext",
+                    services=["SSH"], source_phase=self.phase_id,
+                    notes="", verified=True))
+            except Exception as e:
+                print(f"[HAWK] ncrack cred save failed: {e}")
+
+        cred_lines = "\n".join(f"  - {u}:{p}  [verified]" for u, p in creds)
+        try:
+            self.app.target_intel.add_auto_finding(
+                title=f"Weak credentials — SSH on {host}",
+                description=(f"ncrack recovered {len(creds)} credential(s) "
+                            f"on SSH {host}:{port}.\n{cred_lines}\n\n"
+                            f"Saved to the Credential Store."),
+                severity="high", source="ncrack", port=port, replace=True)
+        except Exception as e:
+            print(f"[HAWK] ncrack finding push failed: {e}")
+        self.app.terminal.write(
+            f"  [+] ncrack: {len(creds)} credential(s) -> Credential Store "
+            f"+ Target Intel.", "success")
+        return True
+
     def _parse_kerbrute_to_intel(self, tool, log: list) -> bool:
         """Parse kerbrute output and:
           - push valid usernames (userenum) to Credential Store as

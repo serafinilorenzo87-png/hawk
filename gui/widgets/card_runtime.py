@@ -1845,6 +1845,19 @@ class CardRuntimeMixin:
                     self.app.terminal.write(
                         f"  [!] gobuster parser error: {e}", "error")
 
+            # ncrack SSH → creds to Credential Store + "Weak credentials"
+            # finding.  ncrack's output format differs from hydra's, so the
+            # hydra background-path extractor never matches it — this
+            # dedicated parser (also runs on the foreground path) is what
+            # lands the cred and the finding.
+            if tool.binary == "ncrack" and log:
+                try:
+                    used_specialized = self._parse_ncrack_to_intel(
+                        tool, log) or used_specialized
+                except Exception as e:
+                    self.app.terminal.write(
+                        f"  [!] ncrack parser error: {e}", "error")
+
             # Web Oracle auto-trigger hint — after any web-recon tool
             # in the ENUMERATION phase completes successfully, nudge
             # the user toward WEB ASSAULT once per session so they know
@@ -2090,6 +2103,10 @@ class CardRuntimeMixin:
                 # double-post a bland raw-output card ("HYDRA FTP on
                 # <host>", just the banner + attempt log) on top.
                 "hydra",
+                # ncrack — dedicated _parse_ncrack_to_intel above already
+                # lands the cred + finding; the generic fallback would
+                # double-post a raw "NCRACK SSH on <host>" card.
+                "ncrack",
                 "whatweb",
                 "nuclei",
                 "nikto",
