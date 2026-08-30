@@ -3938,8 +3938,10 @@ class TargetIntelRenderMixin:
             if _msf_suggestions_suppressed(finding.get("source")):
                 exploit_modules = []
             else:
-                exploit_modules = _get_exploits_for_vuln(
-                    finding["title"], finding["description"])
+                exploit_modules = self._rank_modules_for_target(
+                    _get_exploits_for_vuln(
+                        finding["title"], finding["description"]),
+                    finding)
             exploit_module = exploit_modules[0][0] if exploit_modules else ""
             btn_row = ctk.CTkFrame(fr, fg_color="transparent")
             btn_row.pack(fill="x", padx=8, pady=(0, 6))
@@ -4868,7 +4870,8 @@ class TargetIntelRenderMixin:
         if any(s in _info_src for s in _SKIP_MSF_SOURCES):
             exploit_modules = []
         else:
-            exploit_modules = _get_exploits_for_vuln(title, description)
+            exploit_modules = self._rank_modules_for_target(
+                _get_exploits_for_vuln(title, description), finding)
         if exploit_modules:
             n_mods = len(exploit_modules)
             msf_text = ("▶ EXPLOIT WITH MSF ▾" if n_mods > 1

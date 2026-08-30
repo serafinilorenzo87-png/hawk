@@ -66,7 +66,7 @@ _CACHE_MAX_AGE = 86_400
 
 # Schema version — bump when the cache format changes so old caches get
 # rebuilt automatically.
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 # ── Module-type prefix mapping ────────────────────────────────────────────────
 # MSF uses-path: exploit/X/Y/Z — but the filesystem is exploits/X/Y/Z.rb
@@ -215,7 +215,8 @@ def search_by_keywords(keywords: list, max_results: int = 10) -> list:
                 continue
             if "/fileformat/" in path or "/docgen/" in path:
                 continue
-            haystack = (path + " " + (meta.get("name") or "")).lower()
+            haystack = meta.get("_hay") or (
+                path + " " + (meta.get("name") or "")).lower()
             if all(kw in haystack for kw in keywords_lower):
                 results.append({
                     "path": path,
@@ -225,6 +226,98 @@ def search_by_keywords(keywords: list, max_results: int = 10) -> list:
                 if len(results) >= max_results:
                     break
     return results
+
+
+# ── Target-aware ranking of module suggestions ──────────────────────────
+
+# Service token → the TCP ports MSF modules for it typically target.  Used
+# to demote a suggested module whose service clearly mismatches a finding's
+# port (e.g. distcc:3632 offered for an HTTP:80 finding).
+_SERVICE_PORTS = {
+    "samba": {139, 445}, "smb": {139, 445},
+    "ftp": {21}, "ssh": {22}, "telnet": {23}, "smtp": {25},
+    "mysql": {3306}, "postgres": {5432}, "postgresql": {5432},
+    "mssql": {1433}, "rdp": {3389}, "vnc": {5900},
+    "distcc": {3632}, "unrealircd": {6667}, "unreal": {6667},
+    "irc": {6667, 6697}, "rmi": {1099}, "java_rmi": {1099},
+    "nfs": {2049}, "redis": {6379}, "snmp": {161},
+    "tomcat": {8080, 8180, 8009}, "ajp": {8009},
+    "jboss": {8080}, "jenkins": {8080}, "glassfish": {4848, 8080},
+    "http": {80, 443, 8080, 8000, 8180, 8443},
+}
+
+
+def _module_ports_for_path(path):
+    """Best-effort set of ports a module's service targets, inferred from
+    service tokens anywhere in the module path.  Empty when unknown (then
+    the port check stays neutral)."""
+    p = (path or "").lower()
+    ports = set()
+    for svc, pset in _SERVICE_PORTS.items():
+        if svc in p:
+            ports |= pset
+    return ports
+
+
+def rank_modules_for_target(modules, platform="", port=None):
+    """Reorder MSF (module_path, label) suggestions so the best match for a
+    target of the given `platform` ("windows"/"linux"/... or "") and finding
+    `port` comes first.
+
+    _get_exploits_for_vuln is a pure text match with no OS/port context, so
+    it returns modules in curated-map order — which puts e.g.
+    exploit/windows/smb/ms17_010_eternalblue first on a Linux/Samba SMB
+    finding (nmap prints "ms17-010" even when NOT vulnerable).  Here we
+    RANK — never drop, the operator can still pick anything: a module whose
+    platform contradicts a KNOWN target OS sinks; full-RCE exploits rank
+    above auxiliary scanners; a service/port match is a bonus.  A stable
+    sort keeps the curated order for ties, and an unknown target OS leaves
+    ordering unchanged.
+
+    Pure function (no GUI, no fingerprint object) so it is unit-testable;
+    the Target Intel widget passes platform=self._fp.platform and
+    port=self._extract_port_from_finding(finding)."""
+    if not modules or len(modules) <= 1:
+        return modules
+    plat = (platform or "").lower()
+    target_nix = plat in ("linux", "unix", "bsd", "solaris",
+                          "osx", "macos", "freebsd")
+    target_win = ("windows" in plat) or (plat == "win")
+
+    def _score(item):
+        path = (item[0] or "").lower()
+        segs = path.split("/")
+        fam = segs[1] if len(segs) > 1 else ""
+        is_win_mod = (fam == "windows")
+        is_nix_mod = fam in ("unix", "linux", "bsd", "solaris", "osx")
+        is_multi   = (fam == "multi")
+        is_aux     = path.startswith(("auxiliary/", "post/"))
+
+        s = 0
+        # Platform — the big lever.  Contradicting a KNOWN target OS sinks
+        # the module; matching (or cross-platform) lifts it.  Unknown
+        # target OS → no platform effect (today's ordering).
+        if target_nix:
+            if is_win_mod:
+                s -= 100
+            elif is_nix_mod or is_multi:
+                s += 20
+        elif target_win:
+            if is_nix_mod:
+                s -= 100
+            elif is_win_mod or is_multi:
+                s += 20
+        # Full-RCE exploits above scanners / aux / post.
+        s += -10 if is_aux else 10
+        # Service/port relevance — additive, best-effort only.
+        if port is not None:
+            mports = _module_ports_for_path(path)
+            if mports:
+                s += 15 if port in mports else -8
+        return s
+
+    # Stable sort by score, highest first (ties keep the input order).
+    return sorted(modules, key=lambda it: -_score(it))
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -515,6 +608,12 @@ def _build_index() -> tuple:
             "archs":             meta["archs"],
             "suggested_payload": suggested,
             "needs_lhost_lport": _needs_lhost_lport(mtype, suggested),
+            # Precomputed lowercased search haystack so search_by_keywords
+            # doesn't rebuild+lowercase (path + " " + name) for EVERY module
+            # on every call (it runs per finding during Target Intel render).
+            # Persisted in the cache JSON — costs nothing at load.
+            "_hay":              (mod_path + " "
+                                  + (meta["name"] or "")).lower(),
         }
         by_path[mod_path] = by_path_entry
         if (meta["default_payload"] or meta["platforms"] or meta["archs"]):

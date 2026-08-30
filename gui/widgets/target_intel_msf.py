@@ -276,6 +276,28 @@ class TargetIntelMsfMixin:
             "affects": affects,
         }
 
+    def _rank_modules_for_target(self, modules, finding):
+        """Order MSF module suggestions so the best match for THIS target is
+        first — it becomes both the picker's pre-selected default and the
+        single-module direct-launch choice.  Thin wrapper: pull the target
+        OS off self._fp and the finding's port off the shared resolver, then
+        delegate to the pure ranker in utils.msf_index (rationale there)."""
+        try:
+            plat = (getattr(self._fp, "platform", "") or "")
+        except Exception:
+            plat = ""
+        try:
+            port = self._extract_port_from_finding(finding)
+        except Exception:
+            port = None
+        try:
+            from utils import msf_index as _mi
+            return _mi.rank_modules_for_target(
+                modules, platform=plat, port=port)
+        except Exception as e:
+            print(f"[HAWK] msf module ranking failed: {e}")
+            return modules
+
     def _show_msf_module_picker(self, modules: list, finding: dict):
         """Picker dialog shown when a finding has MORE than one MSF
         module that could exploit it (e.g. ms17-010 has eternalblue +
@@ -523,8 +545,15 @@ class TargetIntelMsfMixin:
                 # other OSes (BSD, OSX) — keep the index suggestion
         else:
             # Index not ready or module unknown — keep the previous
-            # heuristic as the safety net.
-            is_payload_free = is_scanner or is_dos
+            # heuristic as the safety net.  Treat ANY auxiliary/post module
+            # as payload-free too (not just scanner/dos): during the brief
+            # first-launch index build a generic auxiliary/server or
+            # auxiliary/sqli would otherwise be treated as a payload-bearing
+            # exploit and emit `set PAYLOAD; exploit` → MSF "Unknown
+            # datastore option PAYLOAD".
+            is_payload_free = (
+                is_scanner or is_dos
+                or mod_low.startswith(("auxiliary/", "post/")))
             fp = self._fp
             if fp and fp.platform == "windows":
                 payload = "windows/x64/meterpreter/reverse_tcp"

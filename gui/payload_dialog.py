@@ -381,7 +381,10 @@ class PayloadSelectorDialog:
         elif "linux" in low:
             return "Linux x64"
         elif "android" in low:
-            return "Linux x86"
+            # Android has no x86 payloads — the "Linux x86" category lists
+            # none of them.  "Generic / Unknown OS" lists java/python/php
+            # meterpreter, the closest usable set for an android target.
+            return "Generic / Unknown OS"
         return "Generic / Unknown OS"
 
     def _update_preview(self, *_):

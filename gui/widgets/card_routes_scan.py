@@ -442,11 +442,10 @@ class CardScanRoutesMixin:
             "echo '  HAWK  —  Metasploit Framework'; "
             "echo '═══════════════════════════════════════════════════════════'; "
             "echo ''; "
-            "echo 'Database suggestions (run OUTSIDE msfconsole if needed):'; "
-            "echo '  sudo systemctl status postgresql   # is PG up?'; "
-            "echo '  sudo systemctl start postgresql    # start it'; "
+            "echo 'HAWK auto-starts the DB below. If it fails, run OUTSIDE msfconsole:'; "
             "echo '  sudo msfdb init                    # first-time setup'; "
             "echo '  sudo msfdb status                  # verify'; "
+            "echo '  sudo systemctl start postgresql    # start PG manually'; "
             "echo ''; "
             "echo 'Inside msfconsole:'; "
             "echo '  db_status                          # confirm DB connected'; "
@@ -457,10 +456,23 @@ class CardScanRoutesMixin:
             "echo '───────────────────────────────────────────────────────────'; "
             "echo ''; "
         )
-        script = banner + "msfconsole; read -p 'Press ENTER to close...'"
+        # Ensure the Metasploit database is up before launching msfconsole,
+        # so db_status is connected without a manual step.  Elevate only
+        # when postgres isn't already running (pgrep needs no sudo), so a
+        # host that already has the DB up gets no needless password prompt.
+        db_up = (
+            "if pgrep -x postgres >/dev/null 2>&1; then "
+            "echo '[HAWK] Metasploit database already running.'; "
+            "else "
+            "echo '[HAWK] Starting Metasploit database (sudo may be asked)...'; "
+            "sudo msfdb start; "
+            "fi; echo ''; "
+        )
+        script = (banner + db_up
+                  + "msfconsole; read -p 'Press ENTER to close...'")
         _open_terminal("HAWK — Metasploit Console", script)
         self.app.terminal.write(
-            "  [+] Metasploit launched in xterm (DB hints printed).",
+            "  [+] Metasploit launched in xterm (DB auto-started).",
             "success")
 
     def _route_greenbone(self, tool):

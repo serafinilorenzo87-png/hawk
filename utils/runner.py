@@ -1496,11 +1496,16 @@ class MetasploitRunner:
         # and sysinfo/getuid are Meterpreter-only (fail on cmd shells
         # like cmd/unix/reverse_perl with "Unknown command").
 
-        ts = int(time.time())
         os.makedirs(TMP_DIR, exist_ok=True)
-        script_path = os.path.join(TMP_DIR, f"hawk_msf_{ts}.rc")
+        # Unique RC path (mkstemp, not an int-second timestamp): two
+        # launches in the same wall-clock second used to share one path, so
+        # the first xterm's `rm -f` could delete the file out from under the
+        # second msfconsole before it finished reading its resource script.
         try:
-            with open(script_path, "w") as f:
+            import tempfile as _tf
+            _fd, script_path = _tf.mkstemp(
+                prefix="hawk_msf_", suffix=".rc", dir=TMP_DIR)
+            with os.fdopen(_fd, "w") as f:
                 f.write("\n".join(lines) + "\n")
         except Exception as e:
             _dispatch(self.ui_dispatcher, self.output_callback, f"[!] Cannot write MSF script: {e}", "msfconsole", "error"); return
@@ -1683,11 +1688,33 @@ class MetasploitRunner:
         if not bg_path:
             return
 
+        proc = None
+        _wd = None
         try:
             proc = subprocess.Popen(
                 ["msfconsole","-q","-r",bg_path],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1, env=_hawk_env())
+                text=True, bufsize=1, env=_hawk_env(),
+                preexec_fn=os.setsid)
+
+            # Watchdog: this read-only mirror echoes the setup lines then
+            # hits `exit -y`, so it ends within ~2 s.  If msfconsole wedges
+            # first (cold DB init, a migration/plugin prompt) the
+            # `for raw in proc.stdout` below would block forever and
+            # msfconsole + its ruby children would orphan — kill() owns
+            # nothing.  Kill the whole process group after a generous
+            # timeout so nothing leaks.
+            def _reap(p=proc):
+                try:
+                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                    time.sleep(2)
+                    os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                except Exception:
+                    pass
+            _wd = threading.Timer(60.0, _reap)
+            _wd.daemon = True
+            _wd.start()
+
             for raw in proc.stdout:
                 line  = strip_ansi(raw.rstrip())
                 level = ("success" if "[+]" in line else
@@ -1709,6 +1736,14 @@ class MetasploitRunner:
                       f"[!] Capture error: {e}", tool_name, "error")
             rc = -1
         finally:
+            if _wd is not None:
+                try: _wd.cancel()
+                except Exception: pass
+            # Belt-and-suspenders: make sure no msfconsole/ruby child
+            # survives this mirror (no-op when it already exited cleanly).
+            if proc is not None:
+                try: os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except Exception: pass
             try: os.remove(bg_path)
             except: pass
             if shell_found: self.shell_callback(target)
