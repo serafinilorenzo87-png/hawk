@@ -93,6 +93,8 @@ class ResponderFindingDedupTests(unittest.TestCase):
             _src("gui/widgets/card_routes_responder.py"),
             "_show_responder_post_stop_dialog")
         self.assertIn("replace=True", body)
+        # snapshot: clear prior Responder cards (incl. stale ones) first
+        self.assertIn("remove_auto_findings_by_source", body)
         # title no longer embeds the per-run counts/elapsed
         self.assertNotIn('f"RESPONDER — {counters', body)
 

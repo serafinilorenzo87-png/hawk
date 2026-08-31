@@ -751,11 +751,13 @@ class CardResponderRoutesMixin:
                    "medium" if (counters.get("LLMNR", 0)
                                 + counters.get("NBT-NS", 0) > 0)
                    else "info")
-            # STABLE title (no per-run counts/elapsed) + replace=True so a
-            # second Responder session UPDATES the one card instead of
-            # stacking a new one every STOP — the counts/elapsed live in the
-            # description.  (Old title embedded {elapsed}s → merge key never
-            # matched → duplicate cards.)
+            # Snapshot: drop any earlier Responder card first (incl. a stale
+            # one from a pre-fix HAWK whose title embedded {elapsed}s), then
+            # write the fresh one under a STABLE title with replace=True — so
+            # there is always exactly ONE Responder finding instead of a new
+            # card stacked on every STOP.  Counts/elapsed live in the body.
+            self.app.target_intel.remove_auto_findings_by_source(
+                "Responder")
             self.app.target_intel.add_auto_finding(
                 title="RESPONDER — LLMNR/NBT-NS poisoning session",
                 description="\n".join(desc_lines),
