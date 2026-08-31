@@ -112,6 +112,14 @@ class CardScanRoutesMixin:
             self._route_metasploit_launcher(tool)
             return
 
+        # Burp Suite — a standalone GUI app, not a target-driven tool.
+        # Launch it detached (own session) so it needs no target, the card
+        # returns to ready immediately instead of tracking Burp for its
+        # whole lifetime, and STOP can't kill it.
+        if tool.id == "burpsuite":
+            self._route_burpsuite(tool)
+            return
+
         # Automated MSF dialog — reserved for OTHER entry points that
         # synthesise a tool with binary=msfconsole but a different id (e.g.
         # Target Intel "▶ EXPLOIT WITH MSF" buttons that pre-pick a
@@ -421,6 +429,36 @@ class CardScanRoutesMixin:
                              callback_yes=lambda t=tool: self._run_tool(t))
         else:
             self._run_tool(tool)
+
+    def _route_burpsuite(self, tool):
+        """Launch Burp Suite detached (own session, no target).
+
+        Burp is a standalone GUI, not a target-driven tool.  It used to run
+        through the streaming-pty ToolRunner as `burpsuite &`, which needed
+        a session target, left the card stuck on "running" for Burp's whole
+        lifetime (the backgrounded java kept the pty open so the runner
+        never saw EOF), and made STOP killpg the group — killing Burp.
+        Launch it in its own session with detached stdio so none of that
+        happens: the card stays ready and STOP can't touch it.
+        """
+        if not tool.is_available():
+            self._show_install_dialog(tool)
+            return
+        import shutil
+        import subprocess as _sp
+        binary = shutil.which(tool.binary) or tool.binary
+        self.app.terminal.section("EXPLOITATION  ·  BURP SUITE")
+        try:
+            _sp.Popen(
+                [binary],
+                stdin=_sp.DEVNULL, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+                start_new_session=True)
+            self.app.terminal.write(
+                "  [+] Burp Suite launched (detached — HAWK does not track "
+                "or stop it; close it from its own window).", "success")
+        except Exception as e:
+            self.app.terminal.write(
+                f"  [!] Could not launch Burp Suite: {e}", "error")
 
     def _route_metasploit_launcher(self, tool):
         """Open msfconsole in an xterm, printing DB-check suggestions first.
