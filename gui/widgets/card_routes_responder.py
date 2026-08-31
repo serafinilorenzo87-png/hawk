@@ -651,15 +651,15 @@ class CardResponderRoutesMixin:
         win = _outer
 
         def _do_stop():
-            """Signal responder + show post-stop summary."""
+            """Stop responder and show the post-stop summary.
+
+            The kill runs OFF the UI thread: confirming the root poisoner is
+            dead escalates SIGINT->SIGKILL with a privileged prompt and a
+            pgrep re-check, which would otherwise freeze HAWK.  The summary
+            opens immediately; the kill's honest outcome is reported to the
+            terminal when it finishes (and warns if the poisoner survived).
+            """
             from utils.responder import stop_responder_process
-            ok = stop_responder_process()
-            if not ok:
-                self.app.terminal.write(
-                    "  [!] Could not SIGINT responder automatically "
-                    "(no sudo / not running?).  Close the xterm or "
-                    "press Ctrl-C there manually — the summary "
-                    "dialog will still open.", "warn")
             watcher.stop()
             state["dialog"] = None
             _safe_destroy(win)
@@ -667,6 +667,26 @@ class CardResponderRoutesMixin:
             # Clear weak refs
             self._responder_watcher = None
             self._responder_state = None
+
+            def _kill_worker():
+                ok = stop_responder_process()
+
+                def _report():
+                    if ok:
+                        self.app.terminal.write(
+                            "  [+] Responder stopped — confirmed no process "
+                            "remains.", "success")
+                    else:
+                        self.app.terminal.write(
+                            "  [!] Responder may STILL be running — HAWK "
+                            "could not confirm it stopped (needs root). "
+                            "Kill it manually:  sudo pkill -9 -f "
+                            "Responder.py", "error")
+                disp = getattr(self.app, "ui_call", None)
+                disp(_report) if disp else _report()
+
+            import threading as _th
+            _th.Thread(target=_kill_worker, daemon=True).start()
 
         def _do_relay():
             self._show_ntlmrelayx_launcher(tool, state)
@@ -731,13 +751,16 @@ class CardResponderRoutesMixin:
                    "medium" if (counters.get("LLMNR", 0)
                                 + counters.get("NBT-NS", 0) > 0)
                    else "info")
+            # STABLE title (no per-run counts/elapsed) + replace=True so a
+            # second Responder session UPDATES the one card instead of
+            # stacking a new one every STOP — the counts/elapsed live in the
+            # description.  (Old title embedded {elapsed}s → merge key never
+            # matched → duplicate cards.)
             self.app.target_intel.add_auto_finding(
-                title=f"RESPONDER — {counters.get('NTLMv2', 0)} "
-                      f"hash(es), {len(victims)} victim(s), "
-                      f"{elapsed}s",
+                title="RESPONDER — LLMNR/NBT-NS poisoning session",
                 description="\n".join(desc_lines),
                 severity=sev, source="Responder",
-                linked_run_id=new_run_id())
+                linked_run_id=new_run_id(), replace=True)
         except Exception as e:
             print(f"[HAWK] responder target intel push: {e}")
 

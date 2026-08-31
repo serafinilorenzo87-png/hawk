@@ -319,37 +319,62 @@ class ResponderWatcher:
 # ── Control helpers ─────────────────────────────────────────────────
 
 def stop_responder_process() -> bool:
-    """Signal Responder to shut down gracefully.
+    """Stop the Responder poisoner and CONFIRM it is dead.
 
-    Responder runs with sudo inside an xterm — we send SIGINT to the
-    responder Python process so it flushes state and exits cleanly
-    (matches what Ctrl-C inside the xterm would do).  Requires sudo
-    privilege; if pkexec is available we prefer it for a passwordless
-    prompt.
+    Responder runs as ROOT (sudo) inside an xterm; its process shows as
+    `python3 .../Responder.py -I <iface> ...`.  The old code (a) matched a
+    `responder/Responder.py` pattern that missed a relative-path launch
+    (`./Responder.py`), (b) used a non-privileged pkill that can't touch a
+    root process, and (c) returned success on rc 0/1 even when it killed
+    nothing — so a root LLMNR/NBT-NS/mDNS poisoner was left live on the
+    segment while HAWK reported "stopped".
 
-    Returns True if the signal was delivered, False otherwise.
+    Now: match the real python-Responder.py command line, kill with
+    privilege (sudo -n, then pkexec's GUI prompt), escalate SIGINT->SIGKILL,
+    and only return True once pgrep confirms no Responder process remains.
+
+    May block a few seconds waiting for the process to die — call it OFF the
+    UI thread.
     """
-    import shutil, subprocess
-    # Try pkexec first (GUI sudo prompt on most desktops) then sudo -n.
-    cmds = []
-    if shutil.which("pkexec"):
-        cmds.append(["pkexec", "pkill", "-2", "-f",
-                     "responder/Responder.py"])
-    cmds.append(["sudo", "-n", "pkill", "-2", "-f",
-                 "responder/Responder.py"])
-    # Fallback: non-sudo pkill (works only if responder was started
-    # as the current user, which is rare for responder but possible).
-    cmds.append(["pkill", "-2", "-f", "responder/Responder.py"])
+    import shutil, subprocess, time
+    # Match the python process running Responder.py (any path), NOT a bare
+    # "Responder.py" — that would also match a `pgrep`/`watch Responder.py`
+    # the operator has open.  pgrep never lists itself.
+    PAT = r"python.*[Rr]esponder\.py"
 
-    for c in cmds:
+    def _alive():
         try:
-            r = subprocess.run(c, capture_output=True,
-                               text=True, timeout=5)
-            if r.returncode in (0, 1):
-                # 0 = signalled; 1 = no matching process (already
-                # stopped — treat as success either way since the
-                # caller's intent is satisfied).
-                return True
+            r = subprocess.run(["pgrep", "-f", PAT],
+                               capture_output=True, text=True, timeout=5)
+            return [p for p in (r.stdout or "").split() if p]
         except Exception:
-            continue
-    return False
+            return []
+
+    def _pkill(sig):
+        # Responder is root: try sudo -n (cached creds, no prompt) then
+        # pkexec (GUI polkit prompt).  A non-privileged pkill can't signal a
+        # root process, so it is not attempted.
+        for base in (["sudo", "-n"], ["pkexec"]):
+            if not shutil.which(base[0]):
+                continue
+            try:
+                subprocess.run(base + ["pkill", sig, "-f", PAT],
+                               capture_output=True, text=True, timeout=30)
+            except Exception:
+                pass
+            if not _alive():
+                return
+
+    if not _alive():
+        return True                       # already gone
+    _pkill("-2")                          # graceful (== Ctrl-C in the xterm)
+    for _ in range(6):                    # up to ~3s to flush + exit
+        if not _alive():
+            return True
+        time.sleep(0.5)
+    _pkill("-9")                          # escalate
+    for _ in range(4):
+        if not _alive():
+            return True
+        time.sleep(0.5)
+    return not _alive()                   # honest: False if still alive
