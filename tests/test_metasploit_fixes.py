@@ -123,6 +123,28 @@ class ModuleRankingTests(unittest.TestCase):
         self.assertEqual(ranked[0][0],
                          "exploit/multi/samba/usermap_script")
 
+    def test_service_text_boost_breaks_tie_without_port(self):
+        # ENUM4LINUX SMB finding, NO port: samba (named in the text via the
+        # smb<->samba alias) leads over tomcat (not named), both multi/*.
+        ranked = self.rank([
+            ("exploit/multi/http/tomcat_mgr_upload", "Tomcat"),
+            ("exploit/multi/samba/usermap_script", "Samba usermap"),
+        ], platform="linux", port=None,
+            finding_text="ENUM4LINUX on METASPLOITABLE - null session, "
+                         "SMB1, no signing")
+        self.assertEqual(ranked[0][0],
+                         "exploit/multi/samba/usermap_script")
+
+    def test_service_boost_never_rescues_platform_mismatch(self):
+        # The SMB finding names smb and EternalBlue's path has "smb", but a
+        # Windows exploit on a Linux target must still sink to the bottom.
+        ranked = self.rank([
+            ("exploit/windows/smb/ms17_010_eternalblue", "EternalBlue"),
+            ("exploit/multi/samba/usermap_script", "Samba"),
+        ], platform="linux", port=None, finding_text="SMB1 samba enum")
+        self.assertEqual(ranked[-1][0],
+                         "exploit/windows/smb/ms17_010_eternalblue")
+
     def test_unknown_platform_preserves_order(self):
         mods = [
             ("exploit/windows/smb/ms17_010_eternalblue", "EB"),

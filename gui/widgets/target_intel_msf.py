@@ -291,9 +291,14 @@ class TargetIntelMsfMixin:
         except Exception:
             port = None
         try:
+            ftext = ((finding.get("title", "") or "") + " "
+                     + (finding.get("description", "") or ""))
+        except Exception:
+            ftext = ""
+        try:
             from utils import msf_index as _mi
             return _mi.rank_modules_for_target(
-                modules, platform=plat, port=port)
+                modules, platform=plat, port=port, finding_text=ftext)
         except Exception as e:
             print(f"[HAWK] msf module ranking failed: {e}")
             return modules

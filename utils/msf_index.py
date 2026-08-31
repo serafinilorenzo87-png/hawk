@@ -259,10 +259,36 @@ def _module_ports_for_path(path):
     return ports
 
 
-def rank_modules_for_target(modules, platform="", port=None):
+# Service tokens that name the same service, so a finding that mentions one
+# ("SMB1") still boosts a module whose path uses the other ("…/samba/…").
+_SERVICE_ALIASES = {
+    "samba": ("samba", "smb"), "smb": ("samba", "smb"),
+    "postgres": ("postgres", "postgresql"),
+    "postgresql": ("postgres", "postgresql"),
+    "tomcat": ("tomcat", "ajp"), "ajp": ("tomcat", "ajp"),
+    "unreal": ("unreal", "unrealircd", "irc"),
+    "unrealircd": ("unreal", "unrealircd", "irc"),
+    "rmi": ("rmi", "java_rmi"), "java_rmi": ("rmi", "java_rmi"),
+}
+
+
+def _service_text_match(path, text):
+    """True when the finding text names a service the module targets — used
+    to break same-platform ties toward the module the finding is actually
+    ABOUT (e.g. samba over tomcat on an SMB finding that carries no port).
+    Aliases bridge naming ("SMB1" in the text <-> ".../samba/..." in path)."""
+    p = (path or "").lower()
+    for svc in _SERVICE_PORTS:
+        if svc in p and any(
+                a in text for a in _SERVICE_ALIASES.get(svc, (svc,))):
+            return True
+    return False
+
+
+def rank_modules_for_target(modules, platform="", port=None, finding_text=""):
     """Reorder MSF (module_path, label) suggestions so the best match for a
-    target of the given `platform` ("windows"/"linux"/... or "") and finding
-    `port` comes first.
+    target of the given `platform` ("windows"/"linux"/... or ""), finding
+    `port` and finding `finding_text` comes first.
 
     _get_exploits_for_vuln is a pure text match with no OS/port context, so
     it returns modules in curated-map order — which puts e.g.
@@ -280,6 +306,7 @@ def rank_modules_for_target(modules, platform="", port=None):
     if not modules or len(modules) <= 1:
         return modules
     plat = (platform or "").lower()
+    ftext = (finding_text or "").lower()
     target_nix = plat in ("linux", "unix", "bsd", "solaris",
                           "osx", "macos", "freebsd")
     target_win = ("windows" in plat) or (plat == "win")
@@ -314,6 +341,12 @@ def rank_modules_for_target(modules, platform="", port=None):
             mports = _module_ports_for_path(path)
             if mports:
                 s += 15 if port in mports else -8
+        # Service the finding is ABOUT: boost a module whose service token
+        # also appears in the finding text.  Breaks same-platform ties
+        # toward the on-topic module (samba over tomcat on a portless SMB
+        # finding).  Additive only — never rescues a platform mismatch.
+        if ftext and _service_text_match(path, ftext):
+            s += 25
         return s
 
     # Stable sort by score, highest first (ties keep the input order).
