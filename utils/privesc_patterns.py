@@ -580,8 +580,12 @@ PATTERNS: list[dict[str, Any]] = [
         "severity": "critical",
         "platform": "linux",
         "matchers": [
-            {"desc_substr": ["/etc/passwd"]},
-            {"title_substr": ["writable /etc/passwd"]},
+            # Require the finding to actually indicate WRITABILITY, not
+            # merely mention /etc/passwd — an LFI / readable-file finding
+            # names it too, which used to fire a bogus CRITICAL here.
+            {"desc_all": ["/etc/passwd", "writable"]},
+            {"title_substr": ["writable /etc/passwd",
+                              "/etc/passwd is world-writable"]},
         ],
         "summary": (
             "/etc/passwd is world-writable.  Add a UID-0 user with "
@@ -793,6 +797,12 @@ def _matcher_hits(m: dict, findings: list[dict],
     """
     title_substr = [s.lower() for s in m.get("title_substr", [])]
     desc_substr = [s.lower() for s in m.get("desc_substr", [])]
+    # desc_all: ALL substrings must appear in the SAME finding description
+    # (AND), unlike desc_substr which fires on ANY one (OR).  Lets a pattern
+    # require context — e.g. "/etc/passwd" AND "writable" together — instead
+    # of firing on a bare mention (an LFI/readable finding names /etc/passwd
+    # too, which used to trigger a bogus CRITICAL "writable /etc/passwd").
+    desc_all = [s.lower() for s in m.get("desc_all", [])]
     kernel_lt = m.get("kernel_lt")
     kernel_ge = m.get("kernel_ge")
 
@@ -808,7 +818,7 @@ def _matcher_hits(m: dict, findings: list[dict],
             return False, ""
 
     # Title / desc substring search.
-    if title_substr or desc_substr:
+    if title_substr or desc_substr or desc_all:
         for f in findings:
             t = (f.get("title") or "").lower()
             d = (f.get("description") or "").lower()
@@ -818,6 +828,9 @@ def _matcher_hits(m: dict, findings: list[dict],
             for s in desc_substr:
                 if s in d:
                     return True, f"finding description matched: \"{s}\""
+            if desc_all and all(s in d for s in desc_all):
+                return True, ("finding description matched all of: "
+                              + ", ".join(f'"{s}"' for s in desc_all))
         return False, ""
 
     # Kernel-only matcher (no title/desc requirement).
