@@ -58,6 +58,13 @@ class SuidGtfobinsChainTests(unittest.TestCase):
         self.assertTrue(any(m["id"] == "suid_gtfobins" for m in matches),
                         "cheat sheet should match the Exploitable-SUID finding")
 
+    def test_suid_exploit_covers_nmap(self):
+        # the recipe must include the flagged binary's own escape (nmap),
+        # not only generic find/vim/awk examples.
+        pat = next(p for p in pp.PATTERNS if p["id"] == "suid_gtfobins")
+        exploit = "\n".join(pat.get("exploit", []))
+        self.assertIn("nmap --interactive", exploit)
+
 
 if __name__ == "__main__":
     unittest.main()
