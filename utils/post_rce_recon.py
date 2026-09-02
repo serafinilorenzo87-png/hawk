@@ -463,22 +463,21 @@ def analyze_output(text: str) -> dict:
             "source":      "post-rce-recon",
         })
 
-    # SUID — flag known-exploitable ones
+    # Known-exploitable SUID binaries (gtfobins.github.io).  Matched by
+    # BASENAME so ANY install path counts (/usr/bin, /bin, /usr/local/bin…)
+    # — the old full-path set missed e.g. /usr/bin/nmap on Metasploitable,
+    # the single most famous SUID privesc there is.
     SUID_GTFO = {
-        "/usr/bin/find", "/bin/find",
-        "/usr/bin/vim", "/usr/bin/nano", "/bin/nano",
-        "/usr/bin/python", "/usr/bin/python3",
-        "/usr/bin/perl", "/usr/bin/ruby",
-        "/usr/bin/awk", "/usr/bin/gawk",
-        "/usr/bin/less", "/usr/bin/more",
-        "/usr/bin/cp", "/usr/bin/mv",
-        "/usr/bin/tar", "/usr/bin/zip",
-        "/usr/bin/env", "/usr/bin/expect",
-        "/usr/bin/bash", "/bin/bash",
-        "/usr/bin/dash", "/bin/dash",
-        "/usr/bin/openssl",
-        "/usr/bin/wget", "/usr/bin/curl",
-        "/usr/bin/socat", "/usr/bin/strace",
+        "nmap", "find", "vim", "vi", "view", "rvim", "nano", "pico",
+        "python", "python2", "python3", "perl", "ruby", "lua", "php",
+        "awk", "gawk", "mawk", "less", "more", "man", "cp", "mv",
+        "tar", "zip", "unzip", "gzip", "env", "expect", "bash", "sh",
+        "dash", "ksh", "zsh", "openssl", "wget", "curl", "socat",
+        "strace", "ltrace", "gdb", "ftp", "rsync", "sed", "ed", "emacs",
+        "node", "tclsh", "flock", "ionice", "nice", "taskset", "cmake",
+        "start-stop-daemon", "busybox", "cpulimit", "watch", "xargs",
+        "make", "git", "scp", "ssh-keygen", "dmsetup", "nohup",
+        "stdbuf", "setarch",
     }
     suid_text = _extract_section(blob, "SUID")
     suid_hits = [ln.strip() for ln in suid_text.splitlines()
@@ -507,7 +506,8 @@ def analyze_output(text: str) -> dict:
             "source":      "post-rce-recon",
         })
 
-    suid_gtfo_hits = [s for s in suid_hits if s in SUID_GTFO]
+    suid_gtfo_hits = [s for s in suid_hits
+                      if s.rsplit("/", 1)[-1] in SUID_GTFO]
     if suid_gtfo_hits:
         out["findings"].append({
             "title":       (f"Exploitable SUID binaries on "
