@@ -111,6 +111,14 @@ class CardAccessRoutesMixin:
         if tool.id == "potato_picker":
             self._show_potato_picker_dialog()
             return
+        # Post-exploit Linux commands that inspect the TARGET (SUID, caps,
+        # sudo -l, cron, writable files, sockets) must run in the operator's
+        # target shell — running them through the generic local runner
+        # enumerates Kali, not the compromised host.  Hand over the command
+        # to copy into the target shell instead of executing it here.
+        if tool.id in self._TARGET_SHELL_CMD_IDS:
+            self._show_target_command_dialog(tool)
+            return
 
         # ── Access gate (subprocess-spawning tools only) ──
         if self.phase_id in ACCESS_GATED_PHASES and not self._has_access():
@@ -149,6 +157,62 @@ class CardAccessRoutesMixin:
                 self._show_linux_privesc_context(tool)
                 return
         self._request_run(tool)
+
+    # Post-exploit Linux cards whose command inspects the TARGET (not Kali).
+    # Routed to _show_target_command_dialog instead of the local runner.
+    _TARGET_SHELL_CMD_IDS = {
+        "suid_finder", "capabilities_check", "sudo_check",
+        "crontab_check", "writable_paths", "netstat_ss",
+    }
+
+    def _show_target_command_dialog(self, tool):
+        """Hand the operator a post-exploit command to run in the TARGET
+        shell.
+
+        SUID / capabilities / sudo -l / cron / writable-files / sockets
+        enumerate the compromised host; HAWK's generic runner would execute
+        them locally on Kali, enumerating the wrong machine.  So we do NOT
+        run them — we show the exact command to copy into the target shell
+        (CONNECT / SSH / reverse shell), matching how POST-RCE RECON works.
+        """
+        from gui.dialogs import (_make_win, _title, _sub, _note_box,
+                                 _btn_row, _btn, _safe_destroy)
+        cmd = (getattr(tool, "cmd_template", "") or "").strip()
+        win = _make_win(self, f"{tool.name} — run in target shell", 720, 340)
+        _title(win, f"{tool.name}")
+        _note_box(
+            win,
+            "This command inspects the TARGET, not Kali.  HAWK does NOT run "
+            "it locally — copy it and run it in your target shell (the "
+            "CONNECT / SSH / reverse-shell session on the compromised host).",
+            COLORS["text_yellow"])
+        _sub(win, "Command — paste this in the target shell:")
+        box = ctk.CTkTextbox(
+            win, height=64, font=_f("sm"),
+            fg_color=COLORS["bg_card"], text_color=COLORS["text_bright"],
+            border_color=COLORS["border_dim"], border_width=1,
+            corner_radius=3, wrap="word")
+        box.pack(fill="x", padx=24, pady=(0, 6))
+        box.insert("1.0", cmd)
+        box.configure(state="disabled")
+
+        status = ctk.CTkLabel(win, text="", font=_f("sm"),
+                              text_color=COLORS["text_dim"])
+        status.pack(fill="x", padx=24)
+
+        def _copy():
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(cmd)
+                status.configure(text="✓ Copied to clipboard.",
+                                 text_color=COLORS["text_green"])
+            except Exception as e:
+                status.configure(text=f"⚠ Copy failed: {e}",
+                                 text_color=COLORS["text_yellow"])
+
+        row = _btn_row(win)
+        _btn(row, "COPY", _copy, primary=True, w=140)
+        _btn(row, "CLOSE", lambda: _safe_destroy(win))
 
     def _show_potato_picker_dialog(self):
         """Open the Potato variant picker dialog.  The dialog handles
