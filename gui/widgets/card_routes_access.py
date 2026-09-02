@@ -1252,22 +1252,40 @@ class CardAccessRoutesMixin:
             push_source = ("post-rce-recon-win"
                            if platform == "windows"
                            else "post-rce-recon")
+            # Batch the pushes: add_auto_finding re-renders the WHOLE Target
+            # Intel panel on every call, so pushing a recon's worth of
+            # findings one-by-one triggers N full re-renders on the UI thread
+            # (on top of the findings already there) and freezes HAWK.
+            # Suspend rendering for the burst and resume once at the end —
+            # one redraw for the whole batch.  try/finally so a mid-loop
+            # error can't leave rendering suspended forever.
+            ti = self.app.target_intel
             pushed = 0
-            for f in findings:
-                try:
-                    self.app.target_intel.add_auto_finding(
-                        title=f["title"],
-                        description=f["description"],
-                        severity=f.get("severity", "info"),
-                        source=push_source)
-                    pushed += 1
-                except Exception as e:
+            try:
+                ti._suspend_finding_render()
+            except Exception:
+                pass
+            try:
+                for f in findings:
                     try:
-                        self.app.terminal.write(
-                            f"  [!] add_auto_finding failed: {e}",
-                            "error")
-                    except Exception:
-                        pass
+                        ti.add_auto_finding(
+                            title=f["title"],
+                            description=f["description"],
+                            severity=f.get("severity", "info"),
+                            source=push_source)
+                        pushed += 1
+                    except Exception as e:
+                        try:
+                            self.app.terminal.write(
+                                f"  [!] add_auto_finding failed: {e}",
+                                "error")
+                        except Exception:
+                            pass
+            finally:
+                try:
+                    ti._resume_finding_render()
+                except Exception:
+                    pass
 
             # Terminal summary
             try:
