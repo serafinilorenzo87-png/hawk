@@ -65,6 +65,26 @@ class SuidGtfobinsChainTests(unittest.TestCase):
         exploit = "\n".join(pat.get("exploit", []))
         self.assertIn("nmap --interactive", exploit)
 
+    def test_copy_exploit_is_per_flagged_binary(self):
+        # only nmap flagged -> the MATCH exploit block is nmap's recipe only,
+        # NOT the whole gtfobins catalogue (that was the "wall of commands"
+        # that broke nmap's interactive buffer when pasted wholesale).
+        res = pr.analyze_output(_blob("/usr/bin/nmap"))
+        findings = [{"title": f["title"], "description": f["description"]}
+                    for f in res.get("findings", [])]
+        m = next(x for x in pp.match(findings) if x["id"] == "suid_gtfobins")
+        exploit = "\n".join(m.get("exploit", []))
+        self.assertIn("nmap --interactive", exploit)
+        self.assertNotIn("awk 'BEGIN", exploit)
+        self.assertNotIn("perl -e", exploit)
+        self.assertEqual(m.get("_suid_binaries"), ["nmap"])
+        # the interactive follow-up must stay a COMMENT so pasting the block
+        # never feeds a stray line into the nmap> prompt.
+        for ln in m["exploit"]:
+            if "!sh" in ln:
+                self.assertTrue(ln.lstrip().startswith("#"),
+                                f"!sh step must be a comment, got: {ln!r}")
+
 
 if __name__ == "__main__":
     unittest.main()
