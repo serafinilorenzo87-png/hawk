@@ -1074,11 +1074,16 @@ class CardHydraRoutesMixin:
             if fmt_var.get() == "json":
                 extra_headers += ":H=Content-Type\\: application/json"
 
-            # Hydra uses ':' as triplet delimiter (path:body:condition).
-            # Literal colons inside the body (JSON keys/values) must be
-            # escaped as '\:' so hydra doesn't split on them.
+            # Hydra triplet: path:<form params>:<condition>.  Optional
+            # params (H=header/cookie, C=cookie-page) go BETWEEN the form
+            # params and the condition — the condition MUST be LAST, or
+            # hydra parses it as an (invalid) option and bails with
+            # "no valid optional parameter type given: F" / "optional
+            # parameters must have the format X=value".  (extra_headers
+            # already starts with ':'.)  Literal colons inside the body
+            # must be escaped as '\:' so hydra doesn't split on them.
             body_escaped = body_tpl.replace(":", "\\:")
-            triplet = f"{path}:{body_escaped}:{condition}{extra_headers}"
+            triplet = f"{path}:{body_escaped}{extra_headers}:{condition}"
             threads = threads_var.get().strip() or "4"
             method = method_var.get()
 
