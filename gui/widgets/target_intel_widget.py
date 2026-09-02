@@ -148,7 +148,7 @@ class TargetIntelWidget(TargetIntelRenderMixin, TargetIntelExploitMixin, TargetI
 
         self._show_all_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(
-            btn_row, text="Show all",
+            btn_row, text="All exploits",
             variable=self._show_all_var,
             font=_f("sm"), text_color=COLORS["text_muted"],
             fg_color=COLORS["border_green"], border_color=COLORS["border_dim"],
