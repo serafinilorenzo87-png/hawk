@@ -969,7 +969,7 @@ def render(match_dict: dict, *, variant: str = "auto") -> tuple[str, str]:
         variant_label = "shell"
 
     if exploit:
-        lines.append(f"Exploit ({variant_label}):")
+        lines.append(f"Exploit — paste in your TARGET shell ({variant_label}):")
         for ln in exploit:
             lines.append("  " + _sub(ln) if ln else "")
 

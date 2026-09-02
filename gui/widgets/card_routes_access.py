@@ -1607,6 +1607,22 @@ class CardAccessRoutesMixin:
                     command=_re_render
                 ).pack(side="left", padx=(0, 12))
 
+        # HOW TO USE — the sheet lists recipes, but the operator has to know
+        # they run on the TARGET, not in HAWK.  Spell out the flow once, above
+        # the ranked list, so the cheat sheet answers "where / how / what",
+        # not just "here are some commands".
+        from gui.dialogs import _note_box
+        _note_box(
+            win,
+            "HOW TO USE — these are privesc recipes for the TARGET, not Kali.  "
+            "For a path: click COPY EXPLOIT, then in your target shell (the "
+            "CONNECT / SSH / reverse-shell session) paste the line for the "
+            "binary/config HAWK flagged in that path.  It escalates you — "
+            "usually to a root shell (confirm with `id`).  HAWK does not run "
+            "these for you.",
+            COLORS.get("text_cyan", "#7EC8E3"),
+            text_color=COLORS["text_bright"])
+
         # Scrollable list of pattern cards, ranked
         scroll = ctk.CTkScrollableFrame(
             win, fg_color=COLORS["bg_secondary"],

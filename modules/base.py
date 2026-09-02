@@ -623,8 +623,8 @@ LANE_BANNER = {
     ),
     LANE_FROM_FINDINGS: (
         "from findings",
-        "RUN ON — nothing to run",
-        "OUTPUT — built from the Target Intel HAWK already has",
+        "RUN ON — nothing to run (built from findings)",
+        "OUTPUT — ranked privesc recipes · run each in your target shell",
     ),
 }
 
