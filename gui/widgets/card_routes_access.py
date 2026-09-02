@@ -337,17 +337,33 @@ class CardAccessRoutesMixin:
     def _shadow_crack_worker(self, passwd_text, shadow_text, target):
         import tempfile
         import os
+        import shlex
         import subprocess
-        import re
+        import uuid
+        from utils.config import resolve_tool_tmpdir
 
         term = self.app.terminal
         _w = lambda msg, lvl="info": term.write(msg, lvl)
 
+        # All working files live on a LOCAL tmpdir, NOT HAWK's TMP_DIR: when
+        # HAWK runs from an HGFS / vboxsf shared folder, john's frequent
+        # .pot/.rec/.log session writes go over the vmhgfs channel and look
+        # like network saturation.  resolve_tool_tmpdir() falls back to a real
+        # local /tmp on such filesystems (same fix as the nuclei TMPDIR hang).
+        # HAWK's own input files stay CONTAINED under TMP_DIR — written once,
+        # no churn.  john's session/.pot/.rec files churn constantly while
+        # cracking; on an HGFS / vboxsf shared folder that repeated I/O
+        # saturates the vmhgfs channel (it looked like network saturation).
+        # Put ONLY those on a LOCAL tmpdir (resolve_tool_tmpdir) — passed to
+        # john as args, NOT written by HAWK, so write-containment is unaffected.
         os.makedirs(TMP_DIR, exist_ok=True)
-        tmp_dir = tempfile.mkdtemp(prefix="hawk_shadow_", dir=TMP_DIR)
-        passwd_path = os.path.join(tmp_dir, "passwd")
-        shadow_path = os.path.join(tmp_dir, "shadow")
-        combined_path = os.path.join(tmp_dir, "unshadowed")
+        work = tempfile.mkdtemp(prefix="hawk_shadow_", dir=TMP_DIR)
+        passwd_path = os.path.join(work, "passwd")
+        shadow_path = os.path.join(work, "shadow")
+        combined_path = os.path.join(work, "unshadowed")
+        sess_path = os.path.join(resolve_tool_tmpdir(),
+                                 "hawk_shadow_" + uuid.uuid4().hex[:8])
+        pot_path = sess_path + ".pot"
 
         try:
             with open(passwd_path, "w") as f:
@@ -356,24 +372,21 @@ class CardAccessRoutesMixin:
                 f.write(shadow_text + "\n")
 
             _w("  [SHADOW CRACK] files saved, running unshadow...", "info")
-
             r = subprocess.run(
                 ["unshadow", passwd_path, shadow_path],
                 capture_output=True, text=True, timeout=30,
                 errors="replace")
-
             if r.returncode != 0:
                 _w(f"  [!] unshadow failed: {r.stderr.strip()}", "error")
+                self._shadow_cleanup(work, sess_path)
                 return
-
             combined = r.stdout.strip()
             if not combined:
                 _w("  [!] unshadow produced empty output", "error")
+                self._shadow_cleanup(work, sess_path)
                 return
-
             with open(combined_path, "w") as f:
                 f.write(combined + "\n")
-
             _w(f"  [SHADOW CRACK] unshadow OK — "
                f"{len(combined.splitlines())} entries", "info")
 
@@ -382,49 +395,10 @@ class CardAccessRoutesMixin:
                 _w("  [!] rockyou.txt not found — "
                    "run: sudo gunzip /usr/share/wordlists/rockyou.txt.gz",
                    "error")
+                self._shadow_cleanup(work, sess_path)
                 return
 
-            import uuid
-            sess_id = uuid.uuid4().hex[:8]
-            sess_dir = os.path.join(TMP_DIR, "john")
-            os.makedirs(sess_dir, exist_ok=True)
-            sess_path = os.path.join(sess_dir, f"hawk_shadow_{sess_id}")
-            pot_path = sess_path + ".pot"
-
-            _w("  [SHADOW CRACK] john --wordlist=rockyou.txt ...", "info")
-
-            proc = subprocess.Popen(
-                ["john", f"--session={sess_path}",
-                 f"--pot={pot_path}",
-                 f"--wordlist={rockyou}",
-                 combined_path],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True, bufsize=1, errors="replace")
-
-            for line in proc.stdout:
-                line = line.rstrip()
-                if line:
-                    _w(f"  [JOHN] {line}", "info")
-            proc.wait(timeout=3600)
-
-            _w(f"  [SHADOW CRACK] john finished (rc={proc.returncode})",
-               "info")
-
-            show_r = subprocess.run(
-                ["john", "--show", f"--pot={pot_path}", combined_path],
-                capture_output=True, text=True, timeout=30,
-                errors="replace")
-
-            cracked_list = parse_john_show(show_r.stdout or "")
-            cracked_count = len(cracked_list)
-
-            total_match = re.search(
-                r"(\d+) password hash(?:es)? cracked",
-                show_r.stdout or "")
-            if total_match:
-                cracked_count = max(cracked_count, int(total_match.group(1)))
-
+            # Map user -> shadow hash so cracked creds link back to the entry.
             shadow_hashes = {}
             for line in shadow_text.splitlines():
                 parts = line.split(":")
@@ -432,34 +406,125 @@ class CardAccessRoutesMixin:
                         "*", "!", "!!", "x", ""):
                     shadow_hashes[parts[0]] = parts[1]
 
-            if cracked_list:
-                _w(f"\n  [SHADOW CRACK] ✓ {len(cracked_list)} "
-                   f"password(s) cracked!", "success")
-                for user, pw in cracked_list:
-                    _w(f"    {user} : {pw}", "success")
-                self._shadow_save_credentials(
-                    cracked_list, shadow_hashes, target)
-            else:
-                _w("  [SHADOW CRACK] no passwords cracked with rockyou.",
-                   "warn")
+            # john as a proper KILLABLE background job:
+            #   • CPU-capped — OMP_NUM_THREADS + nice, so it doesn't peg every
+            #     core and freeze the VM (john jumbo grabs all cores by default;
+            #     the live run pegged 8 OpenMP threads).
+            #   • ToolRunner gives setsid + a real STOP (SIGTERM->SIGKILL on the
+            #     process group) in the BG bar, plus a local TMPDIR.  The old
+            #     code ran a bare Popen in a daemon thread: no STOP at all, and
+            #     a proc.wait(timeout=3600) that orphaned john past the hour.
+            threads = 2
+            john_cmd = (
+                f"OMP_NUM_THREADS={threads} nice -n 10 john "
+                f"--session={shlex.quote(sess_path)} "
+                f"--pot={shlex.quote(pot_path)} "
+                f"--wordlist={shlex.quote(rockyou)} "
+                f"{shlex.quote(combined_path)}"
+            )
+
+            from gui.widgets.bg_jobs_bar import BackgroundJob
+            job_id = "shadow_crack_" + uuid.uuid4().hex[:8]
+
+            def _john_out(line, name="john", level="info"):
+                line = (line or "").rstrip()
+                if line:
+                    _w(f"  [JOHN] {line}", "info")
+
+            def _john_done(name, rc, log):
+                try:
+                    self._shadow_crack_finish(
+                        job_id, combined_path, pot_path,
+                        shadow_hashes, target, work, sess_path, rc)
+                except Exception as e:
+                    _w(f"  [!] shadow crack finish error: {e}", "error")
+                    self._shadow_cleanup(work, sess_path)
+
+            runner = ToolRunner(
+                output_callback=_john_out,
+                done_callback=_john_done,
+                ui_dispatcher=getattr(self.app, "ui_call", None))
+            self._tool_runners["shadow_crack"] = runner
+
+            _w(f"  [SHADOW CRACK] john --wordlist=rockyou.txt "
+               f"(capped to {threads} threads + nice; STOP in the BG bar) ...",
+               "info")
+
+            def _register():
+                try:
+                    self.app.bg_jobs_bar.add_job(BackgroundJob(
+                        job_id=job_id, label="SHADOW CRACK — john",
+                        estimated_secs=1800, runner=runner, killable=True))
+                    self.app.bg_jobs_bar.update_idletasks()
+                except Exception:
+                    pass
+            self.after(0, _register)
+
+            runner.run(john_cmd, "john", timeout=3600)
 
         except subprocess.TimeoutExpired:
-            _w("  [!] john timed out (1 hour limit)", "warn")
+            _w("  [!] unshadow timed out", "warn")
+            self._shadow_cleanup(work, sess_path)
         except FileNotFoundError as e:
             _w(f"  [!] binary not found: {e}", "error")
+            self._shadow_cleanup(work, sess_path)
         except Exception as e:
             _w(f"  [!] shadow crack error: {e}", "error")
-        finally:
-            import shutil
-            try:
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            except Exception:
-                pass
-            for ext in (".rec", ".log", ".pot"):
+            self._shadow_cleanup(work, sess_path)
+
+    def _shadow_cleanup(self, work, sess_path=""):
+        import shutil
+        import os
+        try:
+            shutil.rmtree(work, ignore_errors=True)
+        except Exception:
+            pass
+        # john's session files live OUTSIDE `work` (on the local tmpdir) —
+        # remove them too so the local scratch dir doesn't accumulate.
+        if sess_path:
+            for ext in (".pot", ".rec", ".log"):
                 try:
                     os.unlink(sess_path + ext)
                 except Exception:
                     pass
+
+    def _shadow_crack_finish(self, job_id, combined_path, pot_path,
+                             shadow_hashes, target, work, sess_path, rc):
+        """Runs when john exits — finished OR stopped.  Pull whatever landed in
+        the .pot, save it, badge the Credential Store, drop the BG-bar row.  A
+        STOPPED run (rc<0) still yields the passwords cracked before the kill,
+        same as a full run just partial (matches the live STOP behaviour)."""
+        import subprocess
+        term = self.app.terminal
+        _w = lambda msg, lvl="info": term.write(msg, lvl)
+
+        def _drop_row():
+            try:
+                self.app.bg_jobs_bar.finish_job(job_id, "")
+            except Exception:
+                pass
+        self.after(0, _drop_row)
+
+        _w(f"  [SHADOW CRACK] john finished (rc={rc})", "info")
+        cracked_list = []
+        try:
+            show_r = subprocess.run(
+                ["john", "--show", f"--pot={pot_path}", combined_path],
+                capture_output=True, text=True, timeout=30,
+                errors="replace")
+            cracked_list = parse_john_show(show_r.stdout or "")
+        except Exception as e:
+            _w(f"  [!] john --show failed: {e}", "warn")
+
+        if cracked_list:
+            _w(f"\n  [SHADOW CRACK] ✓ {len(cracked_list)} "
+               f"password(s) cracked!", "success")
+            for user, pw in cracked_list:
+                _w(f"    {user} : {pw}", "success")
+            self._shadow_save_credentials(cracked_list, shadow_hashes, target)
+        else:
+            _w("  [SHADOW CRACK] no passwords cracked with rockyou.", "warn")
+        self._shadow_cleanup(work, sess_path)
 
     def _shadow_save_credentials(self, cracked_list, shadow_hashes,
                                   target):
@@ -468,6 +533,7 @@ class CardAccessRoutesMixin:
             sess = self.app.session_manager.current
             if not sess:
                 return
+            saved = []
             for user, pw in cracked_list:
                 h = shadow_hashes.get(user, "")
                 cred = Credential(
@@ -488,14 +554,26 @@ class CardAccessRoutesMixin:
                     cred.cracked = True
                     cred.cracked_pass = pw
                 sess.add_credential(cred)
+                saved.append(cred)
             sess.save()
             self.app.terminal.write(
-                f"  [SHADOW CRACK] {len(cracked_list)} credential(s) "
+                f"  [SHADOW CRACK] {len(saved)} credential(s) "
                 f"saved to Credential Store", "success")
-            try:
-                self.app.cred_store.refresh()
-            except Exception:
-                pass
+            # Badge: mark each cred NEW so the Credential Store tab blinks
+            # ("(N new)").  add_credential() bypasses the widget, and
+            # refresh() alone re-renders WITHOUT blinking — mark_captured
+            # marks + blinks + refreshes (the Responder capture path uses
+            # the same call).  Marshalled to the UI thread.
+            def _badge():
+                cs = getattr(self.app, "cred_store", None)
+                if not cs:
+                    return
+                for c in saved:
+                    try:
+                        cs.mark_captured(c)
+                    except Exception:
+                        pass
+            self.after(0, _badge)
         except Exception as e:
             self.app.terminal.write(
                 f"  [!] Failed to save credentials: {e}", "error")
