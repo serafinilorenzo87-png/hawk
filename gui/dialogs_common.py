@@ -193,6 +193,41 @@ def _note_box(win, text, color=None, selectable=False, text_color=None):
                      anchor="w").pack(padx=12, pady=8, anchor="w")
 
 
+def _lane_banner(win, lane):
+    """Render the two-line RUN ON / OUTPUT lane banner at the top of a
+    post-exploit action dialog.
+
+    Colour encodes WHERE the command runs (green=Kali, cyan=target shell,
+    grey=nothing); the OUTPUT line carries what happens to the output.  This
+    is the dialog-side twin of the card-face chip — together they make the
+    post-exploit flow answer, up front, the two questions the operator has:
+    where do I run this, and where does the output go.
+
+    No-op for an empty/unknown lane, so callers can pass ``tool.lane``
+    unconditionally.
+    """
+    try:
+        from modules.base import LANE_BANNER
+        from gui.widgets.card_common import lane_color
+    except Exception:
+        return
+    info = LANE_BANNER.get(lane or "")
+    if not info:
+        return
+    _chip, run_on, output = info
+    color = lane_color(lane)
+    fr = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                      border_color=color, border_width=1, corner_radius=4)
+    fr.pack(fill="x", padx=24, pady=(8, 4))
+    ctk.CTkLabel(fr, text=run_on, font=_f("md", True),
+                 text_color=color, anchor="w",
+                 justify="left").pack(fill="x", padx=12, pady=(8, 0))
+    ctk.CTkLabel(fr, text=output, font=_f("sm"),
+                 text_color=COLORS["text_dim"], anchor="w",
+                 justify="left", wraplength=560).pack(fill="x", padx=12,
+                                                      pady=(0, 8))
+
+
 def _selectable_text(parent, text, color=None, height=None):
     """
     A selectable text widget (CTkTextbox disabled) for commands/paths/CVEs.
@@ -466,7 +501,8 @@ __all__ = [
     "WORDLISTS", "WORDLIST_PATHS_USERS", "WORDLIST_PATHS_PASS",
     "HASH_MODES", "GREENBONE_INSTALL_STEPS", "SZ", "add_context_menu",
     "_f", "_center_window", "_autosize_window", "_make_win", "_title",
-    "_sub", "_note_box", "_selectable_text", "_recommended", "_divider",
+    "_sub", "_note_box", "_lane_banner", "_selectable_text",
+    "_recommended", "_divider",
     "_btn_row", "_btn", "_safe_destroy", "_get_service_info",
     "SERVICE_VERIFY_COMMANDS",
 ]

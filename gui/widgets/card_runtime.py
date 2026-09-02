@@ -606,86 +606,12 @@ class CardRuntimeMixin:
         except Exception:
             pass
 
-    def _show_target_command_dialog(self, tool):
-        """Show the command for a 'runs_on_target' Windows built-in tool.
-
-        These tools (reg, wmic, schtasks, netsh, …) are Windows built-ins
-        that must be run inside the target shell (meterpreter, evil-winrm,
-        cmd via psexec, etc.) rather than from Kali.  This dialog displays
-        the full command with a COPY button so the user can paste it
-        directly.
-        """
-        from gui.dialogs import _make_win, _safe_destroy, _btn_row, _btn
-        import tkinter as tk
-
-        target = ""
-        try:
-            sess = self.app.session_manager.current
-            target = sess.target_ip if sess else ""
-        except Exception:
-            pass
-
-        cmd = tool.build_command(target or "TARGET_IP")
-
-        win = _make_win(self, f"Target Command — {tool.name}", 700, 320)
-
-        ctk.CTkLabel(
-            win,
-            text=f"🪟  Run this command ON the target shell",
-            font=_f("md", True),
-            text_color=COLORS.get("text_cyan", "#7EC8E3"),
-            anchor="w",
-        ).pack(fill="x", padx=16, pady=(14, 2))
-
-        ctk.CTkLabel(
-            win,
-            text=tool.desc,
-            font=_f("sm"),
-            text_color=COLORS["text_dim"],
-            anchor="w",
-            wraplength=650,
-        ).pack(fill="x", padx=16, pady=(0, 8))
-
-        cmd_box = ctk.CTkTextbox(
-            win, height=80,
-            font=("Courier", 12),
-            fg_color=COLORS["bg_card"],
-            text_color=COLORS["text_bright"],
-            border_color=COLORS.get("text_cyan", "#7EC8E3"),
-            border_width=1,
-            wrap="word",
-        )
-        cmd_box.pack(fill="x", padx=16, pady=(0, 8))
-        cmd_box.insert("1.0", cmd)
-        cmd_box.configure(state="disabled")
-
-        def _copy():
-            try:
-                win.clipboard_clear()
-                win.clipboard_append(cmd)
-                copy_btn.configure(text="✓  COPIED")
-                # The dialog may be gone by the time this fires.
-                def _reset():
-                    if copy_btn.winfo_exists():
-                        copy_btn.configure(text="📋  COPY")
-                win.after(1500, _reset)
-            except Exception:
-                pass
-
-        row = _btn_row(win)
-        # Built directly instead of via `_btn`: that helper takes no colour
-        # kwargs and returns None (it packs in place), so the "COPIED"
-        # feedback needs a handle of its own.  Same pattern as
-        # card_routes_access.py's COPY SNIPPET button.
-        cyan = COLORS.get("text_cyan", "#7EC8E3")
-        copy_btn = ctk.CTkButton(
-            row, text="📋  COPY", width=120, height=34,
-            font=_f("md"),
-            fg_color=COLORS["bg_card"], hover_color=COLORS["bg_card_hover"],
-            border_color=cyan, border_width=1, text_color=cyan,
-            corner_radius=4, command=_copy)
-        copy_btn.pack(side="left", padx=6)
-        _btn(row, "CLOSE", lambda: _safe_destroy(win), primary=True, w=100)
+    # NOTE: _show_target_command_dialog lives in CardAccessRoutesMixin
+    # (gui/widgets/card_routes_access.py) and wins the MRO for KillChainCard
+    # (CardRoutesMixin precedes CardRuntimeMixin).  A second copy used to sit
+    # here and was shadowed dead code — removed so the target-shell dialog has
+    # a single source of truth: the one that renders the lane banner and
+    # serves BOTH the Linux finders and the Windows built-ins.
 
     def _show_install_dialog(self, tool):
         """Guide user to install a missing tool."""

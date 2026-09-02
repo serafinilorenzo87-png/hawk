@@ -111,14 +111,12 @@ class CardAccessRoutesMixin:
         if tool.id == "potato_picker":
             self._show_potato_picker_dialog()
             return
-        # Post-exploit Linux commands that inspect the TARGET (SUID, caps,
-        # sudo -l, cron, writable files, sockets) must run in the operator's
-        # target shell — running them through the generic local runner
-        # enumerates Kali, not the compromised host.  Hand over the command
-        # to copy into the target shell instead of executing it here.
-        if tool.id in self._TARGET_SHELL_CMD_IDS:
-            self._show_target_command_dialog(tool)
-            return
+        # NOTE: the post-exploit Linux "finder" cards (SUID, caps, sudo -l,
+        # cron, writable, sockets) that inspect the TARGET are now declared
+        # runs_on_target=True in modules/post_exploit.py — exactly like the
+        # Windows built-ins.  _on_click / _request_run intercept them before
+        # _gate_check and open the copy-to-target-shell dialog, so they no
+        # longer need a special-case id list here.
 
         # ── Access gate (subprocess-spawning tools only) ──
         if self.phase_id in ACCESS_GATED_PHASES and not self._has_access():
@@ -158,34 +156,24 @@ class CardAccessRoutesMixin:
                 return
         self._request_run(tool)
 
-    # Post-exploit Linux cards whose command inspects the TARGET (not Kali).
-    # Routed to _show_target_command_dialog instead of the local runner.
-    _TARGET_SHELL_CMD_IDS = {
-        "suid_finder", "capabilities_check", "sudo_check",
-        "crontab_check", "writable_paths", "netstat_ss",
-    }
-
     def _show_target_command_dialog(self, tool):
-        """Hand the operator a post-exploit command to run in the TARGET
-        shell.
+        """Hand the operator a command to run in the TARGET shell.
 
-        SUID / capabilities / sudo -l / cron / writable-files / sockets
-        enumerate the compromised host; HAWK's generic runner would execute
-        them locally on Kali, enumerating the wrong machine.  So we do NOT
+        Serves every post-exploit card declared runs_on_target=True — the
+        Linux finders (SUID / caps / sudo -l / cron / writable / sockets)
+        and the Windows built-ins (reg / wmic / schtasks / net / netstat).
+        These inspect the compromised host; HAWK's generic runner would
+        execute them on Kali, enumerating the wrong machine.  So we do NOT
         run them — we show the exact command to copy into the target shell
         (CONNECT / SSH / reverse shell), matching how POST-RCE RECON works.
+        The lane banner states RUN ON / OUTPUT up front.
         """
-        from gui.dialogs import (_make_win, _title, _sub, _note_box,
+        from gui.dialogs import (_make_win, _title, _sub, _lane_banner,
                                  _btn_row, _btn, _safe_destroy)
         cmd = (getattr(tool, "cmd_template", "") or "").strip()
-        win = _make_win(self, f"{tool.name} — run in target shell", 720, 340)
+        win = _make_win(self, f"{tool.name} — run in target shell", 720, 360)
         _title(win, f"{tool.name}")
-        _note_box(
-            win,
-            "This command inspects the TARGET, not Kali.  HAWK does NOT run "
-            "it locally — copy it and run it in your target shell (the "
-            "CONNECT / SSH / reverse-shell session on the compromised host).",
-            COLORS["text_yellow"])
+        _lane_banner(win, getattr(tool, "lane", ""))
         _sub(win, "Command — paste this in the target shell:")
         box = ctk.CTkTextbox(
             win, height=64, font=_f("sm"),
@@ -249,6 +237,11 @@ class CardAccessRoutesMixin:
         _title(win, "SHADOW CRACK  —  /etc/passwd + /etc/shadow → john")
         _sub(win, "Paste the file contents from the target shell",
              COLORS["text_dim"])
+
+        # Lane banner — RUN ON your target shell (cat passwd+shadow) / paste
+        # them back → john cracks on Kali.
+        from gui.dialogs import _lane_banner
+        _lane_banner(win, "target_paste")
 
         info = ctk.CTkFrame(
             win, fg_color=COLORS["bg_card"],
@@ -1161,6 +1154,10 @@ class CardAccessRoutesMixin:
              "3. Paste the captured output back here   4. ANALYZE",
              COLORS["text_dim"])
 
+        # Lane banner — RUN ON your target shell / paste output back → findings.
+        from gui.dialogs import _lane_banner
+        _lane_banner(win, "target_paste")
+
         # Why this exists — OS-specific gotcha box
         info = ctk.CTkFrame(
             win, fg_color=COLORS["bg_card"],
@@ -1494,6 +1491,11 @@ class CardAccessRoutesMixin:
              f"finding(s) on Target Intel.  Catalog: "
              f"{len(pp.PATTERNS)} curated patterns.",
              COLORS["text_dim"])
+
+        # Lane banner — nothing to run: this card is built from the findings
+        # HAWK already has (run POST-RCE RECON first to populate them).
+        from gui.dialogs import _lane_banner
+        _lane_banner(win, "from_findings")
 
         # Empty state — nudge to run recon first
         if not findings:

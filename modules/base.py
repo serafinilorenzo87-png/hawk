@@ -302,6 +302,9 @@ class Tool:
                                   # The tool shows as "COPY" not "RUN",
                                   # and is always clickable regardless of
                                   # whether the binary exists on Kali.
+    lane:        str = ""      # post-exploit interaction lane (see LANE_*).
+                                  # Drives the colour-coded "where does it run /
+                                  # where does the output go" banner + card chip.
 
     def build_command(self, target: str, extra_args: str = "") -> str:
         """Build the actual shell command.
@@ -582,6 +585,51 @@ class Tool:
         if isinstance(entry, str):
             return [("install", entry)]
         return entry
+
+
+# ─── Post-exploit interaction lanes ──────────────────────────────────────────
+# Every post-exploitation card belongs to exactly one "lane" that answers the
+# two questions an operator has before clicking:
+#     RUN ON  — where the command actually executes
+#     OUTPUT  — what happens to whatever it prints
+# The card face shows a one-word colour-coded chip; the action dialog shows the
+# full two-line banner.  Colour (applied in the GUI layer) encodes RUN ON:
+#     green = Kali (HAWK runs it)   cyan = the target shell (you)   grey = none
+# The OUTPUT line carries the finer distinction (paste it back to get findings
+# vs. just read it there).  This is what turns the post-exploit flow from
+# "click and guess where it ran" into something predictable.
+LANE_KALI_FETCH    = "kali_fetch"     # Kali downloads a tool -> you host & run it on the target
+LANE_TARGET_PASTE  = "target_paste"   # run in the target shell -> paste output back -> ANALYZE
+LANE_TARGET_READ   = "target_read"    # run in the target shell -> read the output there
+LANE_FROM_FINDINGS = "from_findings"  # nothing to run -> built from Target Intel HAWK already has
+
+# lane -> (chip label, RUN ON line, OUTPUT line).  Pure text, no GUI import, so
+# it stays unit-testable on a box without customtkinter.
+LANE_BANNER = {
+    LANE_KALI_FETCH: (
+        "Kali",
+        "RUN ON — Kali (HAWK downloads it)",
+        "OUTPUT — saved under payloads/ · then host & run it on the target",
+    ),
+    LANE_TARGET_PASTE: (
+        "target shell",
+        "RUN ON — your target shell (CONNECT / SSH / reverse shell)",
+        "OUTPUT — paste it back here → ANALYZE (creates Target Intel findings)",
+    ),
+    LANE_TARGET_READ: (
+        "target shell",
+        "RUN ON — your target shell (CONNECT / SSH / reverse shell)",
+        "OUTPUT — read it there · for findings use POST-RCE RECON",
+    ),
+    LANE_FROM_FINDINGS: (
+        "from findings",
+        "RUN ON — nothing to run",
+        "OUTPUT — built from the Target Intel HAWK already has",
+    ),
+}
+
+# Valid lane ids — used by validation and tests.
+LANES = frozenset(LANE_BANNER)
 
 
 # ─── Brief descriptions keyed by tool.id ─────────────────────────────────────

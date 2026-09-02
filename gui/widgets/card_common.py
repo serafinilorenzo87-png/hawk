@@ -52,6 +52,24 @@ TOOL_STATUS_ICONS = {
 
 ACCESS_GATED_PHASES = {"lateral", "post_exploit"}
 
+# ─── Post-exploit lane → chip / banner colour ────────────────────────────────
+# Colour encodes WHERE a post-exploit card runs so the operator can scan it at
+# a glance: green = Kali (HAWK runs it), cyan = the target shell (you run it),
+# grey = nothing to run (built from findings).  Lane ids come from
+# modules.base.LANE_* — keep the two in sync.
+_LANE_CYAN = COLORS.get("text_cyan", "#7EC8E3")
+LANE_COLOR = {
+    "kali_fetch":    COLORS["text_green"],
+    "target_paste":  _LANE_CYAN,
+    "target_read":   _LANE_CYAN,
+    "from_findings": COLORS["text_dim"],
+}
+
+
+def lane_color(lane):
+    """Chip/banner colour for a post-exploit lane (grey fallback)."""
+    return LANE_COLOR.get(lane or "", COLORS["text_dim"])
+
 WEB_TOOLS = {
     # TOOL IDS, like SMB_TOOLS below — tests/test_dialog_contracts
     # asserts every one of them exists in the module registry.  A bare
@@ -628,7 +646,8 @@ def _get_dns_wordlists() -> list:
 __all__ = [
     "COLORS", "STATUS_READY", "STATUS_RUNNING", "STATUS_DONE", "STATUS_ERROR",
     "SZ", "CACHE_DIR", "TMP_DIR", "STATUS_STYLE", "TOOL_STATUS_ICONS",
-    "ACCESS_GATED_PHASES", "WEB_TOOLS", "SMB_TOOLS", "WINRM_BANNERS",
+    "ACCESS_GATED_PHASES", "LANE_COLOR", "lane_color",
+    "WEB_TOOLS", "SMB_TOOLS", "WINRM_BANNERS",
     "TRUE_HTTP_SERVICES", "WORDLIST_DIRS", "_f", "_shq", "_find_wordlists",
     "_get_user_wordlists", "_get_pass_wordlists", "_get_dir_wordlists",
     "_get_dns_wordlists", "add_context_menu", "apply_context_menus_recursive",

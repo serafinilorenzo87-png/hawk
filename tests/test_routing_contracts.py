@@ -198,9 +198,12 @@ class RunsOnTargetTests(unittest.TestCase):
             + " gate runs_on_target on local binary availability — "
               "that is what made HAWK run Windows built-ins on Kali")
 
-    def test_every_declared_tool_is_windows_and_paste_only(self):
-        """The declaration itself: nothing here should be runnable
-        locally in the first place."""
+    def test_every_runs_on_target_tool_has_os_hint(self):
+        """The declaration itself: nothing declared runs_on_target should be
+        runnable locally in the first place.  This spans the Windows built-ins
+        (reg/wmic/schtasks/...) AND the Linux post-exploit finders
+        (SUID/caps/sudo -l/...) — both are copied into the target shell, so
+        both must carry an os_hint the card face can key on."""
         import importlib
         import inspect
 

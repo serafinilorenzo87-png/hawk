@@ -1318,15 +1318,16 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
             desc_first = "Not installed — click INSTALL to launch the install wizard"
             desc_color = COLORS["text_yellow"]
         elif runs_on_target:
-            # NOT `and not installed`.  Several of these Windows
-            # built-ins have same-named binaries on Kali (`whoami`,
-            # `net`, `netstat`), so gating on local availability sent
-            # them down the normal RUN path: HAWK executed them
-            # LOCALLY and reported Kali's users, privileges and
-            # listening ports as if they were the target's.  A tool
-            # declared runs_on_target runs on the target, whatever is
-            # installed here.
-            desc_first = f"▶ Run on target shell — click SHOW to copy command"
+            # WHERE it runs is now carried by the cyan [target shell] chip
+            # (rendered below) and the SHOW button, so the desc line is free
+            # to say what the command actually DOES instead of repeating
+            # "run on target".  desc_first keeps the tool's real description.
+            #
+            # Availability is deliberately NOT consulted here: several of
+            # these built-ins have same-named binaries on Kali (`whoami`,
+            # `net`, `netstat`), and `avail` above already forces the card
+            # clickable while _on_click routes it to the target-shell dialog
+            # — so it never runs locally regardless of what's installed.
             desc_color = COLORS["text_dim"]
         elif avail:
             desc_color = COLORS["text_dim"]
@@ -1342,11 +1343,35 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
             desc_first = f"Not installed — {short}"
             desc_color = COLORS["text_muted"]
 
+        # Column 2 holds a colour-coded lane chip (WHERE it runs) followed
+        # by the first line of the description.  The chip is the card-face
+        # twin of the dialog's RUN ON / OUTPUT banner — green=Kali,
+        # cyan=target shell, grey=from findings — so the operator can see,
+        # before clicking, whether HAWK runs it or they run it on the
+        # target.  Only post-exploit cards carry a lane; others render as
+        # before (no chip).
+        desc_fr = ctk.CTkFrame(row_fr, fg_color="transparent")
+        desc_fr.grid(row=0, column=2, padx=4, pady=5, sticky="w")
+        lane = getattr(tool, "lane", "") or ""
+        chip_txt = ""
+        try:
+            from modules.base import LANE_BANNER
+            _info = LANE_BANNER.get(lane)
+            if _info:
+                chip_txt = _info[0]
+        except Exception:
+            chip_txt = ""
+        if chip_txt:
+            from gui.widgets.card_common import lane_color
+            ctk.CTkLabel(
+                desc_fr, text=f"[{chip_txt}]", font=_f("sm", True),
+                text_color=lane_color(lane), anchor="w",
+            ).pack(side="left", padx=(0, 6))
         desc_lbl = ctk.CTkLabel(
-            row_fr, text=desc_first, font=_f("sm"),
+            desc_fr, text=desc_first, font=_f("sm"),
             text_color=desc_color, anchor="w",
         )
-        desc_lbl.grid(row=0, column=2, padx=4, pady=5, sticky="w")
+        desc_lbl.pack(side="left")
 
         # Button label / color:
         #   "INSTALL" (amber)  → install wizard (tool missing, install-first)
