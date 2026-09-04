@@ -1765,9 +1765,11 @@ class PostExploitGuideDialog:
                 f"> {self._remote_out} 2>&1 < /dev/null & "
                 f"echo \"[HAWK] linpeas PID=$! → "
                 f"{self._remote_out}\"; disown 2>/dev/null",
-                hint=("nohup + & + disown — backgrounds linpeas so the "
-                      "shell prompt is freed.  -a = all checks (~5-15 "
-                      "min).  If the shell drops, linpeas keeps going."))
+                hint=("nohup + & + disown backgrounds the tool — the prompt "
+                      "returns in ~2s but it is STILL RUNNING (not finished): "
+                      "it writes the .out for the next ~5-15 min (longer on "
+                      "old boxes).  -a = all checks.  Check 'alive?' below "
+                      "before you exfil.  If the shell drops, it keeps going."))
             self._cmd_row(redirect_body, "foreground (alt):",
                 f"{self._remote_path} -a 2>&1 | tee {self._remote_out}",
                 hint=("Old behaviour — use this only on a stable "
@@ -1924,13 +1926,16 @@ class PostExploitGuideDialog:
             # not in `ps`, the script is dead — the operator needs
             # to know quickly so they don't keep waiting.
             self._cmd_row(mon_frame, "alive?:",
-                f"pgrep -af "
+                f"pgrep -fl "
                 f"\"{os.path.basename(self._script_name)}\" 2>/dev/null "
                 f"|| echo \"[HAWK] not running — check {self._remote_out}\"",
-                hint=("Checks whether the script's process is still "
-                      "in the ps table.  No output means the run "
-                      "ended (look at the tail of the output file to "
-                      "find out why)."))
+                hint=("Checks whether the script's process is still in the ps "
+                      "table.  A printed PID line = STILL RUNNING; the "
+                      "'[HAWK] not running' line = it ended (look at the tail "
+                      "of the output file to find out why).  Uses -fl (not "
+                      "-af): old targets like Metasploitable have a procps "
+                      "without -a, and -af there errors out and falsely "
+                      "reports 'not running'."))
 
             # Expected size reference for the Linux scripts
             if self._script_name.startswith("linpeas"):
@@ -2043,6 +2048,23 @@ class PostExploitGuideDialog:
 
     def _build_step4_exfil(self, parent):
         self._section_header(parent, 4, "RETRIEVE OUTPUT (Kali listener ← target nc)")
+
+        # The #1 live mistake (hit on MS2): the Step-3 run command returns the
+        # prompt in ~2s because it BACKGROUNDS the tool — that is NOT
+        # "finished".  Exfiltrating now pipes a half-written (often empty)
+        # .out and the listener shows nothing.  Warn hard, right here.
+        ctk.CTkLabel(
+            parent,
+            text=("  ⚠  Wait until the tool has FINISHED before exfiltrating — "
+                  "the Step-3 prompt comes back instantly because it runs in "
+                  "the background, NOT because it's done.  Run Step-3 "
+                  "'alive?': only exfil once it shows nothing.  `nc` sends the "
+                  ".out as-is, so a partial run sends partial (or empty) "
+                  "output.  (pspy is continuous — for it, exfil whenever you "
+                  "have enough events.)"),
+            font=_f("sm", True), text_color=COLORS["text_yellow"],
+            anchor="w", justify="left", wraplength=980).pack(
+                fill="x", padx=8, pady=(2, 6))
 
         def _start_listener():
             from utils.runner import _open_terminal
