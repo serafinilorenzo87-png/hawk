@@ -574,6 +574,43 @@ class CardAccessRoutesMixin:
                     except Exception:
                         pass
             self.after(0, _badge)
+
+            # Also surface a Target Intel finding — consistency with hydra,
+            # which pushes a "Weak credentials" finding whenever it cracks.
+            # Cracked local passwords are report evidence and candidates for
+            # password reuse / lateral movement, so they belong on Target
+            # Intel, not only in the Credential Store.  Snapshot semantics
+            # (remove-by-source + replace) so a re-run updates in place
+            # instead of stacking a second card.
+            def _push_finding():
+                ti = getattr(self.app, "target_intel", None)
+                if not ti:
+                    return
+                try:
+                    lines = "\n".join(f"  • {u} : {pw}"
+                                      for u, pw in cracked_list)
+                    desc = (
+                        f"john cracked {len(cracked_list)} /etc/shadow "
+                        f"hash(es) with rockyou on {target or 'the target'}:"
+                        f"\n\n{lines}\n\n"
+                        "Weak local passwords — report evidence, and "
+                        "candidates for password reuse / lateral movement.  "
+                        "Full credentials are in the Credential Store.")
+                    try:
+                        ti.remove_auto_findings_by_source("Shadow Crack")
+                    except Exception:
+                        pass
+                    ti.add_auto_finding(
+                        title=(f"Weak local passwords — cracked from "
+                               f"/etc/shadow ({len(cracked_list)})"),
+                        description=desc,
+                        severity="high",
+                        source="Shadow Crack",
+                        replace=True)
+                except Exception as e:
+                    self.app.terminal.write(
+                        f"  [!] shadow finding push failed: {e}", "warn")
+            self.after(0, _push_finding)
         except Exception as e:
             self.app.terminal.write(
                 f"  [!] Failed to save credentials: {e}", "error")

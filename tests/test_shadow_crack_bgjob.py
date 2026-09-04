@@ -70,6 +70,14 @@ class ShadowCrackBgJobTests(unittest.TestCase):
         # mark_captured marks NEW + blinks the tab; a bare refresh() does not.
         self.assertIn("mark_captured", self.save)
 
+    def test_pushes_target_intel_finding(self):
+        # Cracked shadow passwords must also land on Target Intel (like hydra's
+        # weak-cred finding), not only in the Credential Store — snapshot
+        # semantics (remove-by-source) so a re-run doesn't duplicate.
+        self.assertIn("add_auto_finding", self.save)
+        self.assertIn('"Shadow Crack"', self.save)
+        self.assertIn("remove_auto_findings_by_source", self.save)
+
 
 if __name__ == "__main__":
     unittest.main()
