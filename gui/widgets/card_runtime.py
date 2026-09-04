@@ -2065,6 +2065,14 @@ class CardRuntimeMixin:
                 "privesc_check", "powerup_download",
                 "lse", "pspy",
                 "bloody_crawl", "web_oracle",
+                # proxychains_scan runs nmap under proxychains4 — its
+                # dedicated branch below routes the clean nmap log to
+                # target_intel.update_from_nmap (structured port list).
+                # Without this exclusion the generic fallback ALSO
+                # push a bland "PROXYCHAINS NMAP" finding capped at 6
+                # significant lines (card_widget.py:2480), losing 21
+                # of 23 ports and double-posting the run.
+                "proxychains_scan",
             }
             if (not used_specialized and returncode == 0 and log
                     and tool.binary not in _NO_GENERIC_FALLBACK
@@ -2099,18 +2107,38 @@ class CardRuntimeMixin:
                     print(f"[HAWK] peas-workflow dialog failed: {e}")
 
             # proxychains nmap — strip [proxychains] prefix lines that
-            # pollute the output, then push the clean nmap section to
-            # Target Intel via the generic nmap parser.
+            # pollute the output, then feed the CLEAN log to both:
+            #   1. target_intel.update_from_nmap → structured port
+            #      state (populates the Ports / System Info panel with
+            #      every open port), same call the NMAP recon card
+            #      uses at line 1703.
+            #   2. _parse_output_to_intel(tool, clean_log) → the
+            #      visible auto_finding in Target Intel ("PROXYCHAINS
+            #      NMAP on <target>"), same call the generic fallback
+            #      would have made but with clean_log so no
+            #      "[proxychains]" lines pollute the description.
+            # The tool.id was excluded from _NO_GENERIC_FALLBACK_IDS's
+            # generic fallback specifically so it doesn't ALSO fire on
+            # the raw log at line 2069 (which would push a second
+            # noisy finding + explain the ~30 s UI freeze).
             if tool.id == "proxychains_scan" and log:
                 clean_log = [
                     (ts, line) for ts, line in log
                     if not line.startswith("[proxychains]")
                 ]
                 if clean_log:
+                    if hasattr(self.app, "target_intel"):
+                        try:
+                            self.app.target_intel.update_from_nmap(
+                                clean_log)
+                        except Exception as e:
+                            print(f"[HAWK] proxychains nmap-parse "
+                                  f"error: {e}")
                     try:
                         self._parse_output_to_intel(tool, clean_log)
                     except Exception as e:
-                        print(f"[HAWK] proxychains parse error: {e}")
+                        print(f"[HAWK] proxychains finding-push "
+                              f"error: {e}")
 
             self._run_defense_detection(log, tool_name)
 
@@ -2328,12 +2356,12 @@ class CardRuntimeMixin:
         # This is what the user should have been able to click ONCE.
         if pipx_pkg:
             apt_conflicts_map = {
-                "impacket":     "python3-impacket impacket-scripts",
-                "certipy-ad":   "certipy-ad",
-                "smbmap":       "smbmap",
-                "netexec":      "netexec crackmapexec",
-                "pwncat-cs":    "pwncat",
-                "theHarvester": "theharvester",
+                "impacket":       "python3-impacket impacket-scripts",
+                "certipy-ad":     "certipy-ad",
+                "smbmap":         "smbmap",
+                "netexec":        "netexec crackmapexec",
+                "theHarvester":   "theharvester",
+                # penelope-shell is pypi-only — no apt package to remove.
             }
             apt_pkg_for_pipx = apt_conflicts_map.get(pipx_pkg, "")
             if apt_pkg_for_pipx:
@@ -2616,12 +2644,12 @@ class CardRuntimeMixin:
             # Py3.12+) shadows ~/.local/bin/<tool> (pipx, working) because
             # /usr/bin comes first in $PATH. We uninstall apt first.
             apt_conflicts = {
-                "impacket":   "python3-impacket impacket-scripts",
-                "certipy-ad": "certipy-ad",
-                "smbmap":     "smbmap",
-                "netexec":    "netexec crackmapexec",
-                "pwncat-cs":  "pwncat",
+                "impacket":     "python3-impacket impacket-scripts",
+                "certipy-ad":   "certipy-ad",
+                "smbmap":       "smbmap",
+                "netexec":      "netexec crackmapexec",
                 "theHarvester": "theharvester",
+                # penelope-shell is pypi-only — no apt conflict.
             }.get(pipx_pkg, "")
             apt_remove = (
                 f"sudo apt remove -y {apt_conflicts} 2>/dev/null; "
