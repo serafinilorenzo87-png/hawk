@@ -70,6 +70,13 @@ class PeasOpenOutputGuardTests(unittest.TestCase):
         self.assertIn('"done?"', self.src)
         self.assertIn("pgrep -fl", self.src)
 
+    def test_lse_pspy_are_not_linpeas_parsed(self):
+        # Option A: LSE / pspy get a read-the-.txt message, NOT the linpeas
+        # parser — their format differs, so parsing misfires + mislabels the
+        # run "linPEAS parsed".  The branch must exist and say so.
+        self.assertIn('script_lower.startswith(("lse", "pspy"))', self.src)
+        self.assertIn("does not auto-parse", self.src)
+
 
 if __name__ == "__main__":
     unittest.main()

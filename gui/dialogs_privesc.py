@@ -2332,6 +2332,30 @@ class PostExploitGuideDialog:
                             c, self._app, self._target, source_file=p),
                         name="hawk-linpeas-parse",
                         daemon=True).start()
+                elif script_lower.startswith(("lse", "pspy")):
+                    # LSE and pspy have their OWN output formats (not linPEAS'
+                    # ╔═╣ boxes), so the linPEAS parser can't read them: it
+                    # extracts almost nothing and mislabels the run "linPEAS
+                    # parsed".  They are read-the-output tools — LSE is a
+                    # graded, human-readable report; pspy is a live process /
+                    # cron monitor.  Save the .txt and point the operator at
+                    # it; do NOT push a misleading (near-empty) parse into
+                    # Target Intel.  (linpeas.sh via this same dialog remains
+                    # the tool that auto-populates Target Intel.)
+                    _tool = ("LSE" if script_lower.startswith("lse")
+                             else "pspy")
+                    _how = ("graded report — look for  [!] = critical, "
+                            "[*] = interesting, grouped by usr/sud/fst/sys/…"
+                            if _tool == "LSE" else
+                            "live monitor — scan the stream for cron jobs and "
+                            "short-lived root (UID=0) processes")
+                    term.write(
+                        f"\n  [i] {_tool} output saved — read it directly; "
+                        f"HAWK does not auto-parse {_tool} into Target Intel "
+                        f"(its format differs from linpeas.sh).\n"
+                        f"      {_tool} is a {_how}.\n"
+                        f"      Readable copy: {txt_path or path}",
+                        "info")
                 elif "powerup" in script_lower:
                     # PowerUp.ps1 — no dedicated parser (output is compact
                     # and human-readable).  Print a focused reading guide
