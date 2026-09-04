@@ -261,8 +261,8 @@ class TargetCommandDialogTests(_TkTestCase):
         return card
 
     def test_show_target_command_dialog(self):
-        from gui.widgets.card_runtime import CardRuntimeMixin
-        card = self._card(CardRuntimeMixin)
+        from gui.widgets.card_routes_access import CardAccessRoutesMixin
+        card = self._card(CardAccessRoutesMixin)
         card._show_target_command_dialog(_a_tool("rdp_enable"))
         self.root.update_idletasks()
 
