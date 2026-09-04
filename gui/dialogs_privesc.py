@@ -2231,6 +2231,21 @@ class PostExploitGuideDialog:
             # it only when that is inside the HAWK tree, and falls back
             # to <HAWK>/outputs/ otherwise.  HAWK never writes into the
             # operator's home directory.
+            # Show WHICH file (size + mtime) is being parsed.  Multiple runs
+            # share the `linpeas-<ip>-<timestamp>` prefix, so it's easy to pick
+            # an old / partial capture by mistake — printing the size and
+            # modified-time makes "did I open the full, current file?" obvious.
+            try:
+                import time as _time
+                _mt = _time.strftime(
+                    "%Y-%m-%d %H:%M:%S",
+                    _time.localtime(_os.path.getmtime(path)))
+            except Exception:
+                _mt = "?"
+            term.write(
+                f"  [i] Parsing {_os.path.basename(path)} "
+                f"({len(_raw):,} bytes, modified {_mt})", "dim")
+
             import re as _re
             from utils.config import contained_sibling as _sibling
             _ansi_re = _re.compile(

@@ -626,9 +626,11 @@ class CredentialStoreWidget(ctk.CTkFrame):
         sess.save()
         self._new_cred_keys.add(cred_identity(cred))
         self.refresh()
+        _lbl = (cred.password or cred.hash_type
+                or ("SSH key" if (getattr(cred, "cred_type", "") or "").lower()
+                    == "key" else "hash"))
         self.app.terminal.write(
-            f"  ↗  Credential: {cred.username}  "
-            f"[{cred.password or cred.hash_type or 'hash'}]",
+            f"  ↗  Credential: {cred.username}  [{_lbl}]",
             "finding")
         self._blink_start()
 
@@ -1028,6 +1030,27 @@ class CredentialStoreWidget(ctk.CTkFrame):
 
             if connect_cmd:
                 ctk.CTkLabel(parent, text=f"$ {connect_cmd}",
+                    font=_mono(12), text_color=COLORS["text_dim"],
+                    anchor="w").grid(row=1, column=0, columnspan=3,
+                                     padx=(14, 4), pady=(0, 4), sticky="w")
+            return
+
+        # SSH-key leads (e.g. linpeas "readable private key"): there is NO
+        # password — the value is the key FILE to grab, not a secret.
+        # Rendering "user:" with a blank secret looks like a broken empty-
+        # password credential (this confused the operator on MS2), so show it
+        # as a key lead with the path pulled from notes.
+        if (getattr(cred, "cred_type", "") or "").lower() == "key":
+            keypath = notes.split(":", 1)[-1].strip() if ":" in notes else ""
+            headline = f"🔑 SSH key readable — {cred.username or '?'}"
+            if host:
+                headline += f" @ {host}"
+            ctk.CTkLabel(parent, text=headline,
+                font=_mono(13, True), text_color=COLORS["text_yellow"],
+                anchor="w").grid(row=0, column=0, columnspan=3,
+                                 padx=(8, 4), pady=(4, 0), sticky="w")
+            if keypath:
+                ctk.CTkLabel(parent, text=f"  grab: {keypath}",
                     font=_mono(12), text_color=COLORS["text_dim"],
                     anchor="w").grid(row=1, column=0, columnspan=3,
                                      padx=(14, 4), pady=(0, 4), sticky="w")
