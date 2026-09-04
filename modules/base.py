@@ -305,6 +305,12 @@ class Tool:
     lane:        str = ""      # post-exploit interaction lane (see LANE_*).
                                   # Drives the colour-coded "where does it run /
                                   # where does the output go" banner + card chip.
+    hidden:      bool = False  # registered but NOT rendered as its own card.
+                                  # For tools reachable only through a funnel /
+                                  # picker (e.g. LSE / pspy via the LINPEAS
+                                  # "Choose Approach" dialog): the picker resolves
+                                  # them with get_tool(), so they stay fully
+                                  # usable while decluttering the card grid.
 
     def build_command(self, target: str, extra_args: str = "") -> str:
         """Build the actual shell command.

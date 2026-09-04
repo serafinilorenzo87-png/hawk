@@ -266,7 +266,11 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                      fg_color=COLORS["border_dim"]).grid(
             row=sep_row, column=0, sticky="ew", padx=10, pady=(0,4))
 
-        tools = self.module.get_tools()
+        # Drop tools flagged hidden: they stay registered (a funnel/picker
+        # resolves them via module.get_tool — e.g. LSE / pspy from the LINPEAS
+        # "Choose Approach" dialog) but do NOT render their own card.
+        tools = [t for t in self.module.get_tools()
+                 if not getattr(t, "hidden", False)]
         if not tools:
             self._build_report_content()
             return
