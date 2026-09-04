@@ -1579,16 +1579,22 @@ class PostExploitGuideDialog:
         stream_body   = ctk.CTkFrame(parent, fg_color="transparent")
 
         def _show_tab(val):
+            # `after=tab_row` pins the exec-command body immediately below the
+            # toggle buttons.  Without it, a plain .pack() appends to the END
+            # of the scroll frame: on first render that happens to be the
+            # right place (Steps 4/5 aren't built yet), but on a LATER toggle
+            # — Steps 4/5 already packed — the body lands after Step 5, so the
+            # run/monitor commands jump to the bottom of the dialog.
             tab_var.set(val)
             if val == "redirect":
-                redirect_body.pack(fill="x", padx=4)
+                redirect_body.pack(fill="x", padx=4, after=tab_row)
                 stream_body.pack_forget()
                 tab_redirect.configure(fg_color=COLORS["bg_secondary"],
                                         border_color=COLORS["text_cyan"])
                 tab_stream.configure(fg_color=COLORS["bg_card"],
                                       border_color=COLORS["border_dim"])
             else:
-                stream_body.pack(fill="x", padx=4)
+                stream_body.pack(fill="x", padx=4, after=tab_row)
                 redirect_body.pack_forget()
                 tab_stream.configure(fg_color=COLORS["bg_secondary"],
                                       border_color=COLORS["text_cyan"])
@@ -1942,7 +1948,9 @@ class PostExploitGuideDialog:
                          text_color=COLORS["text_yellow"],
                          anchor="w").pack(fill="x", padx=8, pady=(2, 6))
 
-        redirect_body.pack(fill="x", padx=4)
+        # Initial default tab.  after=tab_row keeps it consistent with
+        # _show_tab so the body never drifts to the bottom on later toggles.
+        redirect_body.pack(fill="x", padx=4, after=tab_row)
 
         # ── LIVE STREAM body (3C) ─────────────────────────────────────────
         ctk.CTkLabel(stream_body,

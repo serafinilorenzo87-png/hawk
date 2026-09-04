@@ -1,0 +1,49 @@
+r"""PEAS Workflow Step-3 tab bodies must stay anchored under the toggle.
+
+Bug (found live on MS2): the Step-3 "RUN + SAVE TO FILE" / "RUN + STREAM LIVE"
+toggle re-packed its command body with a bare .pack() (no `after=`).  On first
+render that was fine (Steps 4/5 didn't exist yet), but a LATER toggle appended
+the body to the END of the scroll frame, so the run/monitor commands jumped
+below Step 5.
+
+Fix: every pack of redirect_body / stream_body carries `after=tab_row`, pinning
+the body immediately under the toggle buttons regardless of build order.
+
+dialogs_privesc subclasses customtkinter and can't import headless, so this is
+a static source-shape guard.
+"""
+
+import os
+import re
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _src(rel):
+    with open(os.path.join(ROOT, rel), encoding="utf-8") as f:
+        return f.read()
+
+
+class PeasTabAnchorTests(unittest.TestCase):
+    def setUp(self):
+        self.src = _src("gui/dialogs_privesc.py")
+
+    def test_every_body_pack_is_anchored(self):
+        # Any pack of redirect_body / stream_body must pin after=tab_row.
+        for m in re.finditer(r"(redirect_body|stream_body)\.pack\(([^)]*)\)",
+                             self.src):
+            with self.subTest(call=m.group(0)):
+                self.assertIn(
+                    "after=tab_row", m.group(2),
+                    f"{m.group(1)}.pack() must anchor after=tab_row so the "
+                    f"exec body can't drift to the bottom of the dialog")
+
+    def test_pack_forget_still_used_for_the_hidden_tab(self):
+        # The toggle hides the other body — that half must still be there.
+        self.assertIn("stream_body.pack_forget()", self.src)
+        self.assertIn("redirect_body.pack_forget()", self.src)
+
+
+if __name__ == "__main__":
+    unittest.main()
