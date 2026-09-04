@@ -45,5 +45,31 @@ class PeasTabAnchorTests(unittest.TestCase):
         self.assertIn("redirect_body.pack_forget()", self.src)
 
 
+class PeasOpenOutputGuardTests(unittest.TestCase):
+    r"""OPEN OUTPUT's empty-guard must reject only EMPTY files, by SIZE — never
+    by linpeas-specific box markers.  Live bug: the marker check keyed on ╔/╠,
+    which LSE / pspy / PowerUp / PrivescCheck output does NOT contain, so a
+    valid 265 KB LSE capture was rejected as "not PEAS output" and the "redo
+    Step 4" advice made the operator re-listen and truncate the good file.
+    """
+
+    def setUp(self):
+        self.src = _src("gui/dialogs_privesc.py")
+
+    def test_guard_is_size_based(self):
+        self.assertIn("len(_raw) < 256", self.src)
+
+    def test_guard_does_not_reject_on_box_markers(self):
+        # the old marker-rejection must be gone (it false-rejected LSE).
+        self.assertNotIn(
+            'if not any(m in content for m in ("╔", "╠")):',
+            self.src)
+
+    def test_done_check_row_is_present(self):
+        # a prominent "is it finished?" check sits by the RUN command.
+        self.assertIn('"done?"', self.src)
+        self.assertIn("pgrep -fl", self.src)
+
+
 if __name__ == "__main__":
     unittest.main()

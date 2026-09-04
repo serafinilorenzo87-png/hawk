@@ -1807,6 +1807,21 @@ class PostExploitGuideDialog:
                 f"echo \"[HAWK] PID=$! → {self._remote_out}\"; "
                 f"disown 2>/dev/null")
 
+        # Prominent "is it finished yet?" check, right under RUN — the #1
+        # thing the operator needs after backgrounding the tool.  The same
+        # pgrep also lives in MONITOR/alive? below, but that was buried and
+        # easy to miss (the operator asked for it here).  Linux only: Windows
+        # targets have no pgrep and use the MONITOR size-loop instead.
+        if (self._os != "windows"
+                and self._script_name.startswith(("linpeas", "lse", "pspy"))):
+            self._cmd_row(redirect_body, "done?",
+                f"pgrep -fl {self._script_name} || "
+                f"echo '[HAWK] {self._script_name} FINISHED — go to Step 4'",
+                hint=("Run any time to check progress: a PID line = STILL "
+                      "running; the '[HAWK] … FINISHED' line = it's done, "
+                      "exfil now (Step 4).  Uses -fl so it works on old boxes "
+                      "(Metasploitable) whose procps has no -a."))
+
         # ── 3A Monitor section ────────────────────────────────────────────
         if self._os == "windows":
             mon_frame = ctk.CTkFrame(redirect_body, fg_color=COLORS["bg_card"],
@@ -2200,21 +2215,25 @@ class PostExploitGuideDialog:
                 content = _raw.decode("utf-8", errors="replace")
             term = self._app.terminal
 
-            # ── Guard: empty / non-PEAS file ──────────────────────────
-            # A 0-byte or marker-less .out means Step-4 exfil never actually
-            # transferred — almost always because `nc` ran BEFORE the tool
-            # finished (partial/empty file) or the listener closed early.
-            # Parsing it silently yielded "no findings" with no clue why
-            # (found live on MS2).  Detect it and say exactly what to redo.
-            if not any(m in content for m in ("╔", "╠")):
+            # ── Guard: empty exfil ────────────────────────────────────
+            # A 0-byte / tiny .out means Step-4 exfil never transferred —
+            # almost always because `nc` ran BEFORE the tool finished, or the
+            # listener closed early.  Parsing it silently yielded "no findings"
+            # with no clue why (found live on MS2).
+            # Guard on SIZE ONLY, never on content markers: linpeas uses ╔/╠
+            # box headers but LSE / pspy / PowerUp / PrivescCheck do NOT, so a
+            # marker check wrongly rejected a valid 265 KB LSE capture (and its
+            # "redo Step 4" advice made the operator re-listen, truncating the
+            # good file to 0).  Any real PEAS output is tens of KB+, so
+            # <256 bytes = a failed/empty transfer.
+            if len(_raw) < 256:
                 term.write(
-                    f"  [!] '{_os.path.basename(path)}' is empty or not PEAS "
-                    f"output ({len(_raw)} bytes, no section markers) — nothing "
-                    f"to parse.", "error")
+                    f"  [!] '{_os.path.basename(path)}' is empty "
+                    f"({len(_raw)} bytes) — nothing to parse.", "error")
                 term.write(
                     "      The exfil didn't transfer.  Usual cause: `nc` ran "
                     "before the tool FINISHED, or the listener closed early.  "
-                    "Redo Step 4 — confirm Step-3 'alive?' shows nothing, "
+                    "Redo Step 4 — confirm Step-3 'done?' shows FINISHED, "
                     "click START NC LISTENER, run the target `nc` again, then "
                     "re-open the file here.", "warn")
                 return
