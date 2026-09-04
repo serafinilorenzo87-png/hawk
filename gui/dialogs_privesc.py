@@ -2192,6 +2192,25 @@ class PostExploitGuideDialog:
                 content = _raw.decode("utf-8", errors="replace")
             term = self._app.terminal
 
+            # ── Guard: empty / non-PEAS file ──────────────────────────
+            # A 0-byte or marker-less .out means Step-4 exfil never actually
+            # transferred — almost always because `nc` ran BEFORE the tool
+            # finished (partial/empty file) or the listener closed early.
+            # Parsing it silently yielded "no findings" with no clue why
+            # (found live on MS2).  Detect it and say exactly what to redo.
+            if not any(m in content for m in ("╔", "╠")):
+                term.write(
+                    f"  [!] '{_os.path.basename(path)}' is empty or not PEAS "
+                    f"output ({len(_raw)} bytes, no section markers) — nothing "
+                    f"to parse.", "error")
+                term.write(
+                    "      The exfil didn't transfer.  Usual cause: `nc` ran "
+                    "before the tool FINISHED, or the listener closed early.  "
+                    "Redo Step 4 — confirm Step-3 'alive?' shows nothing, "
+                    "click START NC LISTENER, run the target `nc` again, then "
+                    "re-open the file here.", "warn")
+                return
+
             # ── Strip ANSI → write sibling .txt ───────────────────────
             # winpeas / linpeas output is dense with ANSI color codes
             # that render as garbage in text editors.  We write a
