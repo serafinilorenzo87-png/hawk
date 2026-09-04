@@ -1405,6 +1405,44 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
             if t.id == "netsh_portfwd":
                 self._route_netsh_portfwd(t)
                 return
+            # chisel client needs a 4-step guided workflow (server on Kali
+            # + binary hosted over HTTP + arch-matched wget on target +
+            # verify) — a single copy dialog is not enough.
+            if t.id == "chisel_client":
+                self._route_chisel_client(t)
+                return
+            # sshuttle needs an SSH user (custom_args is opaque and often
+            # blank) and sudo+SSH password prompts (subprocess can't
+            # prompt) → mini dialog collects the user and launches in
+            # an xterm.
+            if t.id == "sshuttle":
+                self._route_sshuttle(t)
+                return
+            # penelope is a reverse-shell handler — the listener is
+            # interactive (PTY-upgraded shell), can't run under HAWK's
+            # own subprocess pipe.  Dialog collects the port and
+            # launches in an xterm.
+            if t.id == "penelope":
+                self._route_penelope(t)
+                return
+            # SSH Dynamic (SOCKS5) — same SSH-user + interactive-
+            # password problem as sshuttle.  Dedicated dialog with
+            # legacy-compatible SSH flags + xterm launch.
+            if t.id == "ssh_dynamic":
+                self._route_ssh_dynamic(t)
+                return
+            # SSH Local Forward — SSH user + local port + remote
+            # host:port; slot conflation in the bare template means
+            # RHOST needs an explicit field, not {target}.  Same
+            # interactive-password + legacy-compat as ssh_dynamic.
+            if t.id == "ssh_local_fw":
+                self._route_ssh_local_fw(t)
+                return
+            # LIGOLO-NG Proxy — sudo + own interactive CLI; needs an
+            # xterm to be usable.
+            if t.id == "ligolo_proxy":
+                self._route_ligolo_proxy(t)
+                return
 
             # runs_on_target tools: show the command with a copy button
             # so the user can paste it into the target shell (meterpreter,
@@ -2625,7 +2663,7 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
         "impacket-mqtt_check":       "impacket",
         # Other Python-env tools
         "certipy-ad":            "certipy-ad",
-        "pwncat-cs":             "pwncat-cs",
+        "penelope":              "penelope-shell",
         "smbmap":                "smbmap",
         "netexec":               "netexec",
         "nxc":                   "netexec",

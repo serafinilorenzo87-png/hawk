@@ -47,6 +47,14 @@ _PLACEHOLDER_RE = re.compile(r"\{([a-z_][a-z0-9_]*)\}")
 #   3. /opt — the classic pentester dump for git clones and releases
 #   4. Kali / Parrot / BlackArch extras
 _EXTRA_BIN_DIRS = [
+    # ── HAWK's own payload drop ─────────────────────────────────────
+    # Third-party binaries HAWK downloads for the operator (chisel,
+    # ligolo-proxy/agent, PEAS variants) land here.  Without this
+    # entry, is_available() couldn't see them and the card face
+    # showed them as "not installed" right after HAWK's own install
+    # wizard succeeded (the ligolo-proxy card stayed shaded, RUN
+    # re-opened the install dialog in a loop).
+    PAYLOADS_DIR,
     # ── Language / package-manager install targets ──────────────────
     os.path.expanduser("~/.local/bin"),       # pipx, pip --user
     os.path.expanduser("~/.cargo/bin"),       # cargo install
@@ -120,7 +128,7 @@ _PREFER_PIPX_PREFIXES = (
     "theharvester",
 )
 _PREFER_PIPX_EXACT = {
-    "smbmap", "netexec", "nxc", "pwncat-cs",
+    "smbmap", "netexec", "nxc", "penelope",
 }
 
 
@@ -140,7 +148,7 @@ def _find_binary(name: str) -> Optional[str]:
     tool was missing, forcing the manual-install dialog on every click.
 
     Special case — "prefer-pipx" tools (impacket-*, certipy, smbmap, nxc,
-    pwncat-cs): on modern Kali, /usr/bin/<tool> is the apt wrapper which
+    penelope): on modern Kali, /usr/bin/<tool> is the apt wrapper which
     imports distutils and crashes on Python 3.12+. If the user fixed the
     problem with `pipx install`, the working copy lives at ~/.local/bin/
     — but /usr/bin comes first in $PATH, so `shutil.which` returns the
@@ -475,8 +483,29 @@ class Tool:
             "dnsrecon":         "sudo apt install dnsrecon",
             "whatweb":          "sudo apt install whatweb",
             "wafw00f":          "sudo apt install wafw00f",
-            "pwncat-cs":        "pip3 install pwncat-cs",
-            "chisel":           "go install github.com/jpillora/chisel@latest",
+            "penelope": [
+                # Direct download — penelope is a single self-contained
+                # Python file (~4000 lines), no venv, no compilation,
+                # no pypi dependency.  Most reliable strategy on Kalis
+                # where pipx can't create venvs on HGFS mounts (missing
+                # lib -> lib64 symlink support) and pip may hit pypi
+                # index issues.
+                ("github",
+                 "sudo curl -fsSL "
+                 "https://raw.githubusercontent.com/brightio/penelope/"
+                 "main/penelope.py "
+                 "-o /usr/local/bin/penelope && "
+                 "sudo chmod +x /usr/local/bin/penelope"),
+                ("pipx",
+                 "(command -v pipx >/dev/null || sudo apt install -y pipx) && "
+                 "pipx install penelope-shell && pipx ensurepath"),
+                ("pip",
+                 "pip3 install --break-system-packages penelope-shell"),
+            ],
+            "chisel": [
+                ("apt", "sudo apt install -y chisel"),
+                ("go",  "go install github.com/jpillora/chisel@latest"),
+            ],
             # New tools
             "subfinder":        "sudo apt install subfinder || go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest",
             "amass":            "sudo apt install amass",
@@ -566,7 +595,47 @@ class Tool:
             # NetExec (used by AD pentesting's LDAP branch).
             "nxc":                 "sudo apt install -y netexec",
 
-            "ligolo-proxy":     "Download from https://github.com/nicocha30/ligolo-ng/releases",
+            # ligolo-ng is NOT in apt.  The old placeholder ("Download
+            # from https://…") got joined into the shell chain and
+            # bash tried to execute "Download" as a command (exit 127).
+            # Real install: same GitHub-API + tarball flow as the
+            # LIGOLO-NG (download) card, dropping all 3 binaries in
+            # payloads/.  Kept in one place because ligolo-proxy is
+            # not in any distro repo.
+            "ligolo-proxy": [
+                ("github",
+                 "VER=$(curl -fsSL "
+                 "https://api.github.com/repos/nicocha30/ligolo-ng/"
+                 "releases/latest | "
+                 "grep -oE '\"tag_name\"[[:space:]]*:[[:space:]]*"
+                 "\"v[^\"]+\"' | head -1 | grep -oE 'v[0-9][^\"]*') && "
+                 "V=${VER#v} && "
+                 "BASE=\"https://github.com/nicocha30/ligolo-ng/"
+                 "releases/download/${VER}\" && "
+                 "P=" + PAYLOADS_DIR + " && "
+                 "echo \"[+] Latest ligolo-ng: $VER\" && "
+                 "curl -fsSL -o $P/_lg_proxy.tgz "
+                 "\"${BASE}/ligolo-ng_proxy_${V}_linux_amd64.tar.gz\" && "
+                 "tar -xzf $P/_lg_proxy.tgz -C $P && "
+                 "mv $P/proxy $P/ligolo-proxy && "
+                 "chmod +x $P/ligolo-proxy && "
+                 "curl -fsSL -o $P/_lg_agent64.tgz "
+                 "\"${BASE}/ligolo-ng_agent_${V}_linux_amd64.tar.gz\" && "
+                 "tar -xzf $P/_lg_agent64.tgz -C $P && "
+                 "mv $P/agent $P/ligolo-agent && "
+                 "chmod +x $P/ligolo-agent && "
+                 # 32-bit agent optional — same fail-soft as the
+                 # ligolo_download tool card.
+                 "(curl -fsSL -o $P/_lg_agent32.tgz "
+                 "\"${BASE}/ligolo-ng_agent_${V}_linux_386.tar.gz\" && "
+                 "tar -xzf $P/_lg_agent32.tgz -C $P && "
+                 "mv $P/agent $P/ligolo-agent-386 && "
+                 "chmod +x $P/ligolo-agent-386) || "
+                 "echo \"[!] 32-bit agent not published for $VER — skipping\"; "
+                 "rm -f $P/_lg_proxy.tgz "
+                 "$P/_lg_agent64.tgz $P/_lg_agent32.tgz && "
+                 "ls -la $P/ligolo-*"),
+            ],
             # Lateral / post-exploit new tools
             "evil-winrm":       [("gem",  "sudo gem install evil-winrm"),
                                  ("apt",  "sudo apt install -y evil-winrm")],
@@ -740,7 +809,7 @@ TOOL_BRIEFS = {
     "netsh":        "Windows network shell — port forwarding and pivoting without extra tools.",
     "sshuttle":     "Transparent SSH proxy — route all traffic through a Linux pivot box.",
     # Lateral
-    "pwncat-cs":    "Advanced shell handler — auto-upload, privesc modules, file transfer.",
+    "penelope":     "Advanced reverse-shell handler — auto PTY upgrade, file transfer, session logging. Python-based, actively maintained (replaces pwncat-cs).",
     "chisel":       "TCP tunnel over HTTP — reverse SOCKS proxy for pivoting through firewalls.",
     "proxychains4": "Route tools through SOCKS proxy — scan internal networks after pivoting.",
     "ssh":          "SSH tunneling — local/dynamic port forwarding for pivoting.",

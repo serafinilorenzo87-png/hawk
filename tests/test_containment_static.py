@@ -141,6 +141,10 @@ ALLOWED_MARKERS = {
         "target host.",
     ("utils/crack_runner.py", "/tmp"):
         "Hashcat/john help text quoting their own defaults.",
+    ("gui/widgets/card_ad_routes.py", "/tmp"):
+        "On-target paths inside the CHISEL Client guided workflow — "
+        "wget/chmod/run commands the operator pastes into the pivot's "
+        "shell, not Kali writes.",
 }
 
 

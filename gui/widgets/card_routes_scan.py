@@ -63,8 +63,44 @@ class CardScanRoutesMixin:
             # ever produces a paste-in-the-target-shell command.
             if tool.id == "netsh_portfwd":
                 self._route_netsh_portfwd(tool)
+            elif tool.id == "chisel_client":
+                # 4-step guided setup (server + binary hosting + wget
+                # + verify) — the single-copy target dialog is not
+                # enough for a reverse-SOCKS tunnel.
+                self._route_chisel_client(tool)
             else:
                 self._show_target_command_dialog(tool)
+            return
+
+        # sshuttle needs an SSH user + interactive sudo/SSH prompts →
+        # dedicated dialog + xterm launcher.  Not runs_on_target
+        # (executes on Kali), so it lives outside the block above.
+        if tool.id == "sshuttle":
+            self._route_sshuttle(tool)
+            return
+
+        # penelope's listener is interactive — needs an xterm to be
+        # usable once a shell connects back.
+        if tool.id == "penelope":
+            self._route_penelope(tool)
+            return
+
+        # SSH Dynamic (SOCKS5) — SSH-user + interactive password + SSH
+        # legacy compat flags; same class as sshuttle.
+        if tool.id == "ssh_dynamic":
+            self._route_ssh_dynamic(tool)
+            return
+
+        # SSH Local Forward — same SSH-user / interactive-password /
+        # legacy-compat pattern plus explicit remote-host field
+        # (the bare template conflates {target} with the RHOST slot).
+        if tool.id == "ssh_local_fw":
+            self._route_ssh_local_fw(tool)
+            return
+
+        # LIGOLO-NG Proxy — sudo + interactive CLI; needs an xterm.
+        if tool.id == "ligolo_proxy":
+            self._route_ligolo_proxy(tool)
             return
 
         # Generic pre-check: if the tool's binary isn't on PATH, show
