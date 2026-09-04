@@ -77,6 +77,12 @@ class PeasOpenOutputGuardTests(unittest.TestCase):
         self.assertIn('script_lower.startswith(("lse", "pspy"))', self.src)
         self.assertIn("does not auto-parse", self.src)
 
+    def test_pspy_transfer_offers_a_32bit_variant(self):
+        # 32-bit targets (i686) can't run pspy64; the transfer step must offer
+        # a pspy32 wget alongside the default.
+        self.assertIn("wget 32-bit:", self.src)
+        self.assertIn(":8000/pspy32", self.src)
+
 
 if __name__ == "__main__":
     unittest.main()

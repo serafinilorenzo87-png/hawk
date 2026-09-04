@@ -38,6 +38,13 @@ class FunnelConsolidationTests(unittest.TestCase):
             self.assertIsNotNone(self.mod.get_tool(tid),
                                  f"{tid} must stay resolvable via get_tool")
 
+    def test_pspy_downloads_both_architectures(self):
+        # pspy64 fails on 32-bit targets (Metasploitable i686) — grab both so
+        # the transfer step can offer pspy32 as well.
+        cmd = self.byid["pspy"].cmd_template
+        self.assertIn("pspy32", cmd)
+        self.assertIn("pspy64", cmd)
+
     def test_card_widget_filters_hidden_from_display(self):
         # static guard: the row builder must drop hidden tools before render.
         with open(os.path.join(ROOT, "gui/widgets/card_widget.py"),
