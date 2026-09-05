@@ -418,7 +418,7 @@ class CardServiceParserMixin:
             f"target / wait, then retry the SSH Banner Grab tool.")
         try:
             self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
-                title=f"SSH Banner Grab — server did not respond on "
+                title=f"SSH Banner — server did not respond on "
                       f"{target}:{port}",
                 description=desc, severity="info",
                 source=tool.name, port=port))

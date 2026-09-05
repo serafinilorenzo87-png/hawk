@@ -2175,12 +2175,12 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                 "Certipy certificate request — abuses an ESC1-style "
                 "template (ENROLLEE_SUPPLIES_SUBJECT + enrollable by "
                 "domain users) to get a cert for a privileged user "
-                "(e.g. Administrator).  The .pfx you get is a TGT "
-                "machine for `certipy auth`."),
+                "(e.g. Administrator).  Feed the .pfx to "
+                "`certipy auth` to obtain a TGT."),
             "needs":   "Domain user + a vulnerable template + UPN of "
                        "the user you want to impersonate.  Get CA_NAME "
                        "and TEMPLATE from `certipy find` output first.",
-            "output":  "<HAWK>/outputs/esc1.pfx on disk — hand it to certipy"
+            "output":  "<HAWK>/outputs/esc1.pfx on disk — hand it to certipy "
                        "auth (the PFX is binary, not parsed by HAWK).  "
                        "Terminal log shows the path.",
             "extras":  [

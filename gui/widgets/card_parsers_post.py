@@ -500,7 +500,8 @@ class CardPostParserMixin:
                         cs.refresh()
                     self.app.terminal.write(
                         f"  [+] {tool.name}: credential "
-                        f"{uname}:{'*' * len(auth_pass)} confirmed "
+                        f"{uname}:{'*' * len(auth_pass)} "
+                        f"{'confirmed' if pwn3d else 'observed (unverified)'} "
                         f"on {target} → pushed to Credential Store.",
                         "success")
             except Exception as e:
@@ -1246,5 +1247,5 @@ class CardPostParserMixin:
             source="netexec")
         self.app.terminal.write(
             "  [!] netexec hit a protocol error — see Target Intel for an "
-            "explanation and alternative commands.", "warning")
+            "explanation and alternative commands.", "warn")
 

@@ -2649,7 +2649,8 @@ class TargetBar(ctk.CTkFrame):
                   "• Green button  =  autosave ON\n"
                   "• Gray button   =  autosave OFF\n\n"
                   "Click the button again to turn it off. Manual SAVE\n"
-                  "still works normally and creates a new snapshot.",
+                  "still works normally and overwrites the same file\n"
+                  "(or you can choose Save As a new one).",
                   COLORS["text_green"])
 
         def _ok():

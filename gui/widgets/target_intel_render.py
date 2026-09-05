@@ -1777,7 +1777,7 @@ class TargetIntelRenderMixin:
                 f"Quick manual test:\n"
                 f"  nc {target} {ftp_port2}  →  USER backdoor:)  →  PASS x\n"
                 f"  nc {target} 6200          →  instant root shell\n\n"
-                f"Use the RUN WITH MSF button to launch the Metasploit module.",
+                f"Use the EXPLOIT WITH MSF button to launch the Metasploit module.",
                 severity="critical", source="nmap banner",
                 port=ftp_port2)
 
@@ -1810,7 +1810,7 @@ class TargetIntelRenderMixin:
                 f"a reverse shell payload — returns a shell as the 'daemon' user.\n"
                 f"From there, check for SUID binaries (nmap 5.x is installed on\n"
                 f"Metasploitable and has --interactive → root).\n\n"
-                f"Use the RUN WITH MSF button to launch the Metasploit module.",
+                f"Use the EXPLOIT WITH MSF button to launch the Metasploit module.",
                 severity="critical", source="nmap banner",
                 port=distcc_port)
 
@@ -1821,7 +1821,7 @@ class TargetIntelRenderMixin:
                 f"{target}:6667 — UnrealIRCd 3.2.8.1 detected.\n\n"
                 f"This version was distributed with a backdoor that opens a\n"
                 f"bind shell on a random port when triggered — root, no creds.\n\n"
-                f"Use the RUN WITH MSF button to launch the Metasploit module.",
+                f"Use the EXPLOIT WITH MSF button to launch the Metasploit module.",
                 severity="critical", source="nmap banner",
                 port=6667)
 
@@ -1870,7 +1870,7 @@ class TargetIntelRenderMixin:
                         f"configuration the exploit fails against a vulnerable version.\n\n"
                         f"Confirm before reporting: run the MSF module (it fails cleanly\n"
                         f"if the option is unset), or read smb.conf if you get a shell.\n\n"
-                        f"Use the RUN WITH MSF button to launch the Metasploit module.",
+                        f"Use the EXPLOIT WITH MSF button to launch the Metasploit module.",
                         severity="high", source="nmap banner",
                         port=smb_p)
             except (ValueError, IndexError):
@@ -4073,7 +4073,8 @@ class TargetIntelRenderMixin:
             except Exception:
                 discovered_hosts = []
             if discovered_hosts:
-                ah_label = (f"▶ ADD {len(discovered_hosts)} HOSTS "
+                ah_label = (f"▶ ADD {len(discovered_hosts)} HOST"
+                            f"{'S' if len(discovered_hosts) != 1 else ''} "
                             f"TO /etc/hosts")
                 if len(ah_label) > 34:
                     ah_label = f"▶ ADD {len(discovered_hosts)} → /etc/hosts"

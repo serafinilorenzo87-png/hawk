@@ -1304,7 +1304,13 @@ class CardRuntimeMixin:
                 # 0 for them and "No paths found" is wrong + confusing (the
                 # operator sees a full NIKTO card yet a "No paths" popup).
                 _PATH_BINS = {"gobuster", "dirb", "ffuf"}
-                _is_path_tool = (tool.binary or "").lower() in _PATH_BINS
+                # gobuster in DNS mode enumerates subdomains, not paths —
+                # it shares the "gobuster" binary but its hits land in
+                # Target Intel like the other non-path scanners, so keep
+                # it out of the "No paths found" branch.
+                _is_path_tool = (
+                    (tool.binary or "").lower() in _PATH_BINS
+                    and (getattr(tool, "id", "") or "").lower() != "gobuster_dns")
                 _word = "path" if hits == 1 else "paths"
                 if rc == 0:
                     if not _is_path_tool:
@@ -1719,7 +1725,7 @@ class CardRuntimeMixin:
             else:
                 self._set_tool_status(tool.id, "error")
                 self.app.terminal.write(
-                    f"  [!] {tool.name} exited (code {returncode}).", "warn")
+                    f"  [!] {tool.name} exited rc={returncode}.", "warn")
                 final_status = "error"
                 # Friendly explanation for common non-zero exits
                 try:

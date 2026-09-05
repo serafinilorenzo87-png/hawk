@@ -861,7 +861,9 @@ class TargetIntelAdminMixin:
                 seen.add(c.cve_id); unique.append(c)
         unique.sort(key=lambda c: -c.cvss_score)
         self._spinner_stop(f"Found {len(unique)} CVEs (score ≥ 7.0)")
-        self.app.terminal.write(f"  [+] {len(unique)} CVEs found", "success")
+        _cve_more = " (top 10 shown)" if len(unique) > 10 else ""
+        self.app.terminal.write(
+            f"  [+] {len(unique)} CVEs found{_cve_more}", "success")
         for cve in unique[:10]:
             self.app.terminal.write(
                 f"  [{cve.severity} {cve.cvss_score}]  {cve.cve_id}", "finding")

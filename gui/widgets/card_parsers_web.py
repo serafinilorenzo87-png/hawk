@@ -364,7 +364,7 @@ class CardWebParserMixin:
 
         # Build description
         parts = []
-        parts.append(f"Discovered {len(entries)} paths/files:\n")
+        parts.append(f"Discovered {len(entries)} paths:\n")
 
         # Interesting paths first (200, 301, 302, 401, 403)
         STATUS_ORDER = [200, 301, 302, 307, 401, 403]
@@ -443,14 +443,14 @@ class CardWebParserMixin:
             idor_parts.append(
                 "\nHOW TO EXPLOIT:\n"
                 "  1. Open the lowest-numbered path in your browser:\n"
-                "       curl http://TARGET{path}\n"
+                "       curl http://TARGET/PATH\n"
                 "     Look at the response — does it contain user data, "
                 "files, or sensitive info?\n\n"
                 "  2. Try IDs outside the range you found. If /data/1 "
                 "exists, try /data/0, /data/100, /data/999:\n"
                 "       for i in $(seq 0 100); do\n"
-                "         curl -s -o /dev/null -w \"%{{http_code}} %{{size_download}}\\n\""
-                " http://TARGET{prefix}$i\n"
+                "         curl -s -o /dev/null -w \"%{http_code} %{size_download}\\n\""
+                " http://TARGET/PATH$i\n"
                 "       done\n"
                 "     Different response sizes = different content = "
                 "you are accessing other users' resources.\n\n"
@@ -1354,9 +1354,13 @@ class CardWebParserMixin:
         for f in findings:
             tid = f["tid"].lower()
             if tid.startswith("cve-"):
+                # nuclei template ids can carry a ':variant' suffix
+                # (e.g. CVE-2021-1234:version) that breaks a copy-pasted
+                # searchsploit / msf search — drop it for the command hints.
+                cve = f["tid"].split(":", 1)[0]
                 suggestions.append(
-                    f"searchsploit {f['tid']}   "
-                    f"# or msf search cve:{f['tid'].split('-',1)[1]}")
+                    f"searchsploit {cve}   "
+                    f"# or msf search cve:{cve.split('-',1)[1]}")
             elif "default-login" in tid or tid.endswith("-default"):
                 suggestions.append(
                     f"# try default creds against {f['url']}")

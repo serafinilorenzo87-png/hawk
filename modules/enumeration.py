@@ -131,7 +131,7 @@ class EnumerationModule(BaseModule):
                   "this when ENUM4LINUX returns nothing OR when you "
                   "need to drill down on a specific user / SID / trust "
                   "(enum4linux is a fixed-query sweep — rpcclient is "
-                  "the bisturi)."),
+                  "the scalpel)."),
             # Anonymous null session: -U '' -N forces an empty username
             # with no password.  Routed via _open_terminal so the user
             # gets the live `rpcclient $>` prompt — capturing rpcclient

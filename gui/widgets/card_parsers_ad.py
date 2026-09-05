@@ -1051,7 +1051,7 @@ class CardADParserMixin:
                  f"-out <HAWK>/outputs/esc"]
 
         esc_names = sorted({v[1] for v in vulns})
-        title = (f"CERTIPY — AD CS vulnerable on {target}  "
+        title = (f"CERTIPY FIND — AD CS vulnerable on {target}  "
                  f"({', '.join(esc_names)})")
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=title, description="\n".join(desc),

@@ -747,7 +747,7 @@ TOOL_BRIEFS = {
     "amass":        "Deep subdomain enumeration — passive + active, ASN mapping.",
     # Scanning
     "nmap":         "The standard port scanner. Finds open ports, services, OS. Run Quick first, then Full.",
-    "masscan":      "Ultra-fast SYN scanner — scans all 65535 ports in seconds. Use after nmap for speed.",
+    "masscan":      "Ultra-fast SYN scanner — scans all 65535 ports in seconds. Run first for a quick sweep, then nmap for service/version detail.",
     "rustscan":     "Fastest port scanner — scans all 65535 ports in ~3s, then pipes results to nmap for service detection. Use when nmap is too slow on large ranges or for a first fast look.",
     # Enumeration
     "gobuster":     "Brute-force web directories and subdomains. Use with a good wordlist.",

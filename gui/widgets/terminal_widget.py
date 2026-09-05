@@ -76,7 +76,7 @@ def _map_nmap_phase(name_lower: str):
 
 # ─── Finding explanations ─────────────────────────────────────────────────────
 EXPLANATIONS = {
-    "/admin/":              "This path responds without authentication or with weak credentials. Try admin:admin, admin:password, or use Hydra HTTP-GET for brute force.",
+    "/admin":               "This path responds without authentication or with weak credentials. Try admin:admin, admin:password, or use Hydra HTTP-GET for brute force.",
     "/backup":              "Backup directories often contain config files, database dumps or private keys. Browse manually and check contents.",
     "/phpmyadmin":          "Database admin panel exposed. Try default credentials: root:(empty), root:root, admin:admin.",
     "x-frame-options":      "Missing header — clickjacking possible. The app may be embeddable in an attacker-controlled iframe.",
@@ -214,8 +214,9 @@ def _parse_gobuster(lines):
         summary_parts = []
         for code in sorted(status_counts.keys()):
             summary_parts.append(f"{code}:{status_counts[code]}")
+        _pw = "path" if len(entries) == 1 else "paths"
         out.append(("info",
-                     f"\n  ── {len(entries)} paths found  "
+                     f"\n  ── {len(entries)} {_pw} found  "
                      f"({', '.join(summary_parts)})"))
     return out
 
@@ -569,7 +570,7 @@ def _parse_generic(lines):
             out.append(("finding", l))
             exp = _explain(l, seen)
             if exp:
-                out.append(("dim", f"  → {exp}"))
+                out.append(("dim", f"       → {exp}"))
         elif any(k in low for k in ["error", "failed", "[!]", "denied",
                                      "not found", "no such"]):
             out.append(("error", l))
