@@ -77,6 +77,64 @@ def kerbrute_run_summary(lines: list, rc: int) -> str:
     return f"Exited rc={rc}; nothing captured."
 
 
+def _proxychains_scan_dispatch(log, target_intel, parse_output_to_intel_cb,
+                                tool, terminal=None):
+    """Ramo dedicato per proxychains_scan (extracted so it can be unit-
+    tested end-to-end without importing customtkinter-heavy modules).
+
+    Strips [proxychains]-prefixed noise from the raw runner log, then
+    fires TWO sinks with the cleaned data:
+
+      1. target_intel.update_from_nmap([strings]) — structured port
+         parser (populates Ports / System Info panel).  Extract the
+         string half of each (ts, line) tuple FIRST: from_nmap_output
+         calls .strip() on every element, which raises AttributeError
+         on tuples and used to silently blank the Ports panel until
+         the caller learnt to unpack the tuples.
+
+      2. parse_output_to_intel_cb(tool, clean_log) — the visible
+         auto_finding in Target Intel ("PROXYCHAINS NMAP on <target>")
+         with no [proxychains] lines in the description.
+
+    Errors get logged to stderr AND to the terminal at "warn" level
+    when a terminal handle is provided — surfacing them prevents the
+    silent-swallow that masked the tuple/strings bug in production.
+    """
+    if not log:
+        return
+    clean_log = [
+        (ts, line) for ts, line in log
+        if not line.startswith("[proxychains]")
+    ]
+    if not clean_log:
+        return
+    if target_intel is not None:
+        try:
+            target_intel.update_from_nmap(
+                [line for _, line in clean_log])
+        except Exception as e:
+            msg = f"[HAWK] proxychains nmap-parse error: {e}"
+            print(msg)
+            if terminal is not None:
+                try:
+                    terminal.write(
+                        f"  [!] proxychains nmap parser failed: {e} "
+                        f"— ports not extracted", "warn")
+                except Exception:
+                    pass
+    try:
+        parse_output_to_intel_cb(tool, clean_log)
+    except Exception as e:
+        msg = f"[HAWK] proxychains finding-push error: {e}"
+        print(msg)
+        if terminal is not None:
+            try:
+                terminal.write(
+                    f"  [!] proxychains finding push failed: {e}", "warn")
+            except Exception:
+                pass
+
+
 class CardRuntimeMixin:
     def _osint_preflight(self, tool) -> bool:
         """
@@ -2122,23 +2180,12 @@ class CardRuntimeMixin:
             # the raw log at line 2069 (which would push a second
             # noisy finding + explain the ~30 s UI freeze).
             if tool.id == "proxychains_scan" and log:
-                clean_log = [
-                    (ts, line) for ts, line in log
-                    if not line.startswith("[proxychains]")
-                ]
-                if clean_log:
-                    if hasattr(self.app, "target_intel"):
-                        try:
-                            self.app.target_intel.update_from_nmap(
-                                clean_log)
-                        except Exception as e:
-                            print(f"[HAWK] proxychains nmap-parse "
-                                  f"error: {e}")
-                    try:
-                        self._parse_output_to_intel(tool, clean_log)
-                    except Exception as e:
-                        print(f"[HAWK] proxychains finding-push "
-                              f"error: {e}")
+                _proxychains_scan_dispatch(
+                    log,
+                    getattr(self.app, "target_intel", None),
+                    self._parse_output_to_intel,
+                    tool,
+                    getattr(self.app, "terminal", None))
 
             self._run_defense_detection(log, tool_name)
 
