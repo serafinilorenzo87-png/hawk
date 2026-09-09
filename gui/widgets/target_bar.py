@@ -247,10 +247,19 @@ class TargetBar(ctk.CTkFrame):
         self._domain_entry.grid(row=2, column=1, columnspan=2, padx=4, pady=3, sticky="w")
         self._domain_entry.bind("<Return>", lambda e: self._save_domain())
 
-        # SAVE/CHANGE + DELETE buttons live in a shared sub-frame so they
-        # stay glued together regardless of column 3's weight=1 stretching.
+        # SAVE/CHANGE + DELETE + the "Saved - <domain>" status live in a
+        # shared sub-frame so they stay glued together.  It spans columns
+        # 3->9 (columnspan) instead of sitting in column 3 alone: the
+        # status label is variable-width, and in a single column it
+        # ballooned column 3 whenever a domain was saved / loaded, which
+        # pushed the row-0 action buttons (DELETE SESSION) and the row-4
+        # ARGUS button off the right edge.  Spanning lets that width be
+        # absorbed by the weight=1 spacer / button columns, so column 3
+        # stays as narrow as the platform selector above it regardless of
+        # the domain length.
         domain_btns = ctk.CTkFrame(self, fg_color="transparent")
-        domain_btns.grid(row=2, column=3, padx=4, pady=(0, 3), sticky="w")
+        domain_btns.grid(row=2, column=3, columnspan=7, padx=4, pady=(0, 3),
+                         sticky="w")
 
         # SAVE/CHANGE button — label switches to "CHANGE" once a domain has
         # been persisted on the current session.
