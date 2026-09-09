@@ -501,8 +501,26 @@ class CardOracleRoutesMixin:
         def _do_launch(final_url):
             _safe_destroy(win)
 
-            depth = max(1, min(5, int(depth_var.get() or "2")))
-            idor_max = max(5, min(100, int(idor_var.get() or "20")))
+            # Depth / IDOR range are free-text: parse defensively (a
+            # non-numeric value must not crash the launch) and clamp to the
+            # supported range, telling the operator when their value was
+            # adjusted (e.g. depth 8 -> 5).
+            def _clamped_int(raw, default, lo, hi, label):
+                try:
+                    val = int(str(raw).strip())
+                except (TypeError, ValueError):
+                    val = default
+                clamped = max(lo, min(hi, val))
+                if clamped != val:
+                    self.app.terminal.write(
+                        f"  [*] {label} {val} out of range — using "
+                        f"{clamped} (allowed {lo}-{hi}).", "dim")
+                return clamped
+
+            depth = _clamped_int(depth_var.get() or "2", 2, 1, 5,
+                                 "Crawl depth")
+            idor_max = _clamped_int(idor_var.get() or "20", 20, 5, 100,
+                                    "IDOR range")
             follow = follow_var.get()
             extract_js = js_var.get()
 
