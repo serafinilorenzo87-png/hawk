@@ -1489,9 +1489,15 @@ class CardOracleRoutesMixin:
         title = f"Bloody Crawl on {start_url}"
 
         def _push():
+            # replace=True: each Bloody Crawl run is a COMPLETE snapshot of
+            # the crawl, so a rerun must SUPERSEDE the previous card instead
+            # of appending another full listing (which stacked two crawls'
+            # forms/params/IDOR into one ever-growing wall).  Per-run history
+            # stays in occurrences.  Same shape as nuclei / nikto / the
+            # dir-busters.
             self.app.target_intel.add_auto_finding(
                 title=title, description=desc,
-                severity=severity, source="Bloody Crawl")
+                severity=severity, source="Bloody Crawl", replace=True)
             # Login/password forms feed the Hydra HTTP picker.
             if login_paths:
                 try:
