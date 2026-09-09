@@ -513,6 +513,26 @@ class CardOracleRoutesMixin:
             # tool history); finish is applied by _on_done (worker/crash).
             self._record_tool_start(tool, f"bloody_crawl {final_url}")
 
+            # Cooperative STOP: the worker runs in a thread and polls
+            # assault_state.is_cancelled() every loop, so register a tiny
+            # runner whose kill() flips that flag (and _kill_requested, for
+            # _on_done's abort guard) and turn the tool-row RUN button into
+            # STOP.  _on_done resets it when the worker winds down.
+            class _CrawlStopHandle:
+                def __init__(self, app):
+                    self._app = app
+                    self._kill_requested = False
+
+                def kill(self):
+                    self._kill_requested = True
+                    st = getattr(self._app, "assault_state", None)
+                    if st is not None:
+                        st.cancel()
+                    return True
+
+            self._tool_runners[tool.id] = _CrawlStopHandle(self.app)
+            self._toggle_run_btn(tool, True)
+
             # The worker has no top-level try/except — if it raises
             # (network blip, parser error, …) the thread dies silently
             # and the status icon stays "running" (yellow dot) forever.
@@ -1118,7 +1138,7 @@ class CardOracleRoutesMixin:
             return hits
 
         js_secrets_found = []
-        if extract_js:
+        if extract_js and not _state_cancelled():
             # Scan inline <script> blocks from crawled pages
             inline_count = 0
             for crawled_url, crawled_html in visited_html.items():
@@ -1205,6 +1225,9 @@ class CardOracleRoutesMixin:
                       if extra else ""), "info")
             parsed_base = urlparse(start_url)
             for idor in idor_probe:
+                if _state_cancelled():
+                    _write("  [!] IDOR detection cancelled by user.", "warn")
+                    break
                 if _time_or_req_exhausted():
                     _cap_notice()
                     break
