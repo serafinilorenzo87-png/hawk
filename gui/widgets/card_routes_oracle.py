@@ -526,6 +526,63 @@ class CardOracleRoutesMixin:
         _btn(row, "START CRAWL", _launch, primary=True, w=180)
         _btn(row, "CANCEL", lambda: _safe_destroy(win), w=120)
 
+    @staticmethod
+    def _build_param_urls(start_url, params):
+        """Reconstruct ``base?param=value`` URLs from crawled GET query
+        parameters, for the SQLMap picker.
+
+        The SQLMap target picker (``_collect_sqlmap_candidates``) does not
+        read AssaultState or discovered_web_paths — it text-scans Target
+        Intel finding descriptions for ``https?://host:port/...?name=...``
+        URLs whose host matches its own ``base_url`` (which always carries
+        an explicit ``:port``).  So the URLs are emitted with a canonical
+        ``host:port`` taken from the crawl start URL (adding the default
+        port when the URL omits it), otherwise a default-port target would
+        never match and SQLMap would silently see nothing.
+
+        One URL per (path, set-of-parameter-names); a representative value
+        per parameter (the sample seen during the crawl, sanitised of any
+        character that would truncate the picker's URL regex, else ``1``).
+        """
+        from urllib.parse import urlparse, urlunparse
+        sp = urlparse(start_url or "")
+        scheme = sp.scheme or "http"
+        host = sp.hostname or ""
+        port = sp.port or (443 if scheme == "https" else 80)
+        netloc = f"{host}:{port}" if host else ""
+
+        groups = {}   # path -> {name: value}, first value wins
+        order = []
+        for p in params or []:
+            if (getattr(p, "where", "query") or "query") != "query":
+                continue
+            if (getattr(p, "method", "GET") or "GET").upper() != "GET":
+                continue
+            name = (getattr(p, "name", "") or "").strip()
+            if not name:
+                continue
+            path = urlparse(getattr(p, "url", "") or "").path or "/"
+            if path not in groups:
+                groups[path] = {}
+                order.append(path)
+            if name not in groups[path]:
+                val = re.sub(r"[\s'\"<>()]", "",
+                             (getattr(p, "sample", "") or "").strip())
+                groups[path][name] = val or "1"
+
+        out, seen = [], set()
+        for path in order:
+            names = groups[path]
+            if not names:
+                continue
+            key = (path, frozenset(names))
+            if key in seen:
+                continue
+            seen.add(key)
+            query = "&".join(f"{n}={v}" for n, v in names.items())
+            out.append(urlunparse((scheme, netloc, path, "", query, "")))
+        return out
+
     def _bloody_crawl_worker(self, tool, start_url, max_depth,
                               idor_max, follow_redirects, extract_js):
         """Background worker — fetches, parses, probes, recurses."""
@@ -1162,6 +1219,42 @@ class CardOracleRoutesMixin:
                     parts.append(
                         f"    fields: {', '.join(f['fields'])}")
 
+        # Parameterised URLs — reconstructed base?param= targets for the
+        # SQLMap picker, which text-scans finding descriptions for such
+        # URLs (it reads neither AssaultState nor discovered_web_paths).
+        # Content pages without parameters are intentionally left out so
+        # they don't flood the picker.
+        param_urls = self._build_param_urls(
+            start_url, state.get_parameters() if state is not None else [])
+        if param_urls:
+            parts.append(f"\n{'─' * 50}")
+            parts.append(f"PARAMETERISED URLS ({len(param_urls)}):\n")
+            parts.append(
+                "  URLs with query parameters — SQLmap injection targets:")
+            for u in param_urls[:30]:
+                parts.append(f"    {u}")
+            if len(param_urls) > 30:
+                parts.append(f"    ... and {len(param_urls) - 30} more")
+
+        # Login/password forms → discovered_web_paths, so the Hydra HTTP
+        # picker offers the crawl's real auth endpoints.  Only password
+        # forms are kept (content pages would flood the picker).
+        login_paths = []
+        _seen_login = set()
+        for f in forms_found:
+            if not f.get("has_password"):
+                continue
+            action = f.get("action") or ""
+            if not action or action in _seen_login:
+                continue
+            _seen_login.add(action)
+            probe = all_endpoints.get(_normalize(action))
+            login_paths.append({
+                "path": action,
+                "status": int(probe["status"]) if probe else 200,
+                "size": int(probe["size"]) if probe else 0,
+            })
+
         # IDOR
         if idor_findings:
             parts.append(f"\n{'─' * 50}")
@@ -1258,6 +1351,15 @@ class CardOracleRoutesMixin:
             self.app.target_intel.add_auto_finding(
                 title=title, description=desc,
                 severity=severity, source="Bloody Crawl")
+            # Login/password forms feed the Hydra HTTP picker.
+            if login_paths:
+                try:
+                    sess = self.app.session_manager.current
+                    if sess is not None:
+                        sess.add_discovered_web_paths(login_paths)
+                except Exception as e:
+                    print(f"[HAWK] Bloody Crawl discovered_web_paths "
+                          f"save failed: {e}")
             for jf in js_findings:
                 # raw_description = same render_description but with
                 # un-masked values.  Passed in-memory only (stripped
