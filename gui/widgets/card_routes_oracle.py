@@ -1293,15 +1293,35 @@ class CardOracleRoutesMixin:
 
         # Forms
         if forms_found:
-            parts.append(f"\n{'─' * 50}")
-            parts.append(f"FORMS DETECTED ({len(forms_found)}):\n")
+            # Dedup identical forms and float login/password forms to the
+            # top (the actionable ones); cap the list so a form-heavy app
+            # (every wiki edit/attach page carries a form) can't bury the
+            # signal under hundreds of lines.
+            _seen_forms = set()
+            _uniq_forms = []
             for f in forms_found:
+                key = (f.get("method"), f.get("action"),
+                       bool(f.get("has_password")))
+                if key in _seen_forms:
+                    continue
+                _seen_forms.add(key)
+                _uniq_forms.append(f)
+            _uniq_forms.sort(
+                key=lambda f: 0 if f.get("has_password") else 1)
+            FORMS_SHOWN = 25
+            parts.append(f"\n{'─' * 50}")
+            parts.append(f"FORMS DETECTED ({len(_uniq_forms)} unique):\n")
+            for f in _uniq_forms[:FORMS_SHOWN]:
                 pwd_tag = " 🔑 LOGIN FORM" if f["has_password"] else ""
                 parts.append(
                     f"  {f['method']} {f['action']}{pwd_tag}")
                 if f["fields"]:
                     parts.append(
                         f"    fields: {', '.join(f['fields'])}")
+            if len(_uniq_forms) > FORMS_SHOWN:
+                parts.append(
+                    f"  … and {len(_uniq_forms) - FORMS_SHOWN} more "
+                    f"(login/password forms shown first)")
 
         # Parameterised URLs — reconstructed base?param= targets for the
         # SQLMap picker, which text-scans finding descriptions for such
@@ -1319,14 +1339,21 @@ class CardOracleRoutesMixin:
             state.get_parameters() if state is not None else [],
             _good_paths)
         if param_urls:
+            PARAM_SHOWN = 50
+            total_params = len(param_urls)
             parts.append(f"\n{'─' * 50}")
-            parts.append(f"PARAMETERISED URLS ({len(param_urls)}):\n")
+            parts.append(
+                f"PARAMETERISED URLS ({total_params}"
+                + (f", showing first {PARAM_SHOWN}"
+                   if total_params > PARAM_SHOWN else "")
+                + "):\n")
             parts.append(
                 "  URLs with query parameters — SQLmap injection targets:")
-            for u in param_urls[:30]:
+            for u in param_urls[:PARAM_SHOWN]:
                 parts.append(f"    {u}")
-            if len(param_urls) > 30:
-                parts.append(f"    ... and {len(param_urls) - 30} more")
+            if total_params > PARAM_SHOWN:
+                parts.append(
+                    f"    … and {total_params - PARAM_SHOWN} more")
 
         # Login/password forms → discovered_web_paths, so the Hydra HTTP
         # picker offers the crawl's real auth endpoints.  Only password
@@ -1393,17 +1420,20 @@ class CardOracleRoutesMixin:
                                  else f"{sz / 1024:.0f}KB")
                         parts.append(
                             f"    {idor['prefix']}{bid}  ({human})")
-                parts.append(
-                    "\n  HOW TO EXPLOIT:\n"
-                    "    1. Visit each accessible ID in the browser\n"
-                    "    2. Check if the content changes between IDs\n"
-                    "    3. If yes → different users' data is exposed\n"
-                    "    4. Download the BIG files — they may contain "
-                    "credentials, PCAPs, or backups\n"
-                    "    5. Log in as user A → note your ID → try "
-                    "user B's ID\n"
-                    "    6. In Burp Intruder: set ID as payload, "
-                    "Numbers 0-1000, sort by response length")
+            # Exploitation guidance once, after all candidates — it is
+            # identical for every candidate, so repeating it per-candidate
+            # only buried the list.
+            parts.append(
+                "\n  HOW TO EXPLOIT (applies to the candidates above):\n"
+                "    1. Visit each accessible ID in the browser\n"
+                "    2. Check if the content changes between IDs\n"
+                "    3. If yes → different users' data is exposed\n"
+                "    4. Download the BIG files — they may contain "
+                "credentials, PCAPs, or backups\n"
+                "    5. Log in as user A → note your ID → try "
+                "user B's ID\n"
+                "    6. In Burp Intruder: set ID as payload, "
+                "Numbers 0-1000, sort by response length")
 
         # JS Secrets summary in the main finding
         if js_findings:
