@@ -3236,13 +3236,25 @@ class _SessionPickerDialog(ctk.CTkToplevel):
         try:
             self.update_idletasks()
             sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
-            # Minimums bumped to 820x580 — same rationale as the
-            # initial geometry: narrow windows truncate the right-side
-            # LOAD / 🗑 buttons on each session row.  Padding bumped
-            # from 40 to 60 so reqwidth/reqheight estimates don't
-            # undershoot on Kali's GTK theme which reports slightly
-            # smaller than the actual rendered size.
-            w = min(max(self.winfo_reqwidth() + 60, 820),
+            # The rows live inside a CTkScrollableFrame, which does NOT
+            # surface its content width through the Toplevel's reqwidth.
+            # So a long metadata line (many tools/creds/findings) overflows
+            # the viewport and clips the right-side LOAD / 🗑 buttons, and
+            # the dialog never grows to fit.  Measure the widest row
+            # directly and size the dialog to it (+ scrollbar/border/pad).
+            rows_w = 0
+            try:
+                for child in self._scroll.winfo_children():
+                    rows_w = max(rows_w, child.winfo_reqwidth())
+            except Exception:
+                pass
+            content_w = rows_w + 90 if rows_w else 0
+            # Minimums kept at 820x580 — narrow windows truncate the
+            # right-side LOAD / 🗑 buttons on each session row.  Padding
+            # is 60 so reqwidth/reqheight estimates don't undershoot on
+            # Kali's GTK theme which reports slightly smaller than the
+            # actual rendered size.
+            w = min(max(content_w, self.winfo_reqwidth() + 60, 820),
                     int(sw * 0.92))
             h = min(max(self.winfo_reqheight() + 60, 580),
                     int(sh * 0.92))
