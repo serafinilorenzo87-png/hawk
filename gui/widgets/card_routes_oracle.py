@@ -159,23 +159,82 @@ class CardOracleRoutesMixin:
              "next attack steps.",
              COLORS["text_dim"])
 
-        # Binary detection banner — tells the user what Oracle will
-        # actually do with the tools available right now.
-        bins = detect_available_binaries()
-        present = [n for n in ("whatweb", "httpx", "nuclei",
-                                "katana", "curl")
-                   if bins.get(n)]
-        missing = [n for n in ("whatweb", "httpx", "nuclei", "katana")
-                   if not bins.get(n)]
-        _note_box(
-            win,
-            "Installed binaries Oracle will use:\n"
-            f"  ✓  {', '.join(present) or '(none)'}\n"
-            + (f"  ✗  missing (will skip): {', '.join(missing)}\n"
-               if missing else "")
-            + "\nMissing binaries only downgrade coverage — the scan "
-              "still runs with whatever is available.",
-            COLORS["border_dim"])
+        # Binary detection panel — shows what Oracle will use and offers a
+        # one-click INSTALL (in an xterm) for any missing binary, with
+        # RE-CHECK to refresh after installing.  Missing tools are simply
+        # skipped; Oracle still runs with whatever is present.
+        from utils.runner import _open_terminal
+        ORACLE_BIN_PKG = {
+            "whatweb": "whatweb",
+            "httpx":   "httpx-toolkit",   # ProjectDiscovery's, not py httpx
+            "nuclei":  "nuclei",
+            "katana":  "katana",
+        }
+        bin_panel = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                                 border_color=COLORS["border_dim"],
+                                 border_width=1, corner_radius=4)
+        bin_panel.pack(fill="x", padx=24, pady=(4, 6))
+
+        def _install_pkg(pkg):
+            _open_terminal(
+                f"HAWK — install {pkg}",
+                f"echo '=== Installing {pkg} ==='; "
+                f"sudo apt update && sudo apt install -y {pkg}; "
+                f"echo; read -p 'Done. Press ENTER to close, then click "
+                f"RE-CHECK in HAWK.'")
+
+        def _render_bins():
+            for w in bin_panel.winfo_children():
+                w.destroy()
+            bins = detect_available_binaries()
+            present = [n for n in ("whatweb", "httpx", "nuclei",
+                                    "katana", "curl") if bins.get(n)]
+            missing = [n for n in ("whatweb", "httpx", "nuclei", "katana")
+                       if not bins.get(n)]
+            ctk.CTkLabel(
+                bin_panel,
+                text=f"  ✓  present: {', '.join(present) or '(none)'}",
+                font=_f("sm"), text_color=COLORS["text_green"],
+                anchor="w").pack(fill="x", padx=10, pady=(6, 2))
+            for name in missing:
+                pkg = ORACLE_BIN_PKG.get(name, name)
+                brow = ctk.CTkFrame(bin_panel, fg_color="transparent")
+                brow.pack(fill="x", padx=10, pady=1)
+                ctk.CTkLabel(
+                    brow,
+                    text=f"  ✗  {name} — not installed (apt: {pkg})",
+                    font=_f("sm"), text_color=COLORS["text_yellow"],
+                    anchor="w").pack(side="left")
+                ctk.CTkButton(
+                    brow, text="INSTALL", width=74, height=22,
+                    font=_f("xs", True),
+                    fg_color=COLORS["bg_primary"],
+                    hover_color=COLORS["bg_card_hover"],
+                    border_color=COLORS["border_green"], border_width=1,
+                    text_color=COLORS["text_green"], corner_radius=3,
+                    command=lambda p=pkg: _install_pkg(p),
+                ).pack(side="right")
+            foot = ctk.CTkFrame(bin_panel, fg_color="transparent")
+            foot.pack(fill="x", padx=10, pady=(2, 6))
+            ctk.CTkLabel(
+                foot,
+                text=("Missing tools are skipped — Oracle still runs with "
+                      "what's present."
+                      if missing else "All Oracle binaries present."),
+                font=_f("xs"), text_color=COLORS["text_dim"],
+                anchor="w").pack(side="left")
+            if missing:
+                ctk.CTkButton(
+                    foot, text="RE-CHECK", width=84, height=22,
+                    font=_f("xs", True),
+                    fg_color=COLORS["bg_primary"],
+                    hover_color=COLORS["bg_card_hover"],
+                    border_color=COLORS["border_dim"], border_width=1,
+                    text_color=COLORS["text_bright"], corner_radius=3,
+                    command=_render_bins,
+                ).pack(side="right")
+
+        _render_bins()
 
         url_var = ctk.StringVar(value=default_url)
         # Host dropdown above the URL field — auto-rewrites the hostname

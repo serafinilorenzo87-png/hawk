@@ -410,6 +410,16 @@ class WebOracleRunner:
             self._emit(
                 "  [oracle] all workers complete — aggregating profile.",
                 tool_name, "info")
+            # Service summary: what actually ran vs what was skipped for
+            # not being installed (so the operator knows the coverage).
+            self._emit(
+                f"  [oracle] tools used: {', '.join(present) or '(none)'}",
+                tool_name, "info")
+            if missing:
+                self._emit(
+                    f"  [oracle] not run (not installed): "
+                    f"{', '.join(missing)} — install for fuller coverage",
+                    tool_name, "info")
 
             profile = self._build_profile(url)
             # API discovery — framework-aware probes that depend on
