@@ -2451,7 +2451,12 @@ class CardWebRoutesMixin:
 
         from gui.dialogs import (_make_win, _title, _sub, _note_box,
                                   _btn_row, _btn, _safe_destroy)
-        win = _make_win(self, "SQLmap — Scan Configuration", 680, 620)
+        # Wide baseline: the discovered-URL list carries long
+        # ?param=...&...&... targets that were clipped at the old 680px
+        # (the scrollable body constrains children to the window width, so
+        # _make_win's width autofit can't grow to fit them). _make_win
+        # still caps at 90% of the screen.
+        win = _make_win(self, "SQLmap — Scan Configuration", 1360, 620)
         _title(win, "SQLMAP  —  Scan Configuration")
         _sub(win, "SQLmap needs something to inject into. "
                   "Pick a mode below.")
@@ -2663,7 +2668,7 @@ class CardWebRoutesMixin:
         # Warning label (dynamic)
         warn_lbl = ctk.CTkLabel(body, text="", font=_f("xs"),
                                  text_color=COLORS["text_yellow"],
-                                 wraplength=600, justify="left")
+                                 wraplength=1280, justify="left")
         warn_lbl.pack(anchor="w", padx=26, pady=(0, 2))
 
         # Keep sqlmap's session DB + output off any shared/network FS:
@@ -2740,7 +2745,7 @@ class CardWebRoutesMixin:
         preview_lbl = ctk.CTkLabel(
             body, text="", font=_f("sm"),
             text_color=COLORS["text_green"],
-            wraplength=620, justify="left", anchor="w")
+            wraplength=1280, justify="left", anchor="w")
         preview_lbl.pack(anchor="w", fill="x", padx=26, pady=(0, 6))
 
         # Wire updates on every widget change
