@@ -40,6 +40,7 @@ import random
 import string
 import uuid
 from datetime import datetime
+from html import unescape as _html_unescape
 from pathlib import Path
 
 from utils.runner import ToolRunner, MultiRunner, MetasploitRunner, GreenBoneRunner
@@ -527,7 +528,7 @@ class CardOracleRoutesMixin:
         _btn(row, "CANCEL", lambda: _safe_destroy(win), w=120)
 
     @staticmethod
-    def _build_param_urls(start_url, params):
+    def _build_param_urls(start_url, params, good_paths=None):
         """Reconstruct ``base?param=value`` URLs from crawled GET query
         parameters, for the SQLMap picker.
 
@@ -539,6 +540,11 @@ class CardOracleRoutesMixin:
         ``host:port`` taken from the crawl start URL (adding the default
         port when the URL omits it), otherwise a default-port target would
         never match and SQLMap would silently see nothing.
+
+        ``good_paths`` (optional) is the set of URL paths whose endpoint
+        actually resolved to a usable status — when given, params on any
+        other path (dead links: 404/400 TWiki placeholders and the like)
+        are dropped so the picker is not flooded with unreachable targets.
 
         One URL per (path, set-of-parameter-names); a representative value
         per parameter (the sample seen during the crawl, sanitised of any
@@ -562,6 +568,8 @@ class CardOracleRoutesMixin:
             if not name:
                 continue
             path = urlparse(getattr(p, "url", "") or "").path or "/"
+            if good_paths is not None and path not in good_paths:
+                continue
             if path not in groups:
                 groups[path] = {}
                 order.append(path)
@@ -818,6 +826,10 @@ class CardOracleRoutesMixin:
             for ep in raw_refs:
                 if ep.startswith(("javascript:", "mailto:", "tel:", "data:")):
                     continue
+                # Decode HTML entities in the raw href/action (e.g. the
+                # &amp; that separates query params) so the query parses
+                # into real parameter names, not "amp;<name>".
+                ep = _html_unescape(ep)
                 full = urljoin(base_url, ep)
                 fp = urlparse(full)
                 if fp.hostname != base_host:
@@ -1261,9 +1273,17 @@ class CardOracleRoutesMixin:
         # SQLMap picker, which text-scans finding descriptions for such
         # URLs (it reads neither AssaultState nor discovered_web_paths).
         # Content pages without parameters are intentionally left out so
-        # they don't flood the picker.
+        # they don't flood the picker; so are params on dead links
+        # (404/400 TWiki placeholders) via the resolved-status set.
+        _good_paths = {
+            urlparse(u).path
+            for u, pr in all_endpoints.items()
+            if pr.get("status") not in (0, 400, 404)
+        }
         param_urls = self._build_param_urls(
-            start_url, state.get_parameters() if state is not None else [])
+            start_url,
+            state.get_parameters() if state is not None else [],
+            _good_paths)
         if param_urls:
             parts.append(f"\n{'─' * 50}")
             parts.append(f"PARAMETERISED URLS ({len(param_urls)}):\n")

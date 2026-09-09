@@ -118,6 +118,25 @@ class BuildParamUrlTests(unittest.TestCase):
         self.assertIn("id=1", urls[0])
         self.assertIn("cat=books", urls[0])
 
+    def test_good_paths_drops_params_on_dead_links(self):
+        # /view/... is a 404 TWiki placeholder (not in good_paths) and must
+        # be dropped; the reachable /mutillidae/index.php survives.
+        params = [
+            _param("http://192.168.177.134/mutillidae/index.php",
+                   "page", sample="home.php"),
+            _param("http://192.168.177.134/view/TWiki/TWikiHistory",
+                   "rev", sample="1.7"),
+        ]
+        good = {"/mutillidae/index.php"}
+        urls = self.build("http://192.168.177.134/", params, good)
+        self.assertEqual(
+            urls, ["http://192.168.177.134:80/mutillidae/index.php?page=home.php"])
+
+    def test_good_paths_none_keeps_everything(self):
+        params = [_param("http://t/a", "x", sample="1"),
+                  _param("http://t/b", "y", sample="2")]
+        self.assertEqual(len(self.build("http://t/", params)), 2)
+
 
 class SqlmapPickerCrossCheckTests(unittest.TestCase):
     """The emitted block must be readable by the REAL collector."""
