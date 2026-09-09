@@ -1275,6 +1275,110 @@ class CardWebParserMixin:
             "success")
         return True
 
+    # Extractor-output field names nuclei uses for recovered logins.
+    _NUCLEI_USER_KEYS = {
+        "username", "usernames", "user", "users", "login", "logins",
+        "uid", "account",
+    }
+    _NUCLEI_PASS_KEYS = {
+        "password", "passwords", "pass", "passwd", "pwd", "secret",
+    }
+    # (keyword tuple, service label, default port, default username).
+    # The default username is only used to complete a cred when a template
+    # extracts the password alone (e.g. postgres-default-logins printing
+    # passwords="postgres" against the well-known postgres account).
+    _NUCLEI_SVC_TABLE = (
+        (("postgres", "pgsql", "postgresql"), "PostgreSQL", 5432, "postgres"),
+        (("mysql", "mariadb"),                "MySQL",      3306, "root"),
+        (("mssql", "sqlserver", "sql-server"), "MSSQL",     1433, "sa"),
+        (("mongodb", "mongo"),                "MongoDB",   27017, None),
+        (("redis",),                          "Redis",      6379, None),
+        (("ftp",),                            "FTP",          21, "anonymous"),
+        (("ssh",),                            "SSH",          22, None),
+        (("telnet",),                         "Telnet",       23, None),
+        (("smtp",),                           "SMTP",         25, None),
+        (("vnc",),                            "VNC",        5900, None),
+        (("rdp",),                            "RDP",        3389, None),
+        (("ldap",),                           "LDAP",        389, None),
+    )
+
+    @staticmethod
+    def _extract_nuclei_creds(tid: str, proto: str, url: str, match: str):
+        """Pull confirmed credentials out of a nuclei match's extractor text.
+
+        nuclei's default-login / weak-cred templates print what they
+        recovered in the trailing bracket, and the shape varies by
+        template:  ``usernames="postgres",passwords="postgres"``,
+        ``database=x,password=y,usernames=z``, a bare ``user:pass`` pair,
+        or the password alone.  Returns a list of
+        ``{username, password, service, port}`` dicts (empty when the
+        match carries no usable login).
+        """
+        text = match or ""
+        tid_l = (tid or "").lower()
+        is_cred_tmpl = (
+            "default-login" in tid_l or "default-cred" in tid_l
+            or "default-password" in tid_l or "weak-cred" in tid_l
+            or tid_l.endswith("-default"))
+
+        # Service label / default port / default user from tid + protocol.
+        hay = f"{tid_l} {(proto or '').lower()}"
+        label, def_port, def_user = ((proto or "HTTP").upper(), None, None)
+        for keys, lbl, port, duser in CardWebParserMixin._NUCLEI_SVC_TABLE:
+            if any(k in hay for k in keys):
+                label, def_port, def_user = lbl, port, duser
+                break
+
+        # Port: prefer one embedded in the URL, else the service default.
+        port = None
+        pm = (re.search(r"://[^/]*?:(\d{2,5})\b", url or "")
+              or re.search(r"^[^/\s]+:(\d{2,5})\b", url or ""))
+        if pm:
+            port = int(pm.group(1))
+        port = port or def_port
+
+        users, passes, dbs = [], [], []
+        kv_re = re.compile(
+            r"""(\w+)\s*=\s*("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s,;\]]+)""")
+        for k, v in kv_re.findall(text):
+            kl = k.lower()
+            val = v.strip().strip("\"'")
+            vals = [p.strip() for p in val.split(",") if p.strip()]
+            if kl in CardWebParserMixin._NUCLEI_USER_KEYS:
+                users += vals
+            elif kl in CardWebParserMixin._NUCLEI_PASS_KEYS:
+                passes += vals
+            elif kl in ("database", "db", "dbname"):
+                dbs += vals
+
+        # Bare ``user:pass`` form — only for credential templates, and only
+        # when the match is exactly one token pair, so version noise like
+        # "nginx:1.18" in a non-cred match is never read as a login.
+        if not passes and is_cred_tmpl:
+            cm = re.match(r"^([^\s:@/]+):([^\s:@/]+)$", text.strip())
+            if cm:
+                users, passes = [cm.group(1)], [cm.group(2)]
+
+        # Password alone against a known service → use its default account.
+        if passes and not users and is_cred_tmpl and def_user:
+            users = [def_user]
+
+        if not (users and passes):
+            return []
+
+        # Broadcast a lone value across the other list; otherwise pair
+        # index-wise up to the shorter list.
+        if len(users) == 1:
+            users = users * len(passes)
+        if len(passes) == 1:
+            passes = passes * len(users)
+        db = dbs[0] if dbs else ""
+        out = []
+        for u, p in zip(users, passes):
+            out.append({"username": u, "password": p,
+                        "service": label, "port": port, "db": db})
+        return out
+
     def _parse_nuclei_to_intel(self, tool, log: list) -> bool:
         """Extract nuclei template matches into Target Intel.
 
@@ -1383,6 +1487,64 @@ class CardWebParserMixin:
         # Stable title — count + top severity stay in the description.
         title = f"NUCLEI on {web_label}"
 
+        # ── Confirmed credentials → Credential Store ────────────────
+        # default-login / weak-cred templates authenticate and print the
+        # working login via their extractors.  Surface those as first-class
+        # verified credentials (same shape as the JWT analyzer), deduped by
+        # the store and linked back to this finding so the "🔑 creds" jump
+        # works.  Extractor formats vary per template, so parsing is robust
+        # (key="v", key=v,key=v, or a bare user:pass) rather than one regex.
+        rid = ""
+        cs = getattr(self.app, "cred_store", None)
+        if cs is not None:
+            from utils.run_id import new_run_id
+            target = self._get_target() or web_label
+            seen_creds = set()
+            to_add = []
+            for f in findings:
+                for c in self._extract_nuclei_creds(
+                        f["tid"], f["proto"], f["url"], f["match"]):
+                    key = (c["username"], c["password"],
+                           c["service"], c["port"])
+                    if key in seen_creds:
+                        continue
+                    seen_creds.add(key)
+                    to_add.append((f, c))
+            if to_add:
+                rid = new_run_id()
+                pushed = 0
+                for f, c in to_add:
+                    loc = []
+                    if c.get("port"):
+                        loc.append(f"port {c['port']}")
+                    if c.get("db"):
+                        loc.append(f"db {c['db']}")
+                    loc_note = f" ({', '.join(loc)})" if loc else ""
+                    try:
+                        cs.add_credential(Credential(
+                            username=c["username"],
+                            password=c["password"],
+                            cred_type="cleartext",
+                            services=[c["service"]],
+                            source_phase=getattr(self, "phase_id", ""),
+                            host=target,
+                            notes=(f"Default/weak {c['service']} login "
+                                   f"confirmed by nuclei template "
+                                   f"[{f['tid']}] on {f['url']}"
+                                   f"{loc_note}."),
+                            linked_run_id=rid,
+                            verified=True))
+                        pushed += 1
+                    except Exception as e:
+                        self.app.terminal.write(
+                            f"  [!] Could not push nuclei credential to "
+                            f"Credential Store: {e}", "warn")
+                if pushed:
+                    self.app.terminal.write(
+                        f"  [+] Nuclei — {pushed} credential"
+                        f"{'s' if pushed != 1 else ''} → Credential Store "
+                        f"(verified).", "success")
+
         # replace=True: each nuclei run is a COMPLETE scan snapshot, so a
         # rerun SUPERSEDES the card instead of appending its match list
         # (which would stack two runs' findings).  Per-run history stays
@@ -1391,7 +1553,7 @@ class CardWebParserMixin:
             title=title, description=desc,
             severity=top_sev if top_sev in (
                 "critical","high","medium","low","info") else "info",
-            source=tool.name, replace=True))
+            source=tool.name, linked_run_id=rid, replace=True))
 
         self.app.terminal.write(
             f"  [+] Nuclei — {len(findings)} template match"
