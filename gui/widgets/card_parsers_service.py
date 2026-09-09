@@ -1302,12 +1302,15 @@ class CardServiceParserMixin:
                 f"      impacket-secretsdump {realm}/{u0}:'{p0}'@{target}")
 
         desc = "\n".join(parts)
-        title = (f"KERBRUTE — {len(valid_users)} users, "
-                 f"{len(valid_logins)} logins on {target}")
+        # Stable title (target only) + replace so re-running kerbrute
+        # UPDATES the one finding with a run-count badge instead of
+        # spawning a new finding when the user/login counts change; the
+        # counts live in the description.
+        title = f"KERBRUTE — {target}"
 
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=title, description=desc,
-            severity=severity, source=tool.name))
+            severity=severity, source=tool.name, replace=True))
 
         # Terminal summary so the user sees immediate feedback.
         if valid_users:

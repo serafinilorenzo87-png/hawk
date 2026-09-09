@@ -1745,14 +1745,16 @@ class CardADParserMixin:
                    or asrep_hashes) else
                "high" if admincount else
                "info")
+        # Stable title (target only) so re-running nxc ldap UPDATES the
+        # one finding with a run-count badge instead of spawning a new
+        # finding whenever the user/group counts change.  The counts live
+        # in the description; replace=True refreshes it to the latest run.
         self.app.after(0, lambda:
             self.app.target_intel.add_auto_finding(
-                title=f"NXC LDAP — {target}  ·  "
-                      f"{len(users) + len(special)} users, "
-                      f"{len(groups)} groups",
+                title=f"NXC LDAP — {target}",
                 description="\n".join(desc),
                 severity=sev, source=tool.name,
-                linked_run_id=rid))
+                linked_run_id=rid, replace=True))
 
         self.app.terminal.write(
             f"  [+] nxc ldap parsed — "
@@ -1865,85 +1867,85 @@ class CardADParserMixin:
             return True
 
         # ── Case B: LDIF object records ───────────────────────────────────
-        # Extract per-record blocks split on blank-line-after-dn
         users    = []  # sAMAccountName strings
         groups   = []  # cn strings
         computers = []  # dNSHostName strings
         spn_users = []  # (sAMAccountName, [spns]) — kerberoastable
         asrep_users = []  # sAMAccountName — AS-REP roastable
-        current: dict = {}
 
-        for line in lines:
-            line = line.strip()
-            if not line:
-                # end of record — classify and store
-                if current:
-                    sam  = current.get("samaccountname", "")
-                    ocs  = current.get("objectclass", [])
-                    if isinstance(ocs, str):
-                        ocs = [ocs]
-                    ocs_lo = [o.lower() for o in ocs]
-                    if "user" in ocs_lo and sam:
-                        users.append(sam)
-                        spns = current.get("serviceprincipalname", [])
-                        if isinstance(spns, str):
-                            spns = [spns]
-                        if spns:
-                            spn_users.append((sam, spns))
-                        # DONT_REQUIRE_PREAUTH = flag 0x400000 = 4194304
-                        uac = current.get("useraccountcontrol", "")
-                        try:
-                            if int(uac) & 0x400000:
-                                asrep_users.append(sam)
-                        except (ValueError, TypeError):
-                            pass
-                    elif "group" in ocs_lo:
-                        cn = current.get("cn", "")
-                        if cn:
-                            groups.append(cn)
-                    elif "computer" in ocs_lo:
-                        host = current.get("dnshostname", sam)
-                        if host:
-                            computers.append(host)
-                current = {}
-                continue
+        def _store(rec):
+            """Classify one LDIF record.  objectClass is authoritative when
+            present, but the preset queries usually DON'T request it (the
+            "All Users" preset asks only for sAMAccountName/mail/displayName/
+            memberOf), so fall back to the attributes we do have: a
+            sAMAccountName ending in '$' (or a dNSHostName) is a computer,
+            any other sAMAccountName is a user, a bare cn is a group.
+            Without this fallback every preset that omitted objectClass
+            parsed to zero objects and produced no finding at all."""
+            if not rec:
+                return
+            sam = rec.get("samaccountname", "")
+            ocs = rec.get("objectclass", [])
+            if isinstance(ocs, str):
+                ocs = [ocs]
+            ocs_lo = [o.lower() for o in ocs]
+            if ocs_lo:
+                kind = ("computer" if "computer" in ocs_lo
+                        else "group" if "group" in ocs_lo
+                        else "user" if "user" in ocs_lo else "")
+            elif sam.endswith("$") or rec.get("dnshostname"):
+                kind = "computer"
+            elif sam:
+                kind = "user"
+            elif rec.get("cn"):
+                kind = "group"
+            else:
+                kind = ""
 
-            # Parse attribute: value
-            if ":" in line:
-                attr, _, val = line.partition(":")
-                val = val.strip()
-                attr_lo = attr.strip().lower()
-                if attr_lo == "objectclass":
-                    current.setdefault("objectclass", [])
-                    current["objectclass"].append(val)
-                elif attr_lo == "serviceprincipalname":
-                    current.setdefault("serviceprincipalname", [])
-                    current["serviceprincipalname"].append(val)
-                else:
-                    current[attr_lo] = val
-
-        # process last record if no trailing blank line
-        if current:
-            sam  = current.get("samaccountname", "")
-            ocs_lo = [o.lower() for o in
-                      (current.get("objectclass", [])
-                       if isinstance(current.get("objectclass"), list)
-                       else [current.get("objectclass", "")])]
-            if "user" in ocs_lo and sam:
+            if kind == "user" and sam:
                 users.append(sam)
-                spns = current.get("serviceprincipalname", [])
+                spns = rec.get("serviceprincipalname", [])
                 if isinstance(spns, str):
                     spns = [spns]
                 if spns:
                     spn_users.append((sam, spns))
-            elif "group" in ocs_lo:
-                cn = current.get("cn", "")
+                # DONT_REQUIRE_PREAUTH = flag 0x400000 = 4194304
+                uac = rec.get("useraccountcontrol", "")
+                try:
+                    if int(uac) & 0x400000:
+                        asrep_users.append(sam)
+                except (ValueError, TypeError):
+                    pass
+            elif kind == "group":
+                cn = rec.get("cn", "") or sam
                 if cn:
                     groups.append(cn)
-            elif "computer" in ocs_lo:
-                host = current.get("dnshostname", sam)
+            elif kind == "computer":
+                host = rec.get("dnshostname", "") or sam
                 if host:
                     computers.append(host)
+
+        current: dict = {}
+        for line in lines:
+            line = line.strip()
+            # LDIF records start with `dn:` and are separated by blank
+            # lines; some servers print only a `# comment` between them, so
+            # treat a fresh `dn:` as a record boundary too.
+            if not line or line.lower().startswith("dn:"):
+                _store(current)
+                current = {}
+                if not line:
+                    continue
+            if ":" in line:
+                attr, _, val = line.partition(":")
+                val = val.strip()
+                attr_lo = attr.strip().lower()
+                if attr_lo in ("objectclass", "serviceprincipalname"):
+                    current.setdefault(attr_lo, [])
+                    current[attr_lo].append(val)
+                else:
+                    current[attr_lo] = val
+        _store(current)
 
         total = len(users) + len(groups) + len(computers)
         if total == 0:
@@ -1978,10 +1980,13 @@ class CardADParserMixin:
             desc_lines += ["Computers:"] + [f"  {c}" for c in computers[:20]]
             desc_lines.append("")
 
+        # Stable title (target only) + replace so a repeat ldapsearch
+        # updates the one finding with a badge instead of stacking a new
+        # "N objects" finding each time the object count changes.
         self.app.target_intel.add_auto_finding(
-            title=f"LDAP Enumeration — {total} objects discovered",
+            title=f"LDAP Enumeration — {target}",
             description="\n".join(desc_lines).strip(),
-            severity="info", source="ldapsearch")
+            severity="info", source="ldapsearch", replace=True)
 
         # ── Security findings ─────────────────────────────────────────────
         if spn_users:

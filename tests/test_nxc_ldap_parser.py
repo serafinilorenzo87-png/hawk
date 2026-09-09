@@ -165,15 +165,23 @@ class NxcLdapTableParserTests(unittest.TestCase):
             self.assertIn("Print Operators", groups)
             self.assertIn("Pre-Windows 2000 Compatible Access", groups)
 
-    def test_finding_counts_are_correct(self):
+    def test_finding_has_stable_title_and_counts_in_description(self):
         with self._parser() as (parser, sess, findings):
             parser._parse_nxc_ldap_to_intel(
                 types.SimpleNamespace(id="nxc_ldap", name="NETEXEC LDAP"),
                 _NXC_LDAP_LOG)
             self.assertEqual(1, len(findings))
-            title = findings[0]["title"]
-            self.assertIn("5 users", title)
-            self.assertIn("12 groups", title)
+            f = findings[0]
+            # Title is STABLE (target only, no counts) + replace=True so
+            # re-runs merge into one badge-counted finding instead of
+            # spawning a new one whenever the counts change.
+            self.assertTrue(f["title"].startswith("NXC LDAP"))
+            self.assertIn("192.168.176.177", f["title"])
+            self.assertNotIn("users", f["title"])
+            self.assertTrue(f.get("replace"))
+            # Counts moved to the description.
+            self.assertIn("5", f["description"])
+            self.assertIn("12", f["description"])
 
     def test_finding_lists_all_users_beyond_the_old_20_cap(self):
         """The finding must show the WHOLE enumeration (it is expandable),

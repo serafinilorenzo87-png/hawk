@@ -137,10 +137,16 @@ class KerbruteParserTests(unittest.TestCase):
                 [], store.added,
                 "userenum must not push empty username stubs to the store")
 
-            # A finding summarises the run.
+            # A finding summarises the run, with a STABLE title (target
+            # only) + replace=True so re-runs badge instead of spawning a
+            # new finding; the counts live in the description.
             self.assertEqual(1, len(findings))
-            self.assertIn("2 users", findings[0]["title"])
-            self.assertIn("0 logins", findings[0]["title"])
+            f = findings[0]
+            self.assertTrue(f["title"].startswith("KERBRUTE"))
+            self.assertIn("192.168.176.177", f["title"])
+            self.assertNotIn("users", f["title"])
+            self.assertTrue(f.get("replace"))
+            self.assertIn("2", f["description"])
 
     def test_valid_login_still_lands_in_the_store_verified(self):
         with self._parser("passwordspray") as (parser, sess, store, findings):
