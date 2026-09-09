@@ -603,6 +603,7 @@ class CardOracleRoutesMixin:
         terminal = self.app.terminal
         log = []
         t0 = time.time()
+        req_count = [0]   # every curl request the crawl/IDOR phase makes
 
         # ── AssaultState binding ─────────────────────────────────────
         # First-class citizen now: rebind the shared state to the
@@ -697,6 +698,7 @@ class CardOracleRoutesMixin:
 
         def _head_content_type(url, timeout=5):
             try:
+                req_count[0] += 1
                 r = subprocess.run(
                     ["curl", "-s", "-I", "--max-time", str(timeout), url],
                     capture_output=True, text=True, timeout=timeout + 3)
@@ -719,6 +721,7 @@ class CardOracleRoutesMixin:
                         "--max-filesize", "524288", url]
                 if follow_redirects:
                     args.insert(2, "-L")
+                req_count[0] += 1
                 r = subprocess.run(
                     args, capture_output=True, text=True,
                     timeout=timeout + 5)
@@ -732,6 +735,7 @@ class CardOracleRoutesMixin:
                         "-w", "%{http_code}|%{redirect_url}|%{size_download}",
                         "--max-time", str(timeout)]
                 args.append(url)
+                req_count[0] += 1
                 r = subprocess.run(
                     args, capture_output=True, text=True, timeout=timeout + 5)
                 parts = (r.stdout or "").strip().split("|")
@@ -750,6 +754,7 @@ class CardOracleRoutesMixin:
             current = url
             for _ in range(max_hops):
                 try:
+                    req_count[0] += 1
                     r = subprocess.run(
                         ["curl", "-s", "-o", "/dev/null",
                          "-w", "%{http_code}|%{redirect_url}",
@@ -888,27 +893,49 @@ class CardOracleRoutesMixin:
         redirect_chains = {}
         forms_found = []
 
-        # Global safety cap on how many endpoints the crawl will probe.
-        # max_depth alone does NOT bound the work: each page fans out into
-        # many endpoints, each is probed, and every 200 is re-queued, so a
-        # link-heavy site grows as branching^depth (times redirect/IDOR
-        # probes) and a depth-3 run can reach tens of thousands of
-        # requests.  This ceiling stops discovery regardless of depth.  The
-        # default depth stays 2; the cap is what makes a deeper crawl safe.
-        MAX_ENDPOINTS = 1500
-        _cap_hit = False
+        # Global safety budget.  max_depth + dedup alone do NOT bound the
+        # work: a crawler-trap (calendars, pagination, near-infinite query
+        # spaces) or a slow target lets the crawl grow as branching^depth
+        # (times redirect/IDOR probes) into many minutes / tens of
+        # thousands of requests.  Stop on ANY of: endpoints discovered,
+        # total requests, or wall-clock seconds.  These are target-agnostic
+        # ceilings a normal depth-2 crawl never reaches — they only fire on
+        # runaway spaces; default depth stays 2.  Bounding requests is also
+        # production hygiene: don't hammer the client's app or trip WAF/IDS.
+        MAX_ENDPOINTS    = 1500
+        MAX_REQUESTS     = 2500
+        MAX_SECONDS      = 180
+        MAX_IDOR_TARGETS = 8      # cap sequential-ID enumeration candidates
+        _cap_hit = [False]
+
+        def _time_or_req_exhausted():
+            return (req_count[0] >= MAX_REQUESTS
+                    or (time.time() - t0) >= MAX_SECONDS)
+
+        def _over_budget():
+            return (len(all_endpoints) >= MAX_ENDPOINTS
+                    or _time_or_req_exhausted())
+
+        def _cap_notice():
+            if _cap_hit[0]:
+                return
+            _cap_hit[0] = True
+            if req_count[0] >= MAX_REQUESTS:
+                why = f"request budget ({MAX_REQUESTS} requests)"
+            elif (time.time() - t0) >= MAX_SECONDS:
+                why = f"time budget ({MAX_SECONDS}s)"
+            else:
+                why = f"endpoint cap ({MAX_ENDPOINTS})"
+            _write(f"[!] Crawl {why} reached — stopping to stay bounded. "
+                   f"Narrow the scope or lower the depth for a focused "
+                   f"re-run.", "warn")
 
         while queue:
             if _state_cancelled():
                 _write("[!] Crawl cancelled by user.", "warn")
                 break
-            if len(all_endpoints) >= MAX_ENDPOINTS:
-                if not _cap_hit:
-                    _cap_hit = True
-                    _write(f"[!] Endpoint cap reached ({MAX_ENDPOINTS}) — "
-                           f"stopping crawl to stay bounded. Narrow the "
-                           f"scope or lower depth for a focused re-run.",
-                           "warn")
+            if _over_budget():
+                _cap_notice()
                 break
             current_url, depth = queue.pop(0)
             if current_url in visited:
@@ -987,12 +1014,8 @@ class CardOracleRoutesMixin:
             for ep in endpoints:
                 if ep in all_endpoints:
                     continue
-                if len(all_endpoints) >= MAX_ENDPOINTS:
-                    if not _cap_hit:
-                        _cap_hit = True
-                        _write(f"[!] Endpoint cap reached "
-                               f"({MAX_ENDPOINTS}) — stopping discovery.",
-                               "warn")
+                if _over_budget():
+                    _cap_notice()
                     break
                 probe = _probe(ep)
                 all_endpoints[ep] = probe
@@ -1150,10 +1173,21 @@ class CardOracleRoutesMixin:
 
         idor_findings = []
         if idor_results:
+            # Cap the number of sequential-ID patterns probed: each does
+            # idor_max+1 requests, so an unbounded candidate list is its own
+            # explosion (and noisy enumeration against a live target).
+            idor_probe = idor_results[:MAX_IDOR_TARGETS]
+            extra = len(idor_results) - len(idor_probe)
             _write(f"\n[*] IDOR detection: {len(idor_results)} "
-                   "candidate pattern(s)", "info")
+                   f"candidate pattern(s)"
+                   + (f" — probing first {len(idor_probe)} "
+                      f"({extra} more skipped to stay bounded)"
+                      if extra else ""), "info")
             parsed_base = urlparse(start_url)
-            for idor in idor_results:
+            for idor in idor_probe:
+                if _time_or_req_exhausted():
+                    _cap_notice()
+                    break
                 _write(f"  Testing {idor['prefix']}[0..{idor_max}]...")
                 sizes = {}
                 for i in range(idor_max + 1):
