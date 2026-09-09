@@ -1181,8 +1181,9 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                     extra_t = (f"{s['tech']} tech, "
                                f"{s['api']} api endpoint(s)")
                 elif key == "crawl":
-                    extra_t = (f"{s['params']} params, "
-                               f"{s['uploads']} upload(s), "
+                    extra_t = (f"{s.get('endpoints', 0)} endpoint(s), "
+                               f"{s.get('forms', 0)} form(s), "
+                               f"{s['params']} param(s), "
                                f"{s['jwts']} jwt(s)")
                 elif key == "inject":
                     cnt = len([f for f in _findings_for_target()

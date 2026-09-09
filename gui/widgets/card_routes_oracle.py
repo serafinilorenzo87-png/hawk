@@ -1582,6 +1582,7 @@ class CardOracleRoutesMixin:
                     source="Bloody Crawl",
                     raw_description=raw_desc)
             if state is not None:
+                state.set_crawl_endpoints(len(all_endpoints))
                 state.set_step(
                     "crawl",
                     "error" if state.is_cancelled() else "done")

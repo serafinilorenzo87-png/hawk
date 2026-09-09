@@ -156,6 +156,10 @@ class AssaultState:
         self.upload_forms:  list[UploadForm] = []
         self.jwt_tokens:    list[JwtToken] = []
         self.cookies:       dict[str, str] = {}
+        # Endpoints mapped by Bloody Crawl.  Stored as a count (the full
+        # list lives in the Target Intel finding) so the pipeline DETAILS
+        # dialog can show that the crawl actually produced something.
+        self.crawl_endpoints: int = 0
 
         # Pipeline progress: per-step status string.
         self._steps:        dict[str, str] = {
@@ -209,6 +213,7 @@ class AssaultState:
             self.upload_forms  = []
             self.jwt_tokens    = []
             self.cookies       = {}
+            self.crawl_endpoints = 0
             for s in self.PIPELINE_STEPS:
                 self._steps[s] = "pending"
                 self._step_info[s] = {"started_at": None,
@@ -288,6 +293,13 @@ class AssaultState:
                 info["finished_at"] = None
                 info["error"]       = ""
             self.pipeline_updated_at = now
+        self._notify()
+
+    def set_crawl_endpoints(self, n: int):
+        """Record how many endpoints Bloody Crawl mapped (for the
+        pipeline DETAILS dialog)."""
+        with self._lock:
+            self.crawl_endpoints = int(n)
         self._notify()
 
     def step(self, step: str) -> str:
@@ -442,6 +454,8 @@ class AssaultState:
                 "tech":                 len(self.tech_stack),
                 "api":                  len(self.api_endpoints),
                 "params":               len(self.parameters),
+                "forms":                len(self.forms),
+                "endpoints":            self.crawl_endpoints,
                 "uploads":              len(self.upload_forms),
                 "jwts":                 len(self.jwt_tokens),
                 "exposures":            len(self.exposures),
