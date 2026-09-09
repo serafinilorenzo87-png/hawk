@@ -83,7 +83,7 @@ class TargetBar(ctk.CTkFrame):
         # ── IP Entry ──
         self._ip_entry = ctk.CTkEntry(
             self,
-            width=210, height=28,
+            width=160, height=28,
             placeholder_text="e.g. 10.10.10.1",
             font=ctk.CTkFont(family="Courier New", size=15),
             fg_color    = "#050505",
@@ -183,19 +183,27 @@ class TargetBar(ctk.CTkFrame):
             row=0, column=4, sticky="ew")
 
         # ── Action Buttons ──
+        # Per-button widths trimmed to each label (was a flat 160/120) so
+        # the five buttons + the IP / platform row fit the maximized window
+        # without the last one (DELETE SESSION) spilling past the right
+        # edge.  That overflow also clipped the ARGUS button on the
+        # network-health row, because row 0 is the widest row and sets the
+        # grid's total width, which row 4 (sticky="ew") then inherits.
+        # DELETE SESSION gets 150 px so its full label stops being cut off
+        # inside the button (the old 120 truncated "SESSION").
         btn_cfg = [
-            ("▶  NEW SESSION", self._new_session, COLORS["border_green"], COLORS["text_green"],  "#001500"),
-            ("💾  SAVE",        self._save_session, COLORS["border_dim"],  COLORS["text_dim"],   COLORS["bg_card"]),
-            ("⟳  AUTOSAVE",    self._toggle_autosave, COLORS["border_dim"], COLORS["text_dim"],  COLORS["bg_card"]),
-            ("📂  LOAD",        self._load_session, COLORS["border_dim"],  COLORS["text_dim"],   COLORS["bg_card"]),
-            ("🗑  DELETE SESSION", self._delete_session, COLORS["text_red"],     COLORS["text_red"],    "#1A0000"),
+            ("▶  NEW SESSION",    self._new_session,      COLORS["border_green"], COLORS["text_green"], "#001500",          150),
+            ("💾  SAVE",           self._save_session,     COLORS["border_dim"],   COLORS["text_dim"],   COLORS["bg_card"],   88),
+            ("⟳  AUTOSAVE",       self._toggle_autosave,  COLORS["border_dim"],   COLORS["text_dim"],   COLORS["bg_card"],  118),
+            ("📂  LOAD",           self._load_session,     COLORS["border_dim"],   COLORS["text_dim"],   COLORS["bg_card"],   88),
+            ("🗑  DELETE SESSION", self._delete_session,   COLORS["text_red"],     COLORS["text_red"],   "#1A0000",          150),
         ]
 
-        for idx, (label, cmd, border, fg, bg) in enumerate(btn_cfg):
+        for idx, (label, cmd, border, fg, bg, bwidth) in enumerate(btn_cfg):
             btn = ctk.CTkButton(
                 self,
                 text=label,
-                width=160 if idx == 0 else 120,
+                width=bwidth,
                 height=28,
                 font=ctk.CTkFont(family="Courier New", size=13, weight="bold" if idx == 0 else "normal"),
                 fg_color     = bg,
@@ -206,7 +214,7 @@ class TargetBar(ctk.CTkFrame):
                 corner_radius = 3,
                 command=cmd,
             )
-            btn.grid(row=0, column=5 + idx, padx=4, pady=3)
+            btn.grid(row=0, column=5 + idx, padx=2, pady=3)
             # Keep a handle on the AUTOSAVE button so _toggle_autosave
             # can repaint it green/gray on state change.
             if "AUTOSAVE" in label:
@@ -249,7 +257,7 @@ class TargetBar(ctk.CTkFrame):
         self._save_domain_btn = ctk.CTkButton(
             domain_btns,
             text="💾  SAVE DOMAIN",
-            width=160, height=28,
+            width=150, height=28,
             font=ctk.CTkFont(family="Courier New", size=13),
             fg_color     = COLORS["bg_card"],
             hover_color  = "#1A1A1A",
@@ -265,7 +273,7 @@ class TargetBar(ctk.CTkFrame):
         self._delete_domain_btn = ctk.CTkButton(
             domain_btns,
             text="🗑  DELETE",
-            width=120, height=28,
+            width=112, height=28,
             font=ctk.CTkFont(family="Courier New", size=13),
             fg_color     = "#1A0000",
             hover_color  = "#2A0505",
