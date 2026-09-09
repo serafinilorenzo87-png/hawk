@@ -771,8 +771,12 @@ class CardOracleRoutesMixin:
         JS_EXT = {".js"}
 
         def _extract_endpoints(html, base_url):
-            """Returns (endpoints, js_urls) — js_urls are collected
-            separately for the JS secrets scanner."""
+            """Returns (endpoints, js_urls, param_full).
+
+            endpoints are normalised (query-stripped); js_urls feed the JS
+            secrets scanner; param_full are the same-host full URLs that
+            carry a query string, kept so their GET params can be harvested
+            (the endpoint set drops them)."""
             raw_refs = set()
             for pat in [
                 r'href=["\']([^"\'#]+)["\']',
@@ -809,6 +813,7 @@ class CardOracleRoutesMixin:
 
             resolved = set()
             js_urls = set()
+            param_full = set()   # same-host full URLs that carry a query
             base_host = urlparse(base_url).hostname
             for ep in raw_refs:
                 if ep.startswith(("javascript:", "mailto:", "tel:", "data:")):
@@ -823,8 +828,13 @@ class CardOracleRoutesMixin:
                     continue
                 if f".{ext}" in STATIC_EXT:
                     continue
+                # Keep the query-bearing full URL: _normalize() strips the
+                # query for the endpoint set, so the GET params would be
+                # lost for harvesting otherwise.
+                if fp.query:
+                    param_full.add(full)
                 resolved.add(_normalize(full))
-            return resolved, js_urls
+            return resolved, js_urls, param_full
 
         # A trailing number is not always an object id.  `/api/v2`
         # matches `^(.*?)(\d+)$` just as well as `/user/2` does, and
@@ -919,17 +929,20 @@ class CardOracleRoutesMixin:
                         where="response body",
                         seen_at=current_url))
 
-            endpoints, js_found = _extract_endpoints(html, current_url)
+            endpoints, js_found, param_full = _extract_endpoints(
+                html, current_url)
             all_js_urls.update(js_found)
             new_count = len(endpoints - set(all_endpoints.keys()))
             _write(f"  → Extracted {len(endpoints)} endpoints "
                    f"({new_count} new)")
 
-            # Push every extracted endpoint with a query string into
-            # AssaultState as parameters — these are what Inject will
-            # later test.
-            for ep in endpoints:
-                _harvest_params_from_url(ep)
+            # Harvest GET query params from the query-bearing links.  The
+            # endpoints above are normalised (query stripped), so the
+            # params have to come from the full URLs.  These are what Inject
+            # tests and what the parameterised-URL block (SQLMap picker)
+            # is built from.
+            for u in param_full:
+                _harvest_params_from_url(u)
 
             for form in parse_html_forms(html, current_url):
                 action = form["action"]
@@ -1266,11 +1279,17 @@ class CardOracleRoutesMixin:
         # forms are kept (content pages would flood the picker).
         login_paths = []
         _seen_login = set()
+        _target_host = (urlparse(start_url).hostname or "").lower()
         for f in forms_found:
             if not f.get("has_password"):
                 continue
             action = f.get("action") or ""
             if not action or action in _seen_login:
+                continue
+            # Only forms on the target host — crawled docs embed external
+            # example forms (e.g. twiki.org change-password) that must not
+            # be offered to Hydra as if they were on the target.
+            if (urlparse(action).hostname or "").lower() != _target_host:
                 continue
             _seen_login.add(action)
             probe = all_endpoints.get(_normalize(action))
