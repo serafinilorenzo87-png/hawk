@@ -312,6 +312,10 @@ class CardOracleRoutesMixin:
                 done_callback=_done,
                 ui_dispatcher=getattr(self.app, "ui_call", None))
             self._tool_runners[tool.id] = runner
+            # Flip the tool-row RUN button to STOP: the runner is
+            # registered above and its kill() cancels the orchestration
+            # cooperatively.  _on_done resets the button when it finishes.
+            self._toggle_run_btn(tool, True)
             runner.run(url=url, tool_name=tool.name)
 
         row = _btn_row(win)
