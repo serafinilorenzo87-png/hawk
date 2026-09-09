@@ -874,7 +874,14 @@ class CardOracleRoutesMixin:
 
         def _detect_idor(endpoints):
             idor_candidates = []
-            ID_RE = re.compile(r'^(.*?)(\d+)$')
+            # The numeric id must be a WHOLE trailing path segment
+            # (/users/123), not digits glued to a word.  Without the
+            # leading `/` anchor, wiki/topic names that merely end in a
+            # number (TestTopic0, TWikiUpgradeTo01Dec2000, Page2) were read
+            # as "prefix + sequential id" and enumerated as bogus IDOR
+            # candidates.  Real REST ids (/orders/42) stay a full segment
+            # and are still detected.
+            ID_RE = re.compile(r'^(.*/)(\d+)/?$')
             prefix_map = {}
             for ep in endpoints:
                 path = urlparse(ep).path
