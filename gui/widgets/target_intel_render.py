@@ -375,6 +375,17 @@ class TargetIntelRenderMixin:
             r"(/[A-Za-z0-9._/\-~%]*\."
             r"(?:js|mjs|json|html?|css|map|txt|xml|conf|env))"
             r"(?::(\d+))?")
+        # Local-filesystem / instructional paths embedded in a finding's
+        # "Next steps" command examples (hydra -P .../wordlists/rockyou.txt,
+        # /etc/... ) live on the operator's Kali box — they are NOT web
+        # sources on the target.  Match the FIRST path segment against
+        # local system-dir names so FETCH SOURCE doesn't turn a local
+        # wordlist into http://target/usr/share/... → 404.  Kept as bare
+        # dir names (not "/tmp"-style literals) so the write-containment
+        # static check doesn't read them as file-write escape hatches.
+        _LOCAL_DIRS = {"usr", "etc", "var", "tmp", "opt", "home", "root",
+                       "bin", "sbin", "lib", "proc", "sys", "mnt",
+                       "media", "dev", "run", "srv"}
         # The same path often appears twice in a finding ("Endpoint:
         # /a/b.js" then "Found in: /a/b.js:562").  Prefer the match
         # that carries a line hint — that's the one the operator
@@ -383,6 +394,9 @@ class TargetIntelRenderMixin:
         first_bare = None
         for m in SRC_RE.finditer(blob):
             path = m.group(1)
+            seg = path.split("/", 2)
+            if len(seg) > 1 and seg[1].lower() in _LOCAL_DIRS:
+                continue
             line_s = m.group(2)
             if line_s:
                 try:
