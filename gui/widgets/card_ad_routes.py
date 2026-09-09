@@ -1362,7 +1362,7 @@ class CardADRoutesMixin:
         from gui.dialogs import (_make_win, _title, _sub, _note_box,
                                  _btn_row, _btn, _safe_destroy)
         from utils.runner import _open_terminal, lhost_detect
-        from utils.config import PAYLOADS_DIR
+        from utils.config import PAYLOADS_DIR, OUTPUTS_DIR
 
         kali_ip = lhost_detect() or "<KALI_IP>"
 
@@ -1422,9 +1422,18 @@ class CardADRoutesMixin:
         # ── Launch ─────────────────────────────────────────────────
         def _launch():
             proxy_path = f"{PAYLOADS_DIR}/ligolo-proxy"
+            # ligolo-proxy -selfcert drops ligolo-ng.history, ligolo-ng.yaml
+            # and a ligolo-selfcerts/ dir into its working directory, which
+            # is HAWK's process CWD (the repo root).  Run it inside
+            # outputs/ligolo/ (gitignored) so it never litters the tree root.
+            ligolo_dir = os.path.join(OUTPUTS_DIR, "ligolo")
+            os.makedirs(ligolo_dir, exist_ok=True)
             cmd = (f"sudo {proxy_path} -selfcert "
                    f"-laddr 0.0.0.0:11601")
             script = (
+                f"cd {shlex.quote(ligolo_dir)} || {{ "
+                f"echo 'HAWK: cannot enter {ligolo_dir}'; "
+                f"read -p 'Press ENTER to close...'; exit 1; }}; "
                 f"echo '═══  HAWK — LIGOLO-NG Proxy  ═══'; "
                 f"echo 'Kali listens on :11601 (self-signed TLS)'; "
                 f"echo 'Once the agent connects, use `session` then "
