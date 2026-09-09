@@ -1167,8 +1167,10 @@ class CardServiceParserMixin:
 
     def _parse_kerbrute_to_intel(self, tool, log: list) -> bool:
         """Parse kerbrute output and:
-          - push valid usernames (userenum) to Credential Store as
-            'username-only' entries with AD follow-up commands in notes,
+          - record valid usernames (userenum) as discovered AD users in
+            the session / Target Intel — NOT the Credential Store: a
+            VALID USERNAME only proves the account exists (no password,
+            no hash), so a cred-store entry would be an empty stub,
           - push valid logins (passwordspray / bruteuser / bruteforce) as
             full cleartext credentials with host + usage hint,
           - emit one Target Intel finding summarizing the run.
@@ -1234,29 +1236,13 @@ class CardServiceParserMixin:
         except Exception:
             pass
 
-        # Push each valid user to the Credential Store. These are
-        # "known username, unknown password" entries — still useful as
-        # the next step is AS-REP roasting or password spray.
-        for user, r in valid_users:
-            note = (
-                f"Kerbrute — Valid AD user (userenum)\n"
-                f"Realm: {r or '<unknown>'}   DC: {dc}\n"
-                f"Next steps:\n"
-                f"  $ impacket-GetNPUsers {r}/{user} -no-pass -dc-ip {dc}\n"
-                f"  $ kerbrute passwordspray -d {r} --dc {dc} users.txt "
-                f"'Spring2024!'\n"
-                f"  $ nxc smb {target} -u {user} -p ''  # null-bind test"
-            )
-            cred = Credential(
-                username=user, password="",
-                cred_type="cleartext",
-                services=["KERBEROS"],
-                source_phase=self.phase_id,
-                host=target, notes=note,
-                # userenum proves the account EXISTS.  No password was
-                # ever tried, so there is nothing verified about it.
-                verified=False)
-            self.app.cred_store.add_credential(cred)
+        # Valid usernames (userenum) were recorded as discovered AD users
+        # above and are surfaced in the finding below.  They are NOT
+        # pushed to the Credential Store: a VALID USERNAME proves the
+        # account exists but carries no password or hash, so a store entry
+        # would be an empty stub with nothing to spray or crack.  A VALID
+        # LOGIN below (or an AS-REP hash from GetNPUsers) is a real secret
+        # and does belong in the store.
 
         # Valid logins — full cleartext creds.
         for user, r, pwd in valid_logins:
@@ -1328,7 +1314,8 @@ class CardServiceParserMixin:
             self.app.terminal.write(
                 f"  [+] Kerbrute — {len(valid_users)} valid AD user"
                 f"{'s' if len(valid_users) != 1 else ''} "
-                f"added to Credential Store.", "success")
+                f"recorded in Target Intel (existence only, no password).",
+                "success")
         if valid_logins:
             self.app.terminal.write(
                 f"  [+] Kerbrute — {len(valid_logins)} valid login"

@@ -153,13 +153,15 @@ class ProducerContractTests(unittest.TestCase):
             self.assertNotIn(True, vals, func)
 
     def test_kerbrute_user_enumeration_is_never_verified(self):
-        # Kerbrute userenum proves the account exists, nothing more.
+        # Kerbrute userenum proves the account exists, nothing more, so it
+        # is recorded as a discovered user, NOT a credential.  The only
+        # Credential this parser builds is the VALID LOGIN spray hit
+        # (verified=True) — an empty username-only stub in the store was
+        # useless and has been removed.
         vals = self._verified_literals(
             "gui/widgets/card_parsers_service.py",
             "_parse_kerbrute_to_intel")
-        # Two producers in this parser: userenum (False) and the
-        # VALID LOGIN spray hit (True).
-        self.assertEqual([False, True], vals)
+        self.assertEqual([True], vals)
 
     def test_ad_dumps_are_never_verified(self):
         # Uncracked hashes and a machine account nobody logged in with.
