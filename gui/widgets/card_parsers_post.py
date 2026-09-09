@@ -827,6 +827,14 @@ class CardPostParserMixin:
             },
         }
 
+        # Service names that must NEVER be flagged as cleartext: the TLS/SSL
+        # variants (ftps/smtps/imaps/pop3s/... are encrypted) and tftp (no
+        # credentials to sniff).  A substring match would wrongly catch these
+        # via "ftp"/"smtp"/"imap"/"pop3", so they are excluded up front.
+        SECURE_SVCS = {
+            "ftps", "ftps-data", "smtps", "imaps", "pop3s", "telnets", "tftp",
+        }
+
         found = []
         for line in raw_log:
             m = re.search(
@@ -835,8 +843,15 @@ class CardPostParserMixin:
                 continue
             port = int(m.group(1))
             svc = m.group(3).lower()
+            # ssl/tls-tunnelled services (nmap prints e.g. "ssl/ftp") are
+            # encrypted, and the explicit secure variants above are too.
+            if svc in SECURE_SVCS or svc.startswith(("ssl/", "tls/")):
+                continue
             for key, info in CLEARTEXT_SVCS.items():
-                if key in svc or port == info["port_default"]:
+                # Exact service-name match (not substring): "ftps" must not
+                # match "ftp".  Fall back to the default port for the case
+                # where nmap could not name the service.
+                if svc == key or port == info["port_default"]:
                     found.append({**info, "port": port})
                     break
 
