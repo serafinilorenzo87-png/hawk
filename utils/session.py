@@ -697,10 +697,39 @@ class Session:
 
         Dedup key: username (case-insensitive, domain prefix stripped)
         + host + secret value (password for cleartext, hash_val for
-        hash).  Returns True if the credential was actually added,
+        hash).  Returns True if the credential was actually appended,
         False if it was a duplicate.
+
+        A duplicate is not simply discarded: the stronger PROOF the new
+        entry carries is merged onto the existing row.  A later
+        tool-confirmed hit (netexec / CME `Pwn3d!`, a successful
+        authenticated action, a crack) must upgrade a row that was added
+        unverified -- a manual add, the retry dialog, or a bare share
+        listing.  Without this, dedup silently dropped the confirmed
+        verified=True and a Pwn3d'd admin credential stayed unverified
+        forever (W-06).  verified / cracked only ever ratchet UP, never
+        down, so re-importing the same unproven credential can't fake
+        verification.
         """
-        if self._credential_exists(cred):
+        existing = self._find_matching_credential(cred)
+        if existing is not None:
+            changed = False
+            if getattr(cred, "verified", False) and not existing.get("verified"):
+                existing["verified"] = True
+                new_notes = (cred.notes or "").strip()
+                if new_notes and new_notes not in (existing.get("notes") or ""):
+                    old = (existing.get("notes") or "").strip()
+                    existing["notes"] = (f"{old}\n{new_notes}".strip()
+                                         if old else new_notes)
+                changed = True
+            if getattr(cred, "cracked", False) and not existing.get("cracked"):
+                existing["cracked"] = True
+                if (getattr(cred, "cracked_pass", "")
+                        and not existing.get("cracked_pass")):
+                    existing["cracked_pass"] = cred.cracked_pass
+                changed = True
+            if changed:
+                self._touch()
             return False
         self.credentials.append(cred.to_dict())
         self._touch()
@@ -719,7 +748,10 @@ class Session:
             u = u.split("/", 1)[1]
         return u
 
-    def _credential_exists(self, cred: Credential) -> bool:
+    def _find_matching_credential(self, cred: Credential):
+        """Return the stored credential dict that matches *cred* by
+        identity (username stripped of DOMAIN\\ prefix + host + secret),
+        or None when there is no equivalent entry."""
         u_new = self._strip_domain(cred.username)
         h_new = (cred.host or "").lower()
         for d in self.credentials:
@@ -731,11 +763,14 @@ class Session:
             if cred.cred_type == "hash":
                 if d.get("cred_type") == "hash" \
                         and d.get("hash_val", "") == cred.hash_val:
-                    return True
+                    return d
             else:
                 if d.get("password", "") == cred.password:
-                    return True
-        return False
+                    return d
+        return None
+
+    def _credential_exists(self, cred: Credential) -> bool:
+        return self._find_matching_credential(cred) is not None
 
     def get_credentials(self) -> list:
         return [Credential.from_dict(d) for d in self.credentials]

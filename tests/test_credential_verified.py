@@ -398,6 +398,67 @@ class UnverifiedPushTests(unittest.TestCase):
             self.assertTrue(reloaded.cracked)
             self.assertEqual("Password1", reloaded.cracked_pass)
 
+    def test_verified_duplicate_promotes_existing_unverified_row(self):
+        """W-06: a tool-confirmed (Pwn3d! / successful login) credential
+        that duplicates an existing unverified row must PROMOTE that row
+        to verified IN PLACE — not be silently dropped by the dedup, which
+        left a confirmed admin credential stuck unverified after netexec
+        reported Pwn3d! against a cred added earlier via the retry dialog."""
+        from utils.session import Credential
+        with self._temp_session() as sess:
+            sess.add_credential(Credential(
+                username="vagrant", password="vagrant",
+                cred_type="cleartext", services=["SMB"],
+                host="10.0.0.9", source_phase="manual",
+                notes="Added via NETEXEC (CME) retry dialog",
+                verified=False))
+            # Same identity, now proven (netexec Pwn3d!).
+            added = sess.add_credential(Credential(
+                username="vagrant", password="vagrant",
+                cred_type="cleartext", services=["SMB"],
+                host="10.0.0.9", source_phase="enumeration",
+                notes="Pwn3d! on 10.0.0.9", verified=True))
+            self.assertFalse(added, "a duplicate must not append a 2nd row")
+            self.assertEqual(1, len(sess.credentials))
+            self.assertTrue(
+                sess.credentials[0]["verified"],
+                "the Pwn3d! confirmation did not promote the existing row")
+
+    def test_unverified_duplicate_does_not_promote(self):
+        """The inverse guard: re-adding the SAME unproven credential must
+        never flip an existing row to verified."""
+        from utils.session import Credential
+        with self._temp_session() as sess:
+            sess.add_credential(Credential(
+                username="svc", password="p", cred_type="cleartext",
+                host="10.0.0.9", source_phase="manual", verified=False))
+            sess.add_credential(Credential(
+                username="svc", password="p", cred_type="cleartext",
+                host="10.0.0.9", source_phase="manual", verified=False))
+            self.assertEqual(1, len(sess.credentials))
+            self.assertFalse(sess.credentials[0]["verified"])
+
+    def test_verified_hash_crack_promotes_existing_row(self):
+        """A crack confirming a hash already on file promotes cracked in
+        place (same ratchet as verified), never a duplicate row."""
+        from utils.session import Credential
+        with self._temp_session() as sess:
+            sess.add_credential(Credential(
+                username="admin", hash_val="a" * 32, hash_type="NTLM",
+                cred_type="hash", host="10.0.0.9",
+                source_phase="post_exploit", verified=False))
+            dup = Credential(
+                username="admin", hash_val="a" * 32, hash_type="NTLM",
+                cred_type="hash", host="10.0.0.9",
+                source_phase="post_exploit", verified=False)
+            dup.cracked = True
+            dup.cracked_pass = "Password1"
+            added = sess.add_credential(dup)
+            self.assertFalse(added)
+            self.assertEqual(1, len(sess.credentials))
+            self.assertTrue(sess.credentials[0]["cracked"])
+            self.assertEqual("Password1", sess.credentials[0]["cracked_pass"])
+
 
 class CredentialStableIdTests(unittest.TestCase):
     """M5: credentials are addressed by a stable id, not by their
