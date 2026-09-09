@@ -606,13 +606,15 @@ class WebOracleRunner:
                      pass, deeper is a separate user-driven run
           -jc        enable JavaScript endpoint parsing
           -silent    suppress the banner
-          -json      structured lines for the profile builder
+          -jsonl     JSON-lines output for the profile builder (the
+                     flag is -jsonl / -j; -json does not exist and made
+                     katana exit immediately, so it never crawled)
           -kf all    every known form of URL extraction (sitemap,
                      robots, HTML links, JS files)
           -c 10      concurrency — polite but not glacial
         """
         argv = [path, "-u", url, "-d", "2", "-jc", "-silent",
-                "-json", "-kf", "all", "-c", "10", "-timeout", "10"]
+                "-jsonl", "-kf", "all", "-c", "10", "-timeout", "10"]
         self._stream_cmd(argv, tool_name, label, timeout=180)
 
     def _run_html_home(self, path, url, tool_name, label):
@@ -1072,12 +1074,16 @@ class WebOracleRunner:
             line = line.strip()
             if not line:
                 continue
-            # katana -json emits one URL per line in a dict or a
-            # bare URL depending on version.  Handle both.
+            # katana -jsonl emits one JSON object per line.  Current
+            # versions nest the URL under request.endpoint; older/flat
+            # output used a top-level endpoint/url.  A bare URL per line
+            # is also possible.  Handle all three.
             if line.startswith("{"):
                 try:
                     d = json.loads(line)
-                    ep = d.get("endpoint") or d.get("url") or ""
+                    ep = (d.get("endpoint") or d.get("url")
+                          or (d.get("request") or {}).get("endpoint")
+                          or "")
                 except Exception:
                     ep = ""
             else:
