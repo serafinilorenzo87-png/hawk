@@ -435,6 +435,17 @@ class CardOracleRoutesMixin:
             border_color=COLORS["border_dim"],
             width=16, height=16).pack(side="left")
 
+        # Option hints — depth is clamped 1-5, and "IDOR range" is not
+        # self-explanatory.
+        ctk.CTkLabel(
+            body,
+            text=("Depth 1-5 (2 recommended; higher is much heavier on "
+                  "link-rich sites).  IDOR range = max sequential ID "
+                  "tested per numeric endpoint."),
+            font=_f("xs"), text_color=COLORS["text_dim"],
+            wraplength=660, justify="left", anchor="w",
+        ).pack(fill="x", padx=24, pady=(2, 4))
+
         # JS extraction
         js_var = ctk.BooleanVar(value=True)
         ctk.CTkCheckBox(
@@ -448,8 +459,10 @@ class CardOracleRoutesMixin:
 
         ctk.CTkLabel(
             body,
-            text=("Typical runtime: 10-30 seconds depending on depth "
-                  "and number of endpoints.  All probes are active."),
+            text=("Typical runtime: ~10-30s at depth 2. Higher depth or "
+                  "link-heavy sites are much heavier; a global safety "
+                  "budget (time / requests / endpoints) stops runaway "
+                  "crawls automatically. All probes are active."),
             font=_f("xs"), text_color=COLORS["text_dim"],
             wraplength=660, justify="left", anchor="w",
         ).pack(fill="x", padx=24, pady=(0, 8))
