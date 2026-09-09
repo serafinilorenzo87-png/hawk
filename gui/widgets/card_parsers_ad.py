@@ -1480,6 +1480,21 @@ class CardADParserMixin:
             r"Found\s+\d+\s+asrep|Don'?t\s+Require\s+PreAuth",
             re.I)
 
+        # nxc >= 1.x prints --users and --groups as space-aligned TABLES
+        # (a dashed "-Username-" / "-Group-" header, then rows), not the
+        # older bare-name / "name members: N" form.  These headers start
+        # with "-", so they must be matched BEFORE the separator skip, and
+        # they switch the walker into a table state so group rows are
+        # parsed as groups (multi-word names intact) instead of leaking
+        # their first token into the user bucket (which reported ~40 users
+        # and 0 groups on a DC that has 4 users and ~50 groups).
+        _TBL_USERS = re.compile(r"^-+\s*Username\b", re.I)
+        _TBL_GROUPS = re.compile(r"^-+\s*Group\b", re.I)
+        # A table row: "<name>  <big gap>  <numeric column>  <rest>".  The
+        # non-greedy name keeps multi-word group names ("Print Operators",
+        # "Domain Admins") whole up to the members-count column.
+        _TBL_ROW = re.compile(r"^(.+?)\s{2,}\d+(?:\s|$)")
+
         # Bare samaccountname: alnum + underscore/dot/dash, optional
         # trailing $ (machine accounts).  First token only — group
         # lines have trailing text that we strip separately.
@@ -1511,6 +1526,10 @@ class CardADParserMixin:
                 state = "kerberoast"; continue
             if _SEC_ASREP.search(stripped):
                 state = "asrep"; continue
+            if _TBL_USERS.match(stripped):
+                state = "usertable"; continue
+            if _TBL_GROUPS.match(stripped):
+                state = "grouptable"; continue
 
             # Login banner / status / separator — skip.
             if stripped.startswith(("[", "-", "*")):
@@ -1523,6 +1542,21 @@ class CardADParserMixin:
                 continue
             if "$krb5asrep$" in stripped:
                 asrep_hashes.append(stripped)
+                continue
+
+            # nxc table rows (space-aligned columns): the first column is
+            # the group name / username; the trailing columns are metadata
+            # we don't bucket.  Parsed by state so a group row never leaks
+            # its first token into the user list.
+            if state == "grouptable":
+                m = _TBL_ROW.match(stripped)
+                if m:
+                    groups.append(m.group(1).strip())
+                continue
+            if state == "usertable":
+                first = stripped.split()[0]
+                if _USERNAME_RE.match(first):
+                    users.append(first)
                 continue
 
             # Groups: "Group Name                members: 5"
@@ -1674,18 +1708,32 @@ class CardADParserMixin:
                      "empty password logs in):"]
             for u in pwd_not_req[:20]:
                 desc.append(f"  · {u}")
+        # List the FULL enumeration in the (expandable) finding, not a
+        # 20-line teaser: on a real DC the operator needs every account
+        # and group name, and the Target Intel card scrolls.  Cap only to
+        # avoid a pathological multi-thousand-entry dump; anything beyond
+        # the cap still lives in the session (discovered_users/groups).
+        _LIST_CAP = 200
         if users:
-            shown = users[:20]
-            desc += ["", f"Users (first {len(shown)} of {len(users)} "
-                          "regular accounts):"]
+            shown = users[:_LIST_CAP]
+            more = len(users) - len(shown)
+            desc += ["", f"Users ({len(users)} regular accounts"
+                         + (f", first {_LIST_CAP} shown" if more else "")
+                         + "):"]
             for u in shown:
                 desc.append(f"  · {u}")
+            if more:
+                desc.append(f"  ... (+{more} more in the session)")
         if groups:
-            shown = groups[:15]
-            desc += ["", f"Groups (first {len(shown)} of "
-                          f"{len(groups)}):"]
+            shown = groups[:_LIST_CAP]
+            more = len(groups) - len(shown)
+            desc += ["", f"Groups ({len(groups)}"
+                         + (f", first {_LIST_CAP} shown" if more else "")
+                         + "):"]
             for g in shown:
                 desc.append(f"  · {g}")
+            if more:
+                desc.append(f"  ... (+{more} more in the session)")
         if kerberoastable_hashes or asrep_hashes:
             desc += ["",
                      "Kerberos hashes pushed to Credential Store "
