@@ -73,7 +73,8 @@ VULN_EXPLOIT_MAP = {
         ("exploit/windows/smb/ms17_010_eternalblue",
          "EternalBlue — SYSTEM shell via SMBv1 overflow"),
         ("exploit/windows/smb/ms17_010_psexec",
-         "psexec variant — needs creds but more reliable on newer builds"),
+         "psexec variant — no creds needed (uses a named pipe), "
+         "more reliable / less crash-prone than the kernel overflow"),
         ("auxiliary/scanner/smb/smb_ms17_010",
          "scanner — check-only, no shell"),
     ],
