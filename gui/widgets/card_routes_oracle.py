@@ -163,10 +163,9 @@ class CardOracleRoutesMixin:
         # actually do with the tools available right now.
         bins = detect_available_binaries()
         present = [n for n in ("whatweb", "httpx", "nuclei",
-                                "katana", "ffuf", "curl")
+                                "katana", "curl")
                    if bins.get(n)]
-        missing = [n for n in ("whatweb", "httpx", "nuclei",
-                                "katana", "ffuf")
+        missing = [n for n in ("whatweb", "httpx", "nuclei", "katana")
                    if not bins.get(n)]
         _note_box(
             win,

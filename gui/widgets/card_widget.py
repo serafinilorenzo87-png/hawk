@@ -361,7 +361,7 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
             "WHAT IT DOES, STEP BY STEP\n"
             "──────────────────────────\n"
             "1.  Detects which binaries are installed (whatweb, httpx,\n"
-            "    nuclei, katana, ffuf, curl) — missing ones are skipped\n"
+            "    nuclei, katana, curl) — missing ones are skipped\n"
             "    gracefully.\n"
             "2.  Fires all of them in parallel against the target URL,\n"
             "    aggregating each binary's output in memory and\n"

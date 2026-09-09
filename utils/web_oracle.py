@@ -20,7 +20,7 @@ invokes a done_callback on the UI thread with:
 
 Binary set (tiered — missing ones are skipped gracefully):
   Core (required)         → whatweb, httpx, nuclei
-  Optional (auto-added)   → katana, ffuf, gau, arjun
+  Optional (auto-added)   → katana
   Curl-based probes       → /robots.txt, /sitemap.xml, /.git/HEAD,
                             /.env, /graphql (introspection ping)
 
@@ -150,9 +150,11 @@ def detect_available_binaries() -> dict:
     so the rest of Oracle gracefully skips its phase.
     """
     out = {}
-    for name in ("whatweb", "httpx", "nuclei",
-                 "katana", "ffuf", "gau", "arjun",
-                 "curl"):
+    # Only the binaries Oracle actually spawns a worker for.  ffuf / gau /
+    # arjun used to be probed here but were never run, so the "skipping
+    # (not installed)" banner told operators to install tools Oracle does
+    # not use — keep the set to what _orchestrate really launches.
+    for name in ("whatweb", "httpx", "nuclei", "katana", "curl"):
         out[name] = _bin_path(name)
     # Validate httpx is actually ProjectDiscovery.  The Python
     # ``httpx`` CLI rejects ``-silent`` with "No such option: -s".
