@@ -866,9 +866,27 @@ class CardOracleRoutesMixin:
         redirect_chains = {}
         forms_found = []
 
+        # Global safety cap on how many endpoints the crawl will probe.
+        # max_depth alone does NOT bound the work: each page fans out into
+        # many endpoints, each is probed, and every 200 is re-queued, so a
+        # link-heavy site grows as branching^depth (times redirect/IDOR
+        # probes) and a depth-3 run can reach tens of thousands of
+        # requests.  This ceiling stops discovery regardless of depth.  The
+        # default depth stays 2; the cap is what makes a deeper crawl safe.
+        MAX_ENDPOINTS = 1500
+        _cap_hit = False
+
         while queue:
             if _state_cancelled():
                 _write("[!] Crawl cancelled by user.", "warn")
+                break
+            if len(all_endpoints) >= MAX_ENDPOINTS:
+                if not _cap_hit:
+                    _cap_hit = True
+                    _write(f"[!] Endpoint cap reached ({MAX_ENDPOINTS}) — "
+                           f"stopping crawl to stay bounded. Narrow the "
+                           f"scope or lower depth for a focused re-run.",
+                           "warn")
                 break
             current_url, depth = queue.pop(0)
             if current_url in visited:
@@ -944,6 +962,13 @@ class CardOracleRoutesMixin:
             for ep in endpoints:
                 if ep in all_endpoints:
                     continue
+                if len(all_endpoints) >= MAX_ENDPOINTS:
+                    if not _cap_hit:
+                        _cap_hit = True
+                        _write(f"[!] Endpoint cap reached "
+                               f"({MAX_ENDPOINTS}) — stopping discovery.",
+                               "warn")
+                    break
                 probe = _probe(ep)
                 all_endpoints[ep] = probe
 
