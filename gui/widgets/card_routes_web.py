@@ -2456,10 +2456,19 @@ class CardWebRoutesMixin:
         _sub(win, "SQLmap needs something to inject into. "
                   "Pick a mode below.")
 
+        # Scrollable body so the RUN button (packed on `win` below) stays
+        # reachable when the config plus the discovered-URL list overflow
+        # the height cap _make_win applies on smaller screens.
+        body = ctk.CTkScrollableFrame(
+            win, fg_color=COLORS["bg_primary"],
+            scrollbar_button_color=COLORS["border_dim"],
+            scrollbar_button_hover_color=COLORS["border_green"])
+        body.pack(fill="both", expand=True)
+
         # ── MODE selection ───────────────────────────────────────────────
         mode_var = ctk.StringVar(value="crawl" if not suggested_urls else "direct")
 
-        mode_frame = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+        mode_frame = ctk.CTkFrame(body, fg_color=COLORS["bg_card"],
                                    border_color=COLORS["border_dim"],
                                    border_width=1, corner_radius=4)
         mode_frame.pack(fill="x", padx=24, pady=(6, 4))
@@ -2499,15 +2508,15 @@ class CardWebRoutesMixin:
         url_var = ctk.StringVar(value=default_url)
 
         # Host dropdown — auto-rewrites the hostname in url_var on change.
-        attach_host_dropdown(win, self.app, target, url_var,
+        attach_host_dropdown(body, self.app, target, url_var,
                               pack_kwargs={"fill": "x",
                                            "padx": 26, "pady": (6, 0)})
 
-        ctk.CTkLabel(win, text="URL", font=_f("sm", True),
+        ctk.CTkLabel(body, text="URL", font=_f("sm", True),
                      text_color=COLORS["text_green"]
                      ).pack(anchor="w", padx=26, pady=(6, 0))
 
-        entry = ctk.CTkEntry(win, textvariable=url_var,
+        entry = ctk.CTkEntry(body, textvariable=url_var,
                              font=_f("md"), height=34,
                              fg_color=COLORS["bg_card"],
                              text_color=COLORS["text_bright"],
@@ -2518,7 +2527,7 @@ class CardWebRoutesMixin:
 
         # ── Suggestions from prior findings ───────────────────────────────
         if suggested_urls:
-            sug_frame = ctk.CTkFrame(win, fg_color="transparent")
+            sug_frame = ctk.CTkFrame(body, fg_color="transparent")
             sug_frame.pack(fill="x", padx=24, pady=(0, 4))
             ctk.CTkLabel(sug_frame,
                          text="↓ discovered URLs (click to use):",
@@ -2538,7 +2547,7 @@ class CardWebRoutesMixin:
                 ).pack(fill="x", pady=1)
 
         # ── Quick-add param buttons ───────────────────────────────────────
-        qp_frame = ctk.CTkFrame(win, fg_color="transparent")
+        qp_frame = ctk.CTkFrame(body, fg_color="transparent")
         qp_frame.pack(fill="x", padx=24, pady=(2, 4))
         ctk.CTkLabel(qp_frame, text="Quick-add param:",
                      font=_f("xs"),
@@ -2569,7 +2578,7 @@ class CardWebRoutesMixin:
             ).pack(side="left", padx=2)
 
         # ── Options ──────────────────────────────────────────────────────
-        opt_frame = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+        opt_frame = ctk.CTkFrame(body, fg_color=COLORS["bg_card"],
                                   border_color=COLORS["border_dim"],
                                   border_width=1, corner_radius=4)
         opt_frame.pack(fill="x", padx=24, pady=(6, 4))
@@ -2610,7 +2619,7 @@ class CardWebRoutesMixin:
                      ).pack()
 
         # Level + Risk
-        lr_frame = ctk.CTkFrame(win, fg_color="transparent")
+        lr_frame = ctk.CTkFrame(body, fg_color="transparent")
         lr_frame.pack(fill="x", padx=24, pady=2)
         level_var = ctk.StringVar(value="1")
         risk_var  = ctk.StringVar(value="1")
@@ -2636,12 +2645,12 @@ class CardWebRoutesMixin:
                           ).pack(side="left")
 
         # Extra args
-        ctk.CTkLabel(win, text="Extra args (optional):",
+        ctk.CTkLabel(body, text="Extra args (optional):",
                      font=_f("xs"),
                      text_color=COLORS["text_dim"]
                      ).pack(anchor="w", padx=26, pady=(6, 0))
         extra_var = ctk.StringVar(value="")
-        extra_entry = ctk.CTkEntry(win, textvariable=extra_var,
+        extra_entry = ctk.CTkEntry(body, textvariable=extra_var,
                                     font=_f("sm"), height=28,
                                     fg_color=COLORS["bg_card"],
                                     text_color=COLORS["text_bright"],
@@ -2652,7 +2661,7 @@ class CardWebRoutesMixin:
         add_context_menu(extra_entry)
 
         # Warning label (dynamic)
-        warn_lbl = ctk.CTkLabel(win, text="", font=_f("xs"),
+        warn_lbl = ctk.CTkLabel(body, text="", font=_f("xs"),
                                  text_color=COLORS["text_yellow"],
                                  wraplength=600, justify="left")
         warn_lbl.pack(anchor="w", padx=26, pady=(0, 2))
@@ -2724,12 +2733,12 @@ class CardWebRoutesMixin:
                                        text_color=COLORS["text_dim"])
 
         # Preview area
-        ctk.CTkLabel(win, text="Command preview:",
+        ctk.CTkLabel(body, text="Command preview:",
                      font=_f("xs"),
                      text_color=COLORS["text_dim"]
                      ).pack(anchor="w", padx=26, pady=(4, 0))
         preview_lbl = ctk.CTkLabel(
-            win, text="", font=_f("sm"),
+            body, text="", font=_f("sm"),
             text_color=COLORS["text_green"],
             wraplength=620, justify="left", anchor="w")
         preview_lbl.pack(anchor="w", fill="x", padx=26, pady=(0, 6))
