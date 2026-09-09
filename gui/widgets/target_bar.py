@@ -3234,14 +3234,25 @@ class _SessionPickerDialog(ctk.CTkToplevel):
 
     def _autosize(self):
         try:
+            rows_meta = getattr(self, "_rows_meta", [])
+            # Measure the NATURAL (unwrapped) row width first: reset any
+            # wraplength a previous pass set, so the decision is stable and
+            # doesn't oscillate (a wrapped row measures narrow, which would
+            # otherwise flip the dialog back to single-line → overflow).
+            for m in rows_meta:
+                for lbl in m["labels"]:
+                    try:
+                        lbl.configure(wraplength=0)
+                    except Exception:
+                        pass
             self.update_idletasks()
             sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+
             # The rows live inside a CTkScrollableFrame, which does NOT
-            # surface its content width through the Toplevel's reqwidth.
-            # So a long metadata line (many tools/creds/findings) overflows
-            # the viewport and clips the right-side LOAD / 🗑 buttons, and
-            # the dialog never grows to fit.  Measure the widest row
-            # directly and size the dialog to it (+ scrollbar/border/pad).
+            # surface its content width through the Toplevel's reqwidth, so
+            # a long metadata line overflows the viewport and clips the
+            # right-side LOAD / 🗑 buttons.  Measure the widest row directly
+            # and grow the dialog to it (+ scrollbar/border/pad).
             rows_w = 0
             try:
                 for child in self._scroll.winfo_children():
@@ -3250,14 +3261,36 @@ class _SessionPickerDialog(ctk.CTkToplevel):
                 pass
             content_w = rows_w + 90 if rows_w else 0
             # Minimums kept at 820x580 — narrow windows truncate the
-            # right-side LOAD / 🗑 buttons on each session row.  Padding
-            # is 60 so reqwidth/reqheight estimates don't undershoot on
-            # Kali's GTK theme which reports slightly smaller than the
-            # actual rendered size.
+            # right-side buttons.  Padding is 60 so estimates don't
+            # undershoot on Kali's GTK theme.
             w = min(max(content_w, self.winfo_reqwidth() + 60, 820),
                     int(sw * 0.92))
             h = min(max(self.winfo_reqheight() + 60, 580),
                     int(sh * 0.92))
+
+            # If even the screen-capped dialog is narrower than the natural
+            # content, the row can't fit on one line — wrap the metadata so
+            # each row stays inside the viewport and the buttons keep their
+            # place.  avail = dialog width minus the button column and the
+            # row/scrollbar padding.
+            if content_w and content_w > w and rows_meta:
+                btns_w = 0
+                for m in rows_meta:
+                    try:
+                        btns_w = max(btns_w, m["btns"].winfo_reqwidth())
+                    except Exception:
+                        pass
+                avail = max(220, w - btns_w - 80)
+                for m in rows_meta:
+                    for lbl in m["labels"]:
+                        try:
+                            lbl.configure(wraplength=avail)
+                        except Exception:
+                            pass
+                self.update_idletasks()
+                h = min(max(self.winfo_reqheight() + 60, 580),
+                        int(sh * 0.92))
+
             x = max(0, (sw - w) // 2)
             y = max(0, (sh - h) // 2)
             self.geometry(f"{w}x{h}+{x}+{y}")
@@ -3361,6 +3394,10 @@ class _SessionPickerDialog(ctk.CTkToplevel):
         for child in self._scroll.winfo_children():
             child.destroy()
 
+        # Per-row label + button-column handles, so _autosize can wrap the
+        # metadata when the natural width would exceed the screen cap.
+        self._rows_meta = []
+
         for rec in sort_sessions(self._records, self._sort_mode):
             session = rec["session"]
             s = session.summary()
@@ -3372,14 +3409,17 @@ class _SessionPickerDialog(ctk.CTkToplevel):
             left = ctk.CTkFrame(row, fg_color="transparent")
             left.pack(side="left", fill="x", expand=True, padx=8, pady=6)
 
+            row_labels = []
             header = (f"  {s['target_ip']}"
                       + (f"  ({s['target_domain']})" if s.get('target_domain') else "")
                       + f"   [{s['platform'] or 'N/A'}]")
-            ctk.CTkLabel(
+            header_lbl = ctk.CTkLabel(
                 left, text=header,
                 font=self._font("sm", bold=True),
                 text_color=COLORS["text_green"], anchor="w",
-            ).pack(fill="x")
+                justify="left")
+            header_lbl.pack(fill="x")
+            row_labels.append(header_lbl)
 
             meta_bits = []
             if s.get("last_saved"):
@@ -3392,23 +3432,28 @@ class _SessionPickerDialog(ctk.CTkToplevel):
                 meta_bits.append(f"{s['creds_found']} creds")
             if s.get("total_findings"):
                 meta_bits.append(f"{s['total_findings']} findings")
-            ctk.CTkLabel(
+            meta_lbl = ctk.CTkLabel(
                 left, text="  " + "  ·  ".join(meta_bits) if meta_bits
                      else "  (empty — nothing recorded yet)",
                 font=self._font("xs"),
                 text_color=COLORS["text_muted"], anchor="w",
-            ).pack(fill="x", pady=(2, 0))
+                justify="left")
+            meta_lbl.pack(fill="x", pady=(2, 0))
+            row_labels.append(meta_lbl)
 
             if s.get("file_name"):
-                ctk.CTkLabel(
+                file_lbl = ctk.CTkLabel(
                     left, text=f"  {s['file_name']}",
                     font=self._font("xs"),
                     text_color=COLORS["text_dim"], anchor="w",
-                ).pack(fill="x")
+                    justify="left")
+                file_lbl.pack(fill="x")
+                row_labels.append(file_lbl)
 
             # Right column: LOAD + DELETE buttons
             btns = ctk.CTkFrame(row, fg_color="transparent")
             btns.pack(side="right", padx=8, pady=6)
+            self._rows_meta.append({"labels": row_labels, "btns": btns})
             ctk.CTkButton(
                 btns, text="LOAD", width=76, height=30,
                 font=self._font("sm", bold=True),
@@ -3431,6 +3476,10 @@ class _SessionPickerDialog(ctk.CTkToplevel):
                 corner_radius=3,
                 command=lambda s=session, r=row: self._delete_snapshot(s, r),
             ).pack(side="left", padx=2)
+
+        # Re-fit after a (re)build — a sort change rebuilds the rows
+        # without wraplength, so re-run the width/wrap decision.
+        self.after(30, self._autosize)
 
     def _delete_snapshot(self, session, row_widget):
         """Delete a single snapshot file from disk."""
