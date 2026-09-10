@@ -35,6 +35,40 @@ class CrackMapTests(unittest.TestCase):
         self.assertEqual(_JOHN_FORMAT.get("DCC2"), "mscash2")
         self.assertEqual(_HASHCAT_MODE.get("DCC2"), 2100)
 
+    def test_dcc1_covered(self):
+        from utils.crack_runner import _JOHN_FORMAT, _HASHCAT_MODE
+        self.assertEqual(_JOHN_FORMAT.get("DCC1"), "mscash")
+        self.assertEqual(_HASHCAT_MODE.get("DCC1"), 1100)
+
+    def test_modern_linux_crypt_uses_generic_crypt_and_no_hashcat(self):
+        """yescrypt & friends resolve to john's generic crypt(3) format
+        (verified live) and intentionally have NO hashcat mode."""
+        from utils.crack_runner import _JOHN_FORMAT, _HASHCAT_MODE
+        for ht in ("yescrypt", "gost-yescrypt", "scrypt"):
+            self.assertEqual(_JOHN_FORMAT.get(ht), "crypt")
+            self.assertIsNone(_HASHCAT_MODE.get(ht))
+
+    def test_hashcat_mode_derives_kerberos_etype(self):
+        """Modern DCs (2019/2022/2025) issue AES tickets — the hashcat mode
+        must follow the etype embedded in the hash, not a fixed RC4 mode."""
+        from utils.crack_runner import _hashcat_mode
+        self.assertEqual(
+            _hashcat_mode("Kerberos TGS", "$krb5tgs$23$*u$R$s*$abcd"), 13100)
+        self.assertEqual(
+            _hashcat_mode("Kerberos TGS", "$krb5tgs$17$*u$R$s*$abcd"), 19600)
+        self.assertEqual(
+            _hashcat_mode("Kerberos TGS", "$krb5tgs$18$*u$R$s*$abcd"), 19700)
+        self.assertEqual(
+            _hashcat_mode("Kerberos AS-REP", "$krb5asrep$23$u@R:aa$bb"), 18200)
+        # AES AS-REP has no stable hashcat mode → None (crack via john/FAST).
+        self.assertIsNone(
+            _hashcat_mode("Kerberos AS-REP", "$krb5asrep$18$u@R:aa$bb"))
+        # Non-Kerberos falls back to the static map.
+        self.assertEqual(_hashcat_mode("NTLM", "aabbccdd"), 1000)
+        self.assertEqual(_hashcat_mode("DCC1", ""), 1100)
+        # yescrypt has no hashcat mode — must stay None (FAST/john only).
+        self.assertIsNone(_hashcat_mode("yescrypt", "$y$j9T$abc$def"))
+
     def test_every_produced_hash_type_is_crackable(self):
         """Coverage contract: EVERY hash_type string a HAWK parser assigns
         to a stored credential must resolve in BOTH crack maps, or CRACK
@@ -101,6 +135,15 @@ class DetectHashTypeTests(unittest.TestCase):
         from utils.crack_runner import _JOHN_FORMAT, _HASHCAT_MODE
         self.assertIn(detect_hash_type(tgs), _JOHN_FORMAT)
         self.assertIn(detect_hash_type(asrep), _HASHCAT_MODE)
+
+    def test_detects_modern_linux_crypt(self):
+        from gui.widgets.credential_store_widget import detect_hash_type
+        self.assertEqual(detect_hash_type("$y$j9T$abcd$efgh"), "yescrypt")
+        self.assertEqual(
+            detect_hash_type("$gy$j9T$abcd$efgh"), "gost-yescrypt")
+        self.assertEqual(detect_hash_type("$7$DU..../....$abcd"), "scrypt")
+        # $2y$ bcrypt must NOT be misread as yescrypt ($y$).
+        self.assertEqual(detect_hash_type("$2y$10$abcdefghijklmn"), "bcrypt")
 
 
 if __name__ == "__main__":

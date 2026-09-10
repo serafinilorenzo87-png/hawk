@@ -97,6 +97,13 @@ def detect_hash_type(hash_val: str) -> str:
     if h.startswith("$1$"):      return "md5crypt"
     if h.startswith("$6$"):      return "sha512crypt"
     if h.startswith("$5$"):      return "sha256crypt"
+    # Modern Linux shadow defaults: yescrypt ($y$) is the current default
+    # on Debian 11+/Ubuntu 22.04+/Kali/Fedora; gost-yescrypt ($gy$) and
+    # scrypt ($7$) are the rarer siblings.  hashcat has no yescrypt mode,
+    # so these crack via FAST (john autodetects the $-prefixed format).
+    if h.startswith("$y$"):      return "yescrypt"
+    if h.startswith("$gy$"):     return "gost-yescrypt"
+    if h.startswith("$7$"):      return "scrypt"
     if h.startswith("$NTLMv2$"): return "NTLMv2"
     # Kerberoast / AS-REP roast tickets — keep these keys identical to the
     # ones the GetUserSPNs / GetNPUsers parsers set, so the crack strategy

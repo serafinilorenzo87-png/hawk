@@ -71,9 +71,20 @@ _JOHN_FORMAT = {
     # mapped, so FAST reported "john doesn't support Kerberos TGS".
     "Kerberos TGS":     "krb5tgs",
     "Kerberos AS-REP":  "krb5asrep",
-    # Domain Cached Credentials v2 ($DCC2$) — secretsdump dumps these; john
-    # calls the format mscash2.
+    # Domain Cached Credentials — v2 ($DCC2$, secretsdump) is mscash2;
+    # v1 (mscash) is paste-only but kept here for completeness.
     "DCC2":             "mscash2",
+    "DCC1":             "mscash",
+    # Modern Linux shadow crypt schemes.  john has no fast native format
+    # for these, but its generic crypt(3) format ("crypt") delegates to
+    # the system libc, which on a current Kali/Debian/Ubuntu/Fedora
+    # cracks yescrypt/gost-yescrypt/scrypt fine (slow, as those KDFs are
+    # meant to be).  Verified live: $y$ yescrypt -> "Password1" via
+    # --format=crypt.  Do NOT rely on john's bare autodetect here — it
+    # mis-identifies $y$ as HMAC-SHA256 and returns a false negative.
+    "yescrypt":         "crypt",
+    "gost-yescrypt":    "crypt",
+    "scrypt":           "crypt",
 }
 
 # Hash type → hashcat -m mode number (None = not in hashcat).
@@ -89,10 +100,38 @@ _HASHCAT_MODE = {
     "sha512crypt":  1800,
     "sha256crypt":  7400,
     "LM":           3000,
-    "Kerberos TGS":     13100,   # kerberoast TGS-REP (etype 23)
-    "Kerberos AS-REP":  18200,   # AS-REP roast (etype 23)
+    "Kerberos TGS":     13100,   # kerberoast TGS-REP, etype 23 (RC4) — base
+    "Kerberos AS-REP":  18200,   # AS-REP roast, etype 23 (RC4)
     "DCC2":             2100,    # Domain Cached Credentials v2 (mscash2)
+    "DCC1":             1100,    # Domain Cached Credentials v1 (mscash)
 }
+
+# Kerberos hashcat modes are ENCRYPTION-TYPE specific, and the etype is
+# encoded in the hash itself ($krb5tgs$<etype>$…).  Server 2019/2022/2025
+# issue AES tickets (etype 17/18) by default, so bucketing every ticket
+# under the RC4 mode (13100) silently mis-cracks them.  Derive the mode
+# from the hash when we have it, else fall back to the static map.
+_KRB_TGS_MODE   = {"23": 13100, "17": 19600, "18": 19700}
+_KRB_ASREP_MODE = {"23": 18200}  # AES AS-REP has no stable hashcat mode → john
+_KRB_TGS_RE   = re.compile(r"^\$krb5tgs\$(\d+)\$")
+_KRB_ASREP_RE = re.compile(r"^\$krb5asrep\$(\d+)\$")
+
+
+def _hashcat_mode(hash_type, hash_str=""):
+    """hashcat -m for a credential — etype-aware for Kerberos tickets.
+
+    Returns the mode int, or None when hashcat has no mode for this type
+    (e.g. yescrypt, or an AES AS-REP): the caller then reports it as
+    john-only instead of pretending it can run.
+    """
+    s = (hash_str or "").strip()
+    m = _KRB_TGS_RE.match(s)
+    if m:
+        return _KRB_TGS_MODE.get(m.group(1))
+    m = _KRB_ASREP_RE.match(s)
+    if m:
+        return _KRB_ASREP_MODE.get(m.group(1))
+    return _HASHCAT_MODE.get(hash_type)
 
 
 # ─── Path resolution ─────────────────────────────────────────────────
@@ -643,11 +682,22 @@ class CrackRunner:
     # --- FAST (john) --------------------------------------------------
     def _run_fast_impl(self, hash_str: str, hash_type: str):
         fmt = _JOHN_FORMAT.get(hash_type)
-        if not fmt:
-            self._emit(f"  [FAST] john doesn't support {hash_type} — "
-                       "skipping.", "warn")
-            self._done("FAST", -1, None)
-            return
+        # No explicit john format for this type.  A structured crypt-style
+        # hash ($y$ yescrypt, $gy$, $7$ scrypt, or a future $scheme$)
+        # falls back to john's generic crypt(3) format ("crypt"), which
+        # delegates to the system libc and handles every crypt scheme the
+        # OS supports — far more reliable than john's bare autodetect,
+        # which mis-identified yescrypt as HMAC-SHA256 and returned a
+        # false negative.  A bare hex hash has no $scheme to hand crypt,
+        # so it still skips.
+        if fmt is None:
+            if (hash_str or "").strip().startswith("$"):
+                fmt = "crypt"
+            else:
+                self._emit(f"  [FAST] no john format for {hash_type} — "
+                           "skipping.", "warn")
+                self._done("FAST", -1, None)
+                return
         wl = _first_existing([_ROCKYOU])
         if not wl:
             self._emit("  [FAST] rockyou.txt not found "
@@ -713,7 +763,7 @@ class CrackRunner:
     # --- RULE-BASED (hashcat -a 0 + rule file) ------------------------
     def _run_rule_based_impl(self, hash_str: str, hash_type: str,
                                rule_name: str):
-        mode = _HASHCAT_MODE.get(hash_type)
+        mode = _hashcat_mode(hash_type, hash_str)
         if mode is None:
             self._emit(f"  [RULE-BASED] hashcat mode unknown for "
                        f"{hash_type} — skipping.", "warn")
@@ -810,7 +860,7 @@ class CrackRunner:
     # --- HYBRID (hashcat -a 6, top-100k + short suffix mask) ----------
     def _run_hybrid_impl(self, hash_str: str, hash_type: str,
                            mask: str):
-        mode = _HASHCAT_MODE.get(hash_type)
+        mode = _hashcat_mode(hash_type, hash_str)
         if mode is None:
             self._emit(f"  [HYBRID] hashcat mode unknown for "
                        f"{hash_type} — skipping.", "warn")
@@ -858,7 +908,7 @@ class CrackRunner:
     # --- TARGET (custom dict + best64) --------------------------------
     def _run_target_impl(self, hash_str: str, hash_type: str,
                           dict_path: str):
-        mode = _HASHCAT_MODE.get(hash_type)
+        mode = _hashcat_mode(hash_type, hash_str)
         if mode is None:
             self._done("TARGET", -1, None)
             return
@@ -914,7 +964,7 @@ class CrackRunner:
     # --- MASK (hashcat -a 3 pure structural) --------------------------
     def _run_mask_impl(self, hash_str: str, hash_type: str,
                         mask: str):
-        mode = _HASHCAT_MODE.get(hash_type)
+        mode = _hashcat_mode(hash_type, hash_str)
         if mode is None:
             self._done("MASK", -1, None)
             return
