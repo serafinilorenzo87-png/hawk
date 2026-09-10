@@ -525,18 +525,23 @@ class CardPostParserMixin:
                         # authentication (local admin), so verify only
                         # then; a bare listing stays unverified.
                         verified=pwn3d)
-                    sess.add_credential(cred)
-                    sess.save()
-                    pushed_cred = True
+                    # Route through the credential store (like the anon
+                    # Step 4b) so a genuinely NEW authenticated cred
+                    # blinks/badges in the store, and the store's terminal
+                    # note fires only on a REAL change.  The old path
+                    # (sess.add_credential + a bare cs.refresh) never
+                    # blinked and printed "pushed to Credential Store"
+                    # even on a dedup no-op (W-04 class).  The store merges
+                    # and promotes verified (ratchets up only), so a bare
+                    # listing (verified=False) can't downgrade a
+                    # Pwn3d-confirmed row.
                     cs = getattr(self.app, "cred_store", None)
                     if cs:
-                        cs.refresh()
-                    self.app.terminal.write(
-                        f"  [+] {tool.name}: credential "
-                        f"{uname}:{'*' * len(auth_pass)} "
-                        f"{'confirmed' if pwn3d else 'observed (unverified)'} "
-                        f"on {target} → pushed to Credential Store.",
-                        "success")
+                        cs.add_credential(cred)
+                    else:
+                        sess.add_credential(cred)
+                        sess.save()
+                    pushed_cred = True
             except Exception as e:
                 print(f"[HAWK] smb cred push failed: {e}")
 

@@ -390,8 +390,12 @@ class SmbAnonymousParserTests(_TkTestCase):
             ("out", "SMB 10.10.10.10 445 DC01 ADMIN$  READ,WRITE"),
         ]
         card._parse_smb_output(tool, log)
-        self.assertEqual(1, len(sess.credentials))
-        self.assertTrue(sess.credentials[0]["verified"],
+        # Routed through the credential store (so a new cred blinks); the
+        # stub records it in .added.
+        pushed = card.app.cred_store.added
+        self.assertEqual(1, len(pushed),
+                         "the Pwn3d! login was not pushed to the store")
+        self.assertTrue(pushed[0].verified,
                         "a Pwn3d! login was stored UNVERIFIED")
 
     def test_share_listing_without_pwn3d_stays_unverified(self):
@@ -404,8 +408,9 @@ class SmbAnonymousParserTests(_TkTestCase):
         tool = types.SimpleNamespace(id="smbclient_list", name="SMBCLIENT")
         log = [("out", "\tShareX           Disk      A share")]
         card._parse_smb_output(tool, log)
-        self.assertEqual(1, len(sess.credentials))
-        self.assertFalse(sess.credentials[0]["verified"],
+        pushed = card.app.cred_store.added
+        self.assertEqual(1, len(pushed))
+        self.assertFalse(pushed[0].verified,
                          "a bare share listing was stored VERIFIED")
 
     _WORKGROUP_TAIL = [

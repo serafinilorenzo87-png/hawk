@@ -167,15 +167,21 @@ class NetexecNullSessionTests(unittest.TestCase):
     def test_real_authenticated_run_still_harvests_the_cred(self):
         # Regression guard: a genuine -u user -p pass run must still be
         # recognised as authenticated and harvest that user's credential.
-        sess, _, findings = _run(
+        # It is routed through the credential STORE (so a new cred blinks
+        # and no "pushed" line prints on a dedup no-op), not
+        # sess.add_credential.
+        sess, store, findings = _run(
             "netexec smb 192.168.177.134 --port 445 -u msfadmin "
             "-p msfadmin --shares",
             _NXC_AUTH_LOG)
-        harvested = [c for c in sess.added
+        harvested = [c for c in store.added
                      if (c.username or "") == "msfadmin"]
         self.assertTrue(
             harvested,
-            "an authenticated netexec run must still push its credential")
+            "an authenticated netexec run must push its credential "
+            "through the store")
+        self.assertTrue(harvested[0].verified,
+                        "a Pwn3d! login must be stored verified")
         titles = [f.get("title", "") for f in findings]
         self.assertTrue(
             any(t.startswith("SMB Authenticated Access") for t in titles),
