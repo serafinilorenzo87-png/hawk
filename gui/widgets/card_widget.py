@@ -2107,9 +2107,9 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                        "Cypher queries.",
             "extras":  [
                 "-c DCOnly             — only collect from the DC (faster)",
-                "-c All                — full collection (default)",
-                "-c Group,ACL          — pick specific methods",
-                "--dns-tcp             — force DNS over TCP",
+                "-c Group,ACL          — pick specific methods (overrides -c All)",
+                "--dns-timeout 30      — raise DNS wait; use when the DC's DNS is slow/flaky",
+                "--dns-tcp             — force DNS over TCP (some DCs only answer TCP 53)",
                 "--disable-pooling     — if connection errors",
             ],
         },

@@ -46,6 +46,81 @@ from utils.runner import ToolRunner, MultiRunner, MetasploitRunner, GreenBoneRun
 from utils.session import Credential
 from gui.widgets.card_common import *
 
+
+def _bloodhound_extract_stats(users, computers, groups):
+    """Pure extraction of the interesting BloodHound stats from the three
+    parsed JSON collections.  Split out of _parse_bloodhound_to_intel so
+    the counting rules are unit-testable without a ZIP on disk.
+
+    Returns a dict with:
+      user_names        every user samAccountName/name (pushed to session)
+      kerberoastable    users with an SPN worth roasting — krbtgt and
+                        disabled accounts are EXCLUDED: krbtgt always
+                        carries kadmin/changepw and is disabled, and the
+                        KDC won't issue a TGS for a disabled account, so
+                        neither is a real kerberoast target
+      asrepable         users flagged 'do not require pre-auth'
+      unconstrained_pcs computers with unconstrained delegation
+      da_members        Domain/Enterprise Admins members, resolved to
+                        display names and deduped (a principal in both
+                        groups is counted once)
+    """
+    users = users or []
+    computers = computers or []
+    groups = groups or []
+
+    # SID -> display name, so group members (stored by BloodHound as
+    # ObjectIdentifier SIDs) can be shown by name, not an opaque SID.
+    sid_to_name = {}
+    for obj in list(users) + list(computers) + list(groups):
+        oid = obj.get("ObjectIdentifier") or ""
+        p = obj.get("Properties", {}) or {}
+        nm = p.get("name") or p.get("samaccountname") or ""
+        if oid and nm:
+            sid_to_name[oid] = nm
+
+    user_names, kerberoastable, asrepable = [], [], []
+    for u in users:
+        props = u.get("Properties", {}) or {}
+        name = props.get("name") or props.get("samaccountname") or ""
+        if name:
+            user_names.append(name)
+        if props.get("hasspn"):
+            sam = (props.get("samaccountname")
+                   or (name.split("@")[0] if name else "")).lower()
+            if sam != "krbtgt" and props.get("enabled", True) is not False:
+                kerberoastable.append(name)
+        if props.get("dontreqpreauth"):
+            asrepable.append(name)
+
+    da_members = []
+    for g in groups:
+        props = g.get("Properties", {}) or {}
+        gname = (props.get("name") or "").upper()
+        if gname.startswith(("DOMAIN ADMINS@", "ENTERPRISE ADMINS@")):
+            for m in (g.get("Members") or []):
+                oid = m.get("ObjectIdentifier", "")
+                da_members.append(sid_to_name.get(oid, oid))
+    # A principal can sit in both Domain and Enterprise Admins — once only.
+    _seen = set()
+    da_members = [x for x in da_members
+                  if not (x in _seen or _seen.add(x))]
+
+    unconstrained_pcs = []
+    for c in computers:
+        props = c.get("Properties", {}) or {}
+        if props.get("unconstraineddelegation"):
+            unconstrained_pcs.append(props.get("name", ""))
+
+    return {
+        "user_names":        user_names,
+        "kerberoastable":    kerberoastable,
+        "asrepable":         asrepable,
+        "unconstrained_pcs": unconstrained_pcs,
+        "da_members":        da_members,
+    }
+
+
 class CardADParserMixin:
     def _parse_secretsdump_to_intel(self, tool, log: list) -> bool:
         """Parse impacket-secretsdump output, push every credential
@@ -1114,7 +1189,7 @@ class CardADParserMixin:
                     title=f"BLOODHOUND (collect) — {target}",
                     description="\n".join(desc),
                     severity="info", source=tool.name,
-                    linked_run_id=rid))
+                    linked_run_id=rid, replace=True))
             return True
 
         # Extract + parse
@@ -1147,30 +1222,16 @@ class CardADParserMixin:
                      computers_data.get("computers") or [])
         groups = groups_data.get("data") or groups_data.get("groups") or []
 
-        # Collect stats for the summary finding
-        da_members, kerberoastable, asrepable = [], [], []
-        unconstrained_pcs = []
-        user_names = []
-        for u in users:
-            props = u.get("Properties", {}) or {}
-            name = props.get("name") or props.get("samaccountname") or ""
-            if name:
-                user_names.append(name)
-            if props.get("hasspn"):
-                kerberoastable.append(name)
-            if props.get("dontreqpreauth"):
-                asrepable.append(name)
-        for g in groups:
-            props = g.get("Properties", {}) or {}
-            gname = (props.get("name") or "").upper()
-            if gname.startswith(("DOMAIN ADMINS@", "ENTERPRISE ADMINS@")):
-                for m in (g.get("Members") or []):
-                    da_members.append(
-                        m.get("ObjectIdentifier", "")[:20] + "…")
-        for c in computers:
-            props = c.get("Properties", {}) or {}
-            if props.get("unconstraineddelegation"):
-                unconstrained_pcs.append(props.get("name", ""))
+        # Collect stats for the summary finding (pure helper — unit-tested
+        # in tests/test_bloodhound_parser.py).  Excludes krbtgt/disabled
+        # accounts from the kerberoast list and resolves Domain/Enterprise
+        # Admins members to display names.
+        stats_x = _bloodhound_extract_stats(users, computers, groups)
+        user_names        = stats_x["user_names"]
+        kerberoastable    = stats_x["kerberoastable"]
+        asrepable         = stats_x["asrepable"]
+        unconstrained_pcs = stats_x["unconstrained_pcs"]
+        da_members        = stats_x["da_members"]
 
         # Push discovered users to the session
         try:
@@ -1191,6 +1252,7 @@ class CardADParserMixin:
             f"  Kerberoastable (SPN)        : {len(kerberoastable)}",
             f"  AS-REP roastable (no preauth): {len(asrepable)}",
             f"  Unconstrained delegation PCs: {len(unconstrained_pcs)}",
+            f"  Domain/Enterprise Admins    : {len(da_members)}",
             f"",
             f"Zip: {zip_path}",
             f"",
@@ -1214,15 +1276,25 @@ class CardADParserMixin:
                          "(goldmine for privesc):"]
             for n in unconstrained_pcs[:10]:
                 desc.append(f"  · {n}")
+        if da_members:
+            desc += ["", "Domain / Enterprise Admins "
+                         "(crown jewels — target these):"]
+            for n in da_members[:10]:
+                desc.append(f"  · {n}")
 
         sev = ("critical" if unconstrained_pcs or kerberoastable
                else ("medium" if asrepable else "info"))
+        # replace=True: bloodhound is a snapshot tool — every run is a
+        # full re-collection, so a re-run must OVERWRITE the finding's
+        # description, not append a diff onto the stale one (which
+        # produced a self-contradicting card: "Kerberoastable 1 / KRBTGT"
+        # from run #1 stacked above "Kerberoastable 0" from run #2).
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=f"BLOODHOUND — {len(users)} users, "
                   f"{len(computers)} computers on {target}",
             description="\n".join(desc),
             severity=sev, source=tool.name,
-            linked_run_id=rid))
+            linked_run_id=rid, replace=True))
         self.app.terminal.write(
             f"  [+] BloodHound — parsed ZIP: {len(users)} users, "
             f"{len(kerberoastable)} kerberoastable, "

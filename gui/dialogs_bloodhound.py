@@ -207,6 +207,20 @@ def show_bloodhound_summary_dialog(parent, target, stats, zip_path,
     _sub(win, f"target: {target}", color=COLORS["text_dim"])
     _divider(win)
 
+    # All report content goes into a scrollable body so a tall dialog
+    # (summary + zip path + BH CE steps) is fully reachable via a
+    # right-side scrollbar instead of being clipped at the bottom on
+    # shorter screens.  The CLOSE button stays outside it, pinned to the
+    # window bottom.  `win` is aliased to the body so the section code
+    # below keeps packing into it unchanged; it's restored before CLOSE.
+    _outer_win = win
+    body = ctk.CTkScrollableFrame(
+        win, fg_color="transparent",
+        scrollbar_button_color=COLORS["border_dim"],
+        scrollbar_button_hover_color=COLORS["text_dim"])
+    body.pack(fill="both", expand=True, padx=0, pady=(0, 4))
+    win = body
+
     # ── §1 Findings summary ──────────────────────────────────────────
     s = stats or {}
     summary_lines = [
@@ -241,8 +255,12 @@ def show_bloodhound_summary_dialog(parent, target, stats, zip_path,
             font=_f("md", True), text_color=COLORS["text_bright"],
             anchor="w",
         ).pack(fill="x", padx=24, pady=(2, 0))
+        # wrap="none": the zip path is one long unbreakable token — word
+        # wrap can't split it, so it would be clipped at the right edge.
+        # A horizontal scrollbar keeps the whole path reachable.
         _selectable_text(win, zip_path,
-                         color=COLORS["text_green"], height=42)
+                         color=COLORS["text_green"], height=56,
+                         wrap="none")
 
         zip_dir = os.path.dirname(zip_path)
 
@@ -350,7 +368,7 @@ def show_bloodhound_summary_dialog(parent, target, stats, zip_path,
     _selectable_text(
         win,
         "git clone https://github.com/SpecterOps/BloodHound.git",
-        color=COLORS["text_green"], height=34)
+        color=COLORS["text_green"], height=48, wrap="none")
 
     _sub(win,
          "2 · bring BloodHound CE up with Docker "
@@ -360,7 +378,7 @@ def show_bloodhound_summary_dialog(parent, target, stats, zip_path,
         win,
         "cd BloodHound/examples/docker-compose && "
         "docker compose pull && docker compose up -d",
-         color=COLORS["text_green"], height=34)
+         color=COLORS["text_green"], height=48, wrap="none")
 
     _sub(win,
          "3 · open http://localhost:8080 in your browser and sign in. "
@@ -377,7 +395,8 @@ def show_bloodhound_summary_dialog(parent, target, stats, zip_path,
          "Cypher.",
          color=COLORS["text_dim"], wrap=660)
 
-    # ── Close ────────────────────────────────────────────────────────
+    # ── Close (pinned to the window bottom, outside the scroll body) ──
+    win = _outer_win
     row = _btn_row(win)
     _btn(row, "CLOSE", lambda: _safe_destroy(win), primary=True, w=120)
 

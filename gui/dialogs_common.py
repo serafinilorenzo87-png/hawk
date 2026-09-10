@@ -228,10 +228,17 @@ def _lane_banner(win, lane):
                                                       pady=(0, 8))
 
 
-def _selectable_text(parent, text, color=None, height=None):
+def _selectable_text(parent, text, color=None, height=None, wrap="word"):
     """
     A selectable text widget (CTkTextbox disabled) for commands/paths/CVEs.
     User can click and copy content.
+
+    ``wrap`` is passed through to the CTkTextbox.  The default "word"
+    wraps at spaces — fine for prose and space-separated commands.  Pass
+    ``wrap="none"`` for content that can't word-wrap (a long filesystem
+    path is one unbreakable token) or that reads best on a single line:
+    CTkTextbox then shows its horizontal scrollbar so the whole value is
+    reachable instead of being clipped at the dialog's right edge.
 
     Sets the `_hawk_bubble_wheel` flag on both the CTkTextbox and
     the underlying tk.Text — this tells utils.mousewheel's global
@@ -248,7 +255,7 @@ def _selectable_text(parent, text, color=None, height=None):
         fg_color=COLORS["bg_card"],
         text_color=color or COLORS["text_bright"],
         border_color=COLORS["border_dim"], border_width=1,
-        corner_radius=3, wrap="word")
+        corner_radius=3, wrap=wrap)
     box.pack(fill="x", padx=24, pady=4)
     box.insert("1.0", text)
     box.configure(state="disabled")
