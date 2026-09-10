@@ -408,6 +408,59 @@ class SmbAnonymousParserTests(_TkTestCase):
         self.assertFalse(sess.credentials[0]["verified"],
                          "a bare share listing was stored VERIFIED")
 
+    _WORKGROUP_TAIL = [
+        ("out", "Reconnecting with SMB1 for workgroup listing."),
+        ("out", "do_connect: Connection to 10.10.10.10 failed "
+                "(Error NT_STATUS_RESOURCE_NAME_NOT_FOUND)"),
+        ("out", "Unable to connect with SMB1 -- no workgroup available"),
+    ]
+
+    def test_share_listing_survives_smb1_workgroup_error(self):
+        """smbclient -L lists the shares, then ALWAYS reconnects with SMB1
+        to list the workgroup — a step that fails
+        NT_STATUS_RESOURCE_NAME_NOT_FOUND on modern targets AFTER the enum
+        succeeded.  That benign trailing error must not drop a real share
+        listing (the authenticated MS3 run enumerated 6 shares but got
+        'no finding added')."""
+        sess = self._session()
+        card = self._parser(sess)
+        card._tool_widgets["smbclient_list"]["_last_cmd"] = (
+            "smbclient -L //10.10.10.10 -U 'vagrant%vagrant'")
+        tool = types.SimpleNamespace(id="smbclient_list", name="SMBCLIENT")
+        log = [
+            ("out", "\tADMIN$          Disk      Remote Admin"),
+            ("out", "\tC$              Disk      Default share"),
+            ("out", "\tCertEnroll      Disk      ADCS share"),
+            ("out", "\tIPC$            IPC       Remote IPC"),
+        ] + self._WORKGROUP_TAIL
+        card._parse_smb_output(tool, log)
+
+        titles = [t for t, _s, _src in card.app.target_intel.findings]
+        self.assertTrue(
+            any("Authenticated Access" in t for t in titles),
+            f"real share listing was dropped by the workgroup error: {titles}")
+        shares = [s.lower() for s in sess.discovered_shares]
+        self.assertIn("certenroll", shares)
+        self.assertIn("admin$", shares)
+
+    def test_ipc_only_with_workgroup_error_stays_suppressed(self):
+        """The guard the real-shares test protects: a run that yields only
+        IPC$ (half-negotiate) plus the NT_STATUS error is still treated as
+        a failure — no finding, no shares."""
+        sess = self._session()
+        card = self._parser(sess)
+        card._tool_widgets["smbclient_list"]["_last_cmd"] = (
+            "smbclient -L //10.10.10.10 -N")
+        tool = types.SimpleNamespace(id="smbclient_list", name="SMBCLIENT")
+        log = [("out", "\tIPC$            IPC       Remote IPC")] \
+            + self._WORKGROUP_TAIL
+        card._parse_smb_output(tool, log)
+
+        titles = [t for t, _s, _src in card.app.target_intel.findings]
+        self.assertFalse(any("Authenticated Access" in t for t in titles),
+                         f"IPC$-only failure produced a finding: {titles}")
+        self.assertEqual([], sess.discovered_shares)
+
 
 if __name__ == "__main__":
     unittest.main()

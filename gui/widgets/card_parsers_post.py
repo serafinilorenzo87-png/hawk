@@ -440,18 +440,51 @@ class CardPostParserMixin:
                 if share_name.lower() not in ("", "sharename"):
                     shares.append((share_name, "Disk"))
 
-        # Connection failure always wins — even when smbclient manages to
-        # output a partial share table (e.g. IPC$ from a half-completed
-        # negotiate) before the error fires, the NT_STATUS_* error means
-        # the auth/session was never established.  We must not surface a
-        # "SMB Authenticated Access" finding for a connection that failed.
-        # Previous guard checked `not shares` which let IPC$-only results
-        # through and produced false-positive findings.
+        # smbclient -L ALWAYS ends with an SMB1 "workgroup listing"
+        # reconnect that fails NT_STATUS_RESOURCE_NAME_NOT_FOUND on modern
+        # targets — AFTER the share enum already succeeded.  That benign
+        # step must not mask a real listing: if we parsed REAL shares
+        # (disk shares beyond IPC$) and the ONLY failure marker is that
+        # workgroup one, the run actually succeeded.
+        real_shares = [s for s in shares if s[0].lower() != "ipc$"]
+        # smbclient prints the workgroup-step failure as
+        #   "Reconnecting with SMB1 for workgroup listing."
+        #   "do_connect: Connection to <ip> failed (Error
+        #    NT_STATUS_RESOURCE_NAME_NOT_FOUND)"
+        #   "Unable to connect with SMB1 -- no workgroup available"
+        # i.e. that single benign step trips MULTIPLE fail markers
+        # (do_connect + nt_status).  When real shares were listed AND the
+        # workgroup-step markers are present, it is that benign step, not
+        # a connection failure.
+        workgroup_step = (
+            "reconnecting with smb1 for workgroup listing" in text
+            or "no workgroup available" in text)
+        if connect_failed and real_shares and workgroup_step:
+            connect_failed = False
+
+        # Connection failure otherwise wins — even a partial share table
+        # (e.g. IPC$-only from a half-completed negotiate) before an
+        # NT_STATUS_* error means the auth/session was never established,
+        # so we must not surface a finding for it.  (Checking `not shares`
+        # alone let IPC$-only false positives through — hence the
+        # real-shares test above.)
         if connect_failed:
             self.app.terminal.write(
                 "  [i] SMB: connection / auth failed — no shares "
                 "enumerated, no finding added.", "dim")
             return
+
+        # Persist enumerated shares into the session so discovered_shares
+        # consumers see them, not just this finding's text.  (rpcclient /
+        # enum4linux already do this; netexec / smbclient share listings
+        # went only into the finding, leaving discovered_shares empty.)
+        if shares:
+            try:
+                _sess = self.app.session_manager.current
+                if _sess is not None:
+                    _sess.add_discovered_shares([s[0] for s in shares])
+            except Exception as e:
+                print(f"[HAWK] smb discovered-shares push failed: {e}")
 
         # Anonymous access is what the parse actually observed: no
         # credential on the command line, and the server still answered
