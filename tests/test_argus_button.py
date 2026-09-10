@@ -71,6 +71,7 @@ class ArgusButtonStateTests(unittest.TestCase):
         bar._make_argus_button = TargetBar._make_argus_button.__get__(bar)
         bar._make_argus_active_button = TargetBar._make_argus_active_button.__get__(bar)
         bar._make_coming_soon_button = TargetBar._make_coming_soon_button.__get__(bar)
+        bar._attach_tooltip = TargetBar._attach_tooltip.__get__(bar)
         bar._show_coming_soon_dialog = TargetBar._show_coming_soon_dialog.__get__(bar)
         bar._open_argus_window = TargetBar._open_argus_window.__get__(bar)
         bar._build_hawk_api = TargetBar._build_hawk_api.__get__(bar)
