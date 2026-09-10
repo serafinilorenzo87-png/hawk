@@ -1487,16 +1487,25 @@ class CardADParserMixin:
                 desc.append(f"  · {u}")
             if len(users) > 20:
                 desc.append(f"  · … {len(users)-20} more")
+        if computers:
+            desc += ["", "Computers (first 20):"]
+            for c in computers[:20]:
+                desc.append(f"  · {c}")
+            if len(computers) > 20:
+                desc.append(f"  · … {len(computers)-20} more")
         desc += ["",
                  f"Full output: {outdir}/domain_users.html + *.json + "
                  f"*.grep — open domain_users.html in a browser."]
 
+        # replace=True: ldapdomaindump is a snapshot tool (a re-run is a
+        # full re-dump), so overwrite the finding instead of appending a
+        # diff onto the stale one — same reasoning as bloodhound.
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=f"LDAPDOMAINDUMP — {len(users)} users / "
                   f"{len(computers)} computers on {target}",
             description="\n".join(desc),
             severity="info", source=tool.name,
-            linked_run_id=rid))
+            linked_run_id=rid, replace=True))
         self.app.terminal.write(
             f"  [+] ldapdomaindump — {len(users)} users, "
             f"{len(computers)} computers → Target Intel.", "success")
