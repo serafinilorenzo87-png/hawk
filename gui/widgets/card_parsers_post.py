@@ -601,8 +601,14 @@ class CardPostParserMixin:
                 desc_lines += ["",
                                f"→ Credential saved to Credential "
                                f"Store (host={target}, SMB)."]
-            title = (f"SMB Authenticated Access — {auth_user}@{target}"
-                     + ("  (LOCAL ADMIN)" if pwn3d else ""))
+            # Stable title WITHOUT the "(LOCAL ADMIN)" suffix so the SAME
+            # authenticated-access fact reported by netexec (Pwn3d -> the
+            # suffix) and by smbclient (a bare listing -> no suffix)
+            # collapses into ONE card with a run badge instead of two.
+            # The Pwn3d / local-admin status stays in the description (the
+            # "Local admin (Pwn3d!)" line above) and in the severity, which
+            # escalates to high on merge -- so nothing is lost.
+            title = f"SMB Authenticated Access — {auth_user}@{target}"
             self.app.target_intel.add_auto_finding(
                 title=title,
                 description="\n".join(desc_lines),
