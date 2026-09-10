@@ -655,14 +655,27 @@ class CardADParserMixin:
             except Exception:
                 pass
 
-        # SPN user list from stdout
-        USER_ROW_RE = re.compile(
-            r"^\s*([\w.\-$]+)\s+[^\s]+\s+(?:\d{4}-\d{2}-\d{2}|<never>)")
+        # SPN user list from the stdout table.  GetUserSPNs prints:
+        #   ServicePrincipalName        Name       MemberOf   PwdLastSet …
+        # so the SPN is the FIRST column (it contains '/' and often ':')
+        # and the sAMAccountName is the SECOND.  The old regex assumed the
+        # username came first and only matched [\w.\-$], so it broke on the
+        # '/' in the SPN and extracted NOBODY — the whole run then returned
+        # False and fell through to the generic low-severity fallback
+        # finding (the "KERBEROAST (GetUserSPNs) on <t>" card the operator
+        # saw at severity 'low').
+        ROW_RE = re.compile(r"^(\S+)\s+([\w.\-$]+)\s+\S")
         users_found = []
         for ln in lines:
-            m = USER_ROW_RE.match(ln)
-            if m:
-                users_found.append(m.group(1))
+            s = ln.rstrip()
+            if not s or "ServicePrincipalName" in s:
+                continue
+            m = ROW_RE.match(s)
+            # A real data row has an SPN (service/host) as column 1; that
+            # '/' also skips the dashed separator line.
+            if m and "/" in m.group(1):
+                users_found.append(m.group(2))
+        users_found = list(dict.fromkeys(users_found))
 
         # ── "No entries found!" — valid negative result ──────────────
         # impacket-GetUserSPNs prints exactly this line when the query
@@ -738,6 +751,10 @@ class CardADParserMixin:
             except Exception as e:
                 print(f"[HAWK] kerberoast cred push failed: {e}")
 
+        # Clock skew aborts the TGS request (KRB_AP_ERR_SKEW): GetUserSPNs
+        # still LISTS the SPN accounts over LDAP but retrieves no hash.
+        skew = ("krb_ap_err_skew" in joined or "clock skew" in joined)
+
         # Summary finding
         desc_parts = [
             f"Kerberoast enumeration on {target}.",
@@ -754,8 +771,22 @@ class CardADParserMixin:
         if added:
             desc_parts += ["", (f"→ {added} TGS hash(es) added to "
                                 f"Credential Store (hashcat -m 13100).")]
+        if users_found and not hashes and skew:
+            desc_parts += [
+                "",
+                "NOTE: SPN accounts found but NO TGS hash retrieved — the "
+                "ticket request failed with KRB_AP_ERR_SKEW (clock skew).",
+                "Kerberos compares UTC and is timezone-independent; your "
+                "clock is simply >5 min off the DC's.  Sync to the DC and "
+                "re-run to roast them:",
+                f"  sudo ntpdate -u {target}   (or: sudo rdate -n {target})"]
 
-        sev = "high" if hashes else "info"
+        # Finding severity: a kerberoastable service account is a high-value
+        # foothold whether or not we grabbed the hash this run, so raise it
+        # to 'high' as soon as any SPN user is found.  It was 'info' when no
+        # hash — combined with the row-regex bug that dropped the users,
+        # every skewed run read as a low-priority generic finding.
+        sev = "high" if (hashes or users_found) else "info"
         title = (f"KERBEROAST — {len(hashes)} TGS hash(es) on "
                  f"{target}" if hashes else
                  f"KERBEROAST — {len(users_found)} SPN user(s) on "
@@ -763,7 +794,7 @@ class CardADParserMixin:
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=title, description="\n".join(desc_parts),
             severity=sev, source=tool.name,
-            linked_run_id=rid))
+            linked_run_id=rid, replace=True))
         self.app.terminal.write(
             f"  [+] Kerberoast — {added} TGS hash(es) → Credential "
             f"Store.", "success")
