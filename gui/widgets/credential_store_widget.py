@@ -503,7 +503,20 @@ class CredentialStoreWidget(ctk.CTkFrame):
                 continue
             # Same identity — compare the secret value.
             if cred.cred_type == "hash":
-                if c.cred_type == "hash" and c.hash_val == cred.hash_val:
+                if c.cred_type != "hash":
+                    continue
+                # Kerberos roast hashes (AS-REP / TGS) embed a per-request
+                # nonce + timestamp, so re-roasting the SAME account yields
+                # a DIFFERENT hash every time.  Matching on the exact
+                # hash_val would stack a duplicate row on every re-run, so
+                # for these dedup on identity (user, host, hash_type) — it
+                # is the same roastable account, just a fresh ticket.  Every
+                # other hash type (NTLM, DCC2, …) is stable → match value.
+                _ROAST = ("Kerberos AS-REP", "Kerberos TGS")
+                if cred.hash_type in _ROAST:
+                    if c.hash_type == cred.hash_type:
+                        return idx
+                elif c.hash_val == cred.hash_val:
                     return idx
             else:
                 if c.password == cred.password:

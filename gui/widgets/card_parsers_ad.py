@@ -923,9 +923,11 @@ class CardADParserMixin:
             return True
 
         added = 0
+        roasted_users = []
         for h in hashes:
             user_m = re.search(r"\$([^@\$]+)@", h)
             user = user_m.group(1) if user_m else "asrep-user"
+            roasted_users.append(user)
             try:
                 self.app.cred_store.add_credential(Credential(
                     username=user,
@@ -948,17 +950,27 @@ class CardADParserMixin:
             except Exception as e:
                 print(f"[HAWK] asrep cred push failed: {e}")
 
+        roasted_users = list(dict.fromkeys(roasted_users))
+        _asrep_desc = [
+            f"GetNPUsers found {len(hashes)} user(s) with 'Do not require "
+            f"pre-authentication' set — their AS-REP is retrievable "
+            f"without the account's password.",
+            "",
+            f"→ {added} hash(es) added to Credential Store "
+            f"(hashcat -m 18200).  Cracked result = the user's domain "
+            f"password.",
+        ]
+        if roasted_users:
+            _asrep_desc += ["", "AS-REP roastable users:"]
+            for u in roasted_users[:20]:
+                _asrep_desc.append(f"  · {u}")
+            if len(roasted_users) > 20:
+                _asrep_desc.append(f"  · … {len(roasted_users)-20} more")
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=f"AS-REP ROAST — {len(hashes)} hash(es) on {target}",
-            description=(
-                f"GetNPUsers found {len(hashes)} user(s) with "
-                f"'Do not require pre-authentication' flag set — their "
-                f"AS-REP is retrievable without any credentials.\n\n"
-                f"→ {added} hash(es) added to Credential Store "
-                f"(hashcat -m 18200).\n"
-                f"Cracked result = the user's domain password."),
+            description="\n".join(_asrep_desc),
             severity="high", source=tool.name,
-            linked_run_id=rid))
+            linked_run_id=rid, replace=True))
         self.app.terminal.write(
             f"  [+] AS-REP Roast — {added} hash(es) → Credential Store.",
             "success")

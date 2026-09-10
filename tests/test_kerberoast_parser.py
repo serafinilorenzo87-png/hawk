@@ -170,5 +170,69 @@ class KerberoastParserTests(unittest.TestCase):
         self.assertEqual(store.added, [])
 
 
+_ASREP_LOG = [
+    "Impacket v0.13.0 - Copyright Fortra, LLC",
+    "Name       MemberOf      PasswordLastSet       LastLogon   UAC",
+    "---------  ------------  --------------------  ----------  --------",
+    "svc_asrep  CN=HAWK_Team  2026-09-11 02:07:16   <never>     0x410200",
+    ("$krb5asrep$23$svc_asrep@PROVA.PROVA.COM:"
+     "8ede90a9b9e01d2fb88e0a748fe3eb1f$21bec405087a375be8b8098ba3d5cfe7"),
+]
+
+
+def _run_asrep(log):
+    from gui.widgets.card_parsers_ad import CardADParserMixin
+
+    findings = []
+    store = _Store()
+
+    class Host(CardADParserMixin):
+        def __init__(self):
+            self.phase_id = "ad_pentesting"
+            self.app = types.SimpleNamespace(
+                cred_store=store,
+                target_intel=types.SimpleNamespace(
+                    add_auto_finding=lambda **k: findings.append(k)),
+                terminal=_Terminal(),
+                after=lambda _d, fn: fn())
+
+        def _get_target(self):
+            return "192.0.2.10"
+
+        def _strip_ansi(self, s):
+            return s
+
+    tool = types.SimpleNamespace(
+        name="AS-REP ROAST (GetNPUsers)", binary="impacket-GetNPUsers",
+        id="getnpusers")
+    Host()._parse_asrep_to_intel(tool, [("out", ln) for ln in log])
+    return findings, store
+
+
+class AsrepParserTests(unittest.TestCase):
+    def setUp(self):
+        self._old_ctk = sys.modules.get("customtkinter")
+        _install_customtkinter_stub()
+
+    def tearDown(self):
+        if self._old_ctk is None:
+            sys.modules.pop("customtkinter", None)
+        else:
+            sys.modules["customtkinter"] = self._old_ctk
+
+    def test_finding_names_the_roasted_users_and_saves_cred(self):
+        findings, store = _run_asrep(_ASREP_LOG)
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertEqual(f["severity"], "high")
+        # The finding must NAME the roastable account, not just count it.
+        self.assertIn("AS-REP roastable users:", f["description"])
+        self.assertIn("svc_asrep", f["description"])
+        # And the hash lands in the store as a Kerberos AS-REP cred.
+        self.assertEqual(len(store.added), 1)
+        self.assertEqual(store.added[0].username, "svc_asrep")
+        self.assertEqual(store.added[0].hash_type, "Kerberos AS-REP")
+
+
 if __name__ == "__main__":
     unittest.main()
