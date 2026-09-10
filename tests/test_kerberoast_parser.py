@@ -234,5 +234,87 @@ class AsrepParserTests(unittest.TestCase):
         self.assertEqual(store.added[0].hash_type, "Kerberos AS-REP")
 
 
+_FINDELEG_LOG = [
+    "Impacket v0.13.0 - Copyright Fortra, LLC",
+    "AccountName      AccountType  DelegationType                       "
+    "DelegationRightsTo                   SPN Exists",
+    "---------------  -----------  -----------------------------------  "
+    "-----------------------------------  ----------",
+    "VAGRANT-2008R2$  Computer     Unconstrained                        "
+    "N/A                                  Yes",
+    "svc_deleg        Person       Constrained w/o Protocol Transition  "
+    "CIFS/vagrant-2008r2.prova.prova.com  No",
+]
+
+
+def _run_findeleg(log):
+    from gui.widgets.card_parsers_ad import CardADParserMixin
+
+    findings = []
+
+    class Host(CardADParserMixin):
+        def __init__(self):
+            self.phase_id = "ad_pentesting"
+            self.app = types.SimpleNamespace(
+                target_intel=types.SimpleNamespace(
+                    add_auto_finding=lambda **k: findings.append(k)),
+                terminal=_Terminal(),
+                after=lambda _d, fn: fn())
+
+        def _get_target(self):
+            return "192.0.2.10"
+
+        def _strip_ansi(self, s):
+            return s
+
+    tool = types.SimpleNamespace(
+        name="FIND DELEGATION", binary="impacket-findDelegation",
+        id="findDelegation")
+    claimed = Host()._parse_findelegation_to_intel(
+        tool, [("out", ln) for ln in log])
+    return claimed, findings
+
+
+class FindDelegationParserTests(unittest.TestCase):
+    def setUp(self):
+        self._old_ctk = sys.modules.get("customtkinter")
+        _install_customtkinter_stub()
+
+    def tearDown(self):
+        if self._old_ctk is None:
+            sys.modules.pop("customtkinter", None)
+        else:
+            sys.modules["customtkinter"] = self._old_ctk
+
+    def test_structured_high_finding_with_types_and_targets(self):
+        claimed, findings = _run_findeleg(_FINDELEG_LOG)
+        self.assertTrue(claimed, "parser must claim the result, not fall "
+                        "through to the generic dump")
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        # Delegation is a real privesc vector → high, not the generic info.
+        self.assertEqual(f["severity"], "high")
+        self.assertIn("2 delegated", f["title"])
+        d = f["description"]
+        # Both accounts, their types, and the constrained target SPN.
+        self.assertIn("VAGRANT-2008R2$", d)
+        self.assertIn("Unconstrained", d)
+        self.assertIn("svc_deleg", d)
+        self.assertIn("CIFS/vagrant-2008r2.prova.prova.com", d)
+        # The multi-word DelegationType column parsed whole.
+        self.assertIn("Constrained w/o Protocol Transition", d)
+
+    def test_no_delegation_is_info(self):
+        claimed, findings = _run_findeleg([
+            "Impacket v0.13.0",
+            "AccountName  AccountType  DelegationType  DelegationRightsTo"
+            "  SPN Exists",
+            "No entries found!",
+        ])
+        self.assertTrue(claimed)
+        self.assertEqual(findings[0]["severity"], "info")
+        self.assertIn("none on", findings[0]["title"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -976,6 +976,105 @@ class CardADParserMixin:
             "success")
         return True
 
+    def _parse_findelegation_to_intel(self, tool, log: list) -> bool:
+        """impacket-findDelegation parser.
+
+        Table (2+-space aligned columns; DelegationType is multi-word):
+          AccountName  AccountType  DelegationType  DelegationRightsTo  SPN Exists
+
+        Without this the generic fallback dumped the raw table at severity
+        'info' — but delegation (unconstrained / constrained / RBCD) is a
+        real privilege-escalation vector, so it deserves a structured
+        high-severity finding that names each account, its delegation
+        type, and the target SPN.
+        """
+        import re
+        from utils.run_id import new_run_id
+
+        target = self._get_target() or "target"
+        rid = new_run_id()
+        lines = [self._strip_ansi(ln) for _, ln in log]
+
+        rows = []
+        for ln in lines:
+            st = ln.strip()
+            if (not st or st.startswith("Impacket")
+                    or st.startswith("AccountName")
+                    or set(st) <= set("- ")):
+                continue
+            cols = re.split(r"\s{2,}", st)
+            # A data row: col[1] is the account type.
+            if len(cols) >= 3 and cols[1] in (
+                    "Computer", "Person", "User", "Group"):
+                name   = cols[0].strip()
+                atype  = cols[1].strip()
+                dtype  = cols[2].strip()
+                rights = cols[3].strip() if len(cols) > 3 else ""
+                rows.append((name, atype, dtype, rights))
+
+        if not rows:
+            low = "\n".join(lines).lower()
+            if "no entries found" in low or "findelegation" in low:
+                self.app.after(0, lambda:
+                    self.app.target_intel.add_auto_finding(
+                        title=f"FIND DELEGATION — none on {target}",
+                        description=(
+                            "impacket-findDelegation queried the DC "
+                            "successfully but no account has "
+                            "unconstrained / constrained / RBCD "
+                            "delegation rights.  Nothing to abuse here."),
+                        severity="info", source=tool.name,
+                        linked_run_id=rid, replace=True))
+                return True
+            return False
+
+        lo = lambda s: s.lower()
+        unconstrained = [r for r in rows if "unconstrained" in lo(r[2])]
+        constrained   = [r for r in rows
+                         if "constrained" in lo(r[2])
+                         and "unconstrained" not in lo(r[2])
+                         and "resource" not in lo(r[2])]
+        rbcd          = [r for r in rows if "resource" in lo(r[2])]
+
+        desc = [f"Delegation enumeration on {target} — "
+                f"{len(rows)} account(s) with delegation rights.", ""]
+        for name, atype, dtype, rights in rows:
+            line = f"  · {name} ({atype}) — {dtype}"
+            if rights and rights.upper() != "N/A":
+                line += f"  →  {rights}"
+            desc.append(line)
+        desc += ["", "Why it matters:"]
+        if unconstrained:
+            desc.append(
+                "  · Unconstrained — the account caches the TGT of ANY "
+                "principal that authenticates to it; coerce a DC to auth "
+                "(PrinterBug / PetitPotam) and capture a Domain Admin "
+                "TGT.  NOTE: a DC is ALWAYS unconstrained, so verify "
+                "whether the listed account is the DC (expected) or a "
+                "member host (full compromise).")
+        if constrained:
+            desc.append(
+                "  · Constrained — abuse S4U2Self + S4U2Proxy to "
+                "impersonate any user to the listed SPN service "
+                "(CIFS → file shares, HTTP → WinRM, LDAP → DCSync).")
+        if rbcd:
+            desc.append(
+                "  · Resource-Based (RBCD) — write "
+                "msDS-AllowedToActOnBehalfOfOtherIdentity, then S4U "
+                "into the target computer as any user.")
+
+        self.app.after(0, lambda:
+            self.app.target_intel.add_auto_finding(
+                title=f"FIND DELEGATION — {len(rows)} delegated "
+                      f"account(s) on {target}",
+                description="\n".join(desc),
+                severity="high", source=tool.name,
+                linked_run_id=rid, replace=True))
+        self.app.terminal.write(
+            f"  [+] FIND DELEGATION — {len(rows)} delegated account(s) "
+            f"→ Target Intel.", "success")
+        return True
+
     def _parse_certipy_find_to_intel(self, tool, log: list) -> bool:
         """Certipy find output parser — surface every 'Vulnerable to:
         ESCx' with the CA + template context."""

@@ -2035,9 +2035,10 @@ class CardRuntimeMixin:
                 "adidnsdump":        self._parse_adidnsdump_to_intel,
                 "ldapdomaindump":    self._parse_ldapdomaindump_to_intel,
                 "nxc_ldap":          self._parse_nxc_ldap_to_intel,
-                # findDelegation / rbcd_attack / ticketer produce mostly
-                # text output — handled by the generic fallback since
-                # they rarely produce structured creds/findings.
+                "findDelegation":    self._parse_findelegation_to_intel,
+                # rbcd_attack / ticketer produce mostly text output —
+                # handled by the generic fallback since they rarely
+                # produce structured creds/findings.
             }
             if (not used_specialized and log
                     and tool.id in AD_PARSER_BY_TOOL_ID):
