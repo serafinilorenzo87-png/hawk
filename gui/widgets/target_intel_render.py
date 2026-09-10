@@ -2643,16 +2643,17 @@ class TargetIntelRenderMixin:
                 # No port bookkeeping here: the port is part of the
                 # merge key above, so a match already means the two
                 # findings agree on it.
-                # Mark as freshly updated — stays highlighted until the
-                # user actually reads it (see _mark_finding_read).
-                # When `added == 0` there's nothing genuinely new
-                # (just a re-trigger of the same evidence), so we
-                # skip the highlight + don't bump the "(N new)"
-                # counter — otherwise the badge over-counts and the
-                # user sees "(2 new)" but only ONE row glows green.
-                if added:
-                    existing["_fresh"]       = True
-                    existing["_update_note"] = f"UPDATED #{run_no}"
+                # Re-highlight the card on EVERY re-run (cyan, until the
+                # user reads it) — even when the evidence is identical.
+                # Previously a same-evidence re-run left `_fresh` untouched,
+                # so re-running a tool on a finding the user had already
+                # read gave NO visual feedback (looked like nothing
+                # happened).  The "(N new)" badge mirrors the number of
+                # fresh rows (_refresh_new_badge), so re-flagging one row
+                # can never make the badge drift from the glow.
+                existing["_fresh"] = True
+                existing["_update_note"] = (
+                    f"UPDATED #{run_no}" if added else f"RE-RUN #{run_no}")
                 self._render_and_blink(count_as_new=bool(added))
                 if added:
                     self.app.terminal.write(
