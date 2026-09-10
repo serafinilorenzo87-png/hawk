@@ -85,8 +85,10 @@ _NXC_LDAP_LOG = [
     _p("DnsAdmins                                0         DNS Administrators Group"),
 ]
 
-_EXPECTED_USERS = {"VAGRANT-2008R2$", "Administrator", "vagrant",
-                   "krbtgt", "Guest"}
+# The four REGULAR accounts.  VAGRANT-2008R2$ is a machine account
+# (trailing $) — the parser now splits those out of discovered_users
+# (random 120-char password → useless in a wordlist), so it is NOT here.
+_EXPECTED_USERS = {"Administrator", "vagrant", "krbtgt", "Guest"}
 _EXPECTED_GROUPS = {
     "Administrators", "Users", "Print Operators", "Backup Operators",
     "Schema Admins", "Enterprise Admins", "Domain Admins", "Domain Users",
@@ -179,9 +181,12 @@ class NxcLdapTableParserTests(unittest.TestCase):
             self.assertIn("192.168.176.177", f["title"])
             self.assertNotIn("users", f["title"])
             self.assertTrue(f.get("replace"))
-            # Counts moved to the description.
-            self.assertIn("5", f["description"])
-            self.assertIn("12", f["description"])
+            # Counts in the description: 4 regular users (the machine
+            # account VAGRANT-2008R2$ is split out under its own line) +
+            # 12 groups.
+            self.assertRegex(f["description"], r"Users discovered\s*:\s*4")
+            self.assertRegex(f["description"], r"Machine accounts\s*:\s*1")
+            self.assertRegex(f["description"], r"Groups discovered\s*:\s*12")
 
     def test_finding_lists_all_users_beyond_the_old_20_cap(self):
         """The finding must show the WHOLE enumeration (it is expandable),

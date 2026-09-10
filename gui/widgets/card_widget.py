@@ -2133,9 +2133,12 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
         },
         "nxc_ldap": {
             "purpose": (
-                "NetExec LDAP module — one-liner enumeration: users, "
-                "groups, admin-count outliers, kerberoastable / AS-REP "
-                "roastable / trusted-for-delegation users."),
+                "NetExec LDAP module — domain enumeration: users, groups, "
+                "admin-count outliers, trusted-for-delegation accounts.  "
+                "Kerberoast / AS-REP flags are available as extra args "
+                "below, but the dedicated KERBEROAST / AS-REP ROAST cards "
+                "are the cleaner path for credential extraction (no double "
+                "KDC noise)."),
             "needs":   "Any domain user.  Accepts NTLM hash via -H.",
             "output":  "HAWK parses stdout → admin-count users / SPNs / "
                        "delegation flags surface in Target Intel.  "

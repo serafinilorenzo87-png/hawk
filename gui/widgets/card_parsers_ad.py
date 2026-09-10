@@ -1718,6 +1718,13 @@ class CardADParserMixin:
 
         # Dedup preserving order.
         users           = list(dict.fromkeys(users))
+        # Machine accounts (trailing $) are not regular user accounts —
+        # they carry random 120-char passwords, so they're noise in the
+        # user list and useless in any wordlist.  Split them out so the
+        # "regular accounts" count/list stays honest (bloodhound and
+        # ldapdomaindump exclude them too).
+        machine_accts   = [u for u in users if u.endswith("$")]
+        users           = [u for u in users if not u.endswith("$")]
         groups          = list(dict.fromkeys(groups))
         admincount      = list(dict.fromkeys(admincount))
         delegation      = list(dict.fromkeys(delegation))
@@ -1807,6 +1814,7 @@ class CardADParserMixin:
             f"NETEXEC LDAP enumeration on {target}.",
             "",
             f"  Users discovered          : {len(users) + len(special)}",
+            f"  Machine accounts          : {len(machine_accts)}",
             f"  Groups discovered         : {len(groups)}",
             f"  Admin-count=1 users       : {len(admincount)}",
             f"  Trusted-for-delegation    : {len(delegation)}",
