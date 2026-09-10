@@ -66,6 +66,14 @@ _JOHN_FORMAT = {
     "sha512crypt":  "sha512crypt",
     "sha256crypt":  "sha256crypt",
     "LM":           "LM",
+    # Kerberoast / AS-REP roast tickets (impacket $krb5tgs$ / $krb5asrep$).
+    # john jumbo has had both formats for years — they were simply never
+    # mapped, so FAST reported "john doesn't support Kerberos TGS".
+    "Kerberos TGS":     "krb5tgs",
+    "Kerberos AS-REP":  "krb5asrep",
+    # Domain Cached Credentials v2 ($DCC2$) — secretsdump dumps these; john
+    # calls the format mscash2.
+    "DCC2":             "mscash2",
 }
 
 # Hash type → hashcat -m mode number (None = not in hashcat).
@@ -81,6 +89,9 @@ _HASHCAT_MODE = {
     "sha512crypt":  1800,
     "sha256crypt":  7400,
     "LM":           3000,
+    "Kerberos TGS":     13100,   # kerberoast TGS-REP (etype 23)
+    "Kerberos AS-REP":  18200,   # AS-REP roast (etype 23)
+    "DCC2":             2100,    # Domain Cached Credentials v2 (mscash2)
 }
 
 

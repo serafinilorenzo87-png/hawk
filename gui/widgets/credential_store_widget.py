@@ -98,6 +98,12 @@ def detect_hash_type(hash_val: str) -> str:
     if h.startswith("$6$"):      return "sha512crypt"
     if h.startswith("$5$"):      return "sha256crypt"
     if h.startswith("$NTLMv2$"): return "NTLMv2"
+    # Kerberoast / AS-REP roast tickets — keep these keys identical to the
+    # ones the GetUserSPNs / GetNPUsers parsers set, so the crack strategy
+    # maps (_JOHN_FORMAT / _HASHCAT_MODE) resolve for pasted hashes too.
+    if h.startswith("$krb5tgs$"):   return "Kerberos TGS"
+    if h.startswith("$krb5asrep$"): return "Kerberos AS-REP"
+    if h.startswith("$DCC2$"):      return "DCC2"
     if re.match(r"^[a-fA-F0-9]{32}$", h):  return "NTLM"
     if re.match(r"^[a-fA-F0-9]{40}$", h):  return "SHA1"
     if re.match(r"^[a-fA-F0-9]{64}$", h):  return "SHA256"
