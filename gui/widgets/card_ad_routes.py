@@ -2851,6 +2851,7 @@ class CardADRoutesMixin:
             if hint:
                 ctk.CTkLabel(win, text=hint, font=_f("xs"),
                              text_color=COLORS["text_dim"],
+                             wraplength=700, justify="left",
                              anchor="w").pack(fill="x", padx=14)
             return e
 
@@ -3053,6 +3054,7 @@ class CardADRoutesMixin:
                   "template already uses some of these flags (impacket "
                   "and certipy accept repeated args, last one wins)."),
             font=_f("xs"), text_color=COLORS["text_dim"],
+            wraplength=700, justify="left",
             anchor="w").pack(fill="x", padx=14, pady=(1, 6))
 
         # Chip picker
@@ -3152,6 +3154,7 @@ class CardADRoutesMixin:
             text=("— needed when Kerberos fails with "
                   "'Name or service not known'"),
             font=_f("xs"), text_color=COLORS["text_muted"],
+            wraplength=460, justify="left",
             anchor="w",
         ).pack(side="left", fill="x", expand=True)
 

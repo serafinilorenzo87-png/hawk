@@ -4811,13 +4811,21 @@ class TargetIntelRenderMixin:
         for label, text, color in sections:
             if not text or text == "N/A":
                 continue
-            # Skip "What it is" when its content is a verbatim copy of
-            # the description we already showed above — avoids the
-            # duplicate-text look when the auto-generator just echoed
-            # the description into `info["what"]`.
-            if label == "What it is:" and \
-                    text.strip() == (description or "").strip():
-                continue
+            # Skip "What it is" when it is just the FULL FINDING again.
+            # Two cases, both showed a redundant block under the complete
+            # green FULL FINDING box: (1) a verbatim copy of the
+            # description, and (2) the auto-generator's first-N-lines echo
+            # (_auto_generate_finding_info uses description[:4]), which
+            # reads as a *truncated* finding sitting under the full one.
+            # Only skip when the FULL FINDING was actually rendered above.
+            if label == "What it is:" and description and description.strip():
+                _dlines = [ln.strip() for ln in description.split("\n")
+                           if ln.strip()]
+                _wlines = [ln.strip() for ln in (text or "").split("\n")
+                           if ln.strip()]
+                if (text.strip() == description.strip()
+                        or (_wlines and _dlines[:len(_wlines)] == _wlines)):
+                    continue
             any_section_shown = True
             sf = ctk.CTkFrame(
                 body, fg_color=COLORS["bg_card"],
