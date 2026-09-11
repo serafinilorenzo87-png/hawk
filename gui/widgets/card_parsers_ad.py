@@ -597,8 +597,10 @@ class CardADParserMixin:
                     notes=(f"Computer account created via impacket-"
                            f"addcomputer on {target}.\n"
                            f"Use as 'delegate-from' in RBCD attacks.\n"
-                           f"Remove with:  impacket-addcomputer -delete "
-                           f"-computer-name {computer} ..."),
+                           f"Remove with (auth as a user allowed to):\n"
+                           f"  impacket-addcomputer -delete -computer-name "
+                           f"{computer} -dc-ip <DC-IP> "
+                           f"'<DOMAIN>/<USER>:<PASSWORD>'"),
                     linked_run_id=rid,
                     category=TOOL_RUN_CATEGORY,
                     # The account was created, never logged into.
@@ -622,9 +624,12 @@ class CardADParserMixin:
                         f"  • Pivot for Kerberos S4U2self/S4U2proxy abuse\n"
                         f"  • Baseline 'low-priv machine account' to "
                         f"test AD ACLs\n\n"
-                        f"Cleanup when done:\n"
+                        f"Cleanup when done — delete the account (auth as "
+                        f"a user allowed to, e.g. the one that created "
+                        f"it):\n"
                         f"  impacket-addcomputer -delete -computer-name "
-                        f"{computer} ..."),
+                        f"{computer} -dc-ip <DC-IP> "
+                        f"'<DOMAIN>/<USER>:<PASSWORD>'"),
                     severity="high", source=tool.name,
                     linked_run_id=rid))
 
@@ -652,9 +657,11 @@ class CardADParserMixin:
                         f"from the earlier run.\n"
                         f"  • Run with a different -computer-name, e.g. "
                         f"'HAWK2$'.\n"
-                        f"  • Delete the existing one first:\n"
+                        f"  • Delete the existing one first (auth as a "
+                        f"user allowed to):\n"
                         f"    impacket-addcomputer -delete -computer-"
-                        f"name {req_name} ..."),
+                        f"name {req_name} -dc-ip <DC-IP> "
+                        f"'<DOMAIN>/<USER>:<PASSWORD>'"),
                     severity="info", source=tool.name,
                     linked_run_id=rid))
             self.app.terminal.write(
