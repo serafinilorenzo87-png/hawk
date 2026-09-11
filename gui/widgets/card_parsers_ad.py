@@ -278,10 +278,11 @@ class CardADParserMixin:
         # entry (not just the first 5).  The finding-info dialog is
         # already scrollable (CTkScrollableFrame), so a long
         # description simply scrolls — readability wins over brevity.
-        # Each line still elides the hash itself (first 8 chars + …)
-        # so the summary is informative without blasting the full
-        # raw hashes; the actual hashes live in the Credential Store
-        # and are accessible via CRACK / SHOW RESULT there.
+        # The full hash is shown on each line (operator asked to be able
+        # to read/copy the whole hash straight from the finding).  The
+        # info dialog's description is a word-wrap CTkTextbox, so long
+        # hashes wrap instead of being clipped, and every char is
+        # selectable; the same hashes also live in the Credential Store.
         parts = [
             f"secretsdump succeeded on {target}.",
             f"",
@@ -304,10 +305,9 @@ class CardADParserMixin:
         if ntlm:
             parts.append("")
             parts.append(f"Users extracted ({len(ntlm)} total):")
-            for user, rid, lm, nt in ntlm:
+            for user, rid_, lm, nt in ntlm:
                 parts.append(
-                    f"  · {user:<24}  RID {rid:<6}  "
-                    f"NT: {nt[:8]}…")
+                    f"  · {user:<24}  RID {rid_:<6}  NT: {nt}")
 
         # All DCC2 cached logons.
         if dcc2:
@@ -317,14 +317,14 @@ class CardADParserMixin:
             for entry in dcc2:
                 # Each DCC2 entry from secretsdump looks like:
                 #   DOMAIN/user:$DCC2$10240#user#hash
-                # Show user + first 8 chars of the hash payload.
+                # Show the user + the full $DCC2$ hash (crackable as-is).
                 if "$DCC2$" in entry:
                     head = entry.split("$DCC2$", 1)[0]
-                    tail = entry.split("$DCC2$", 1)[1][:8]
-                    parts.append(
-                        f"  · {head:<32}  hash: {tail}…")
+                    tail = entry.split("$DCC2$", 1)[1]
+                    parts.append(f"  · {head}")
+                    parts.append(f"      $DCC2${tail}")
                 else:
-                    parts.append(f"  · {entry[:80]}…")
+                    parts.append(f"  · {entry}")
 
         # All Kerberos hashes (TGS / AS-REP).
         if kerbs:
@@ -334,8 +334,8 @@ class CardADParserMixin:
             for h in kerbs:
                 # Hash strings start with "$krb5tgs$..." or
                 # "$krb5asrep$..." — show the type marker + the
-                # principal (between *...$) + first 8 chars of the
-                # cipher tail for fingerprinting.
+                # principal (between *...$), then the full hash on its
+                # own line (word-wrapped in the info dialog).
                 kind = ("TGS / Kerberoast"
                         if "krb5tgs" in h.lower() else
                         "AS-REP roastable"
@@ -343,8 +343,8 @@ class CardADParserMixin:
                         "Krb hash")
                 user_m = re.search(r"\*([^\*$]+)\$", h)
                 u = user_m.group(1) if user_m else "?"
-                parts.append(
-                    f"  · {u:<24}  [{kind}]  …{h[-12:]}")
+                parts.append(f"  · {u:<24}  [{kind}]")
+                parts.append(f"      {h}")
 
         desc = "\n".join(parts)
         severity = "critical" if ntlm else "high"
@@ -352,10 +352,55 @@ class CardADParserMixin:
                  f"{len(dcc2)} DCC2 + {len(kerbs)} Kerberos "
                  f"hashes on {target}")
 
+        # replace=True: secretsdump is a snapshot (a re-run re-dumps the
+        # whole NTDS), so overwrite the description instead of appending —
+        # otherwise an old run's truncated hashes stay stacked above the
+        # new run's full ones ("half the hashes look broken").
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=title, description=desc,
             severity=severity, source=tool.name,
-            linked_run_id=rid))
+            linked_run_id=rid, replace=True))
+
+        # ── Password reuse: identical NT hash = identical password ──
+        # Group the dumped NT hashes; any hash shared by 2+ accounts is
+        # password reuse.  The operator asked to be SIGNALLED (not to
+        # have it auto-cracked), so raise a dedicated finding — they can
+        # crack one and own the group, or pass-the-hash straight away.
+        _EMPTY_NT = "31d6cfe0d16ae931b73c59d7e0c089c0"   # NT of ""
+        by_nt = {}
+        for _u, _rid, _lm, _nt in ntlm:
+            key = (_nt or "").lower()
+            if not key or key == _EMPTY_NT:
+                continue   # blank / disabled accounts are not "reuse"
+            by_nt.setdefault(key, []).append(_u)
+        reuse = {k: v for k, v in by_nt.items() if len(v) > 1}
+        if reuse:
+            n_accts = sum(len(v) for v in reuse.values())
+            rparts = [
+                f"{n_accts} account(s) across {len(reuse)} distinct "
+                f"password(s) share an NTLM hash on {target}.  Identical "
+                f"NT hash = identical cleartext password: crack ONE and "
+                f"you own the whole group, or pass-the-hash immediately "
+                f"(no cracking needed).",
+                "",
+            ]
+            for _nt, _us in sorted(reuse.items(),
+                                   key=lambda kv: -len(kv[1])):
+                rparts.append(f"  NT {_nt}  —  {len(_us)} accounts:")
+                for _u in _us:
+                    rparts.append(f"    · {_u}")
+                rparts.append("")
+            r_title = (f"PASSWORD REUSE — {n_accts} accounts share a "
+                       f"hash on {target}")
+            r_desc = "\n".join(rparts).rstrip()
+            self.app.after(0, lambda t=r_title, d=r_desc:
+                self.app.target_intel.add_auto_finding(
+                    title=t, description=d,
+                    severity="high", source=tool.name,
+                    linked_run_id=rid, replace=True))
+            self.app.terminal.write(
+                f"  [!] PASSWORD REUSE — {n_accts} accounts share "
+                f"{len(reuse)} NT hash(es).  See Target Intel.", "warn")
 
         self.app.terminal.write(
             f"  [+] SECRETSDUMP — {added} hashes added to Credential "

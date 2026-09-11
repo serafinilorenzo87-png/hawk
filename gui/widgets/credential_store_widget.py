@@ -775,6 +775,11 @@ class CredentialStoreWidget(ctk.CTkFrame):
         # the right card.  Reset on every render.
         self._cred_row_by_runid = {}
 
+        # Compute password-reuse groups once per render: creds that share
+        # an NT hash (identical hash = identical password) get a coloured
+        # "reused ×N" badge, one distinct colour per hash.
+        self._reuse_info = self._compute_reuse_info(creds)
+
         grid_row = 0
         if regular:
             for real_idx, cred in regular:
@@ -859,6 +864,106 @@ class CredentialStoreWidget(ctk.CTkFrame):
             self.after(1200, _revert)
         except Exception:
             pass
+
+    # ─── Password-reuse badge ────────────────────────────────────────────────
+
+    # Curated palette for password-reuse groups.  The app already owns
+    # cyan (#00C8C8 accent/links/blink), amber (#E8A020 running + CRACK),
+    # red (#C84040 error/STOP) and orange (#D06820 high-sev), so a badge
+    # in any of those would read as app chrome — the reuse palette stays
+    # clear of them and lives in the neutral green/blue/purple/pink zone.
+    # The green is a brighter emerald than the muted #40A060 done/low-sev
+    # green so it doesn't read as "cracked".  Every hue is visibly
+    # distinct; once the palette is exhausted _reuse_color() generates
+    # fresh hues so a colour is NEVER reused for a different group.
+    _REUSE_PALETTE = (
+        "#4ADE80",  # green (emerald)
+        "#3B82F6",  # blue (royal — deliberately far from the cyan accent)
+        "#C084FC",  # purple
+        "#F472B6",  # pink
+        "#818CF8",  # indigo
+    )
+
+    # Hue bands (fraction of the wheel) generated overflow colours are
+    # confined to — the same neutral green/blue/purple/pink zone as the
+    # curated palette, deliberately skipping the reserved app hues (red
+    # ~0deg, orange ~30, amber ~45, cyan ~180).
+    _REUSE_SAFE_BANDS = (
+        (0.25, 0.42),   # greens
+        (0.55, 0.70),   # blues
+        (0.72, 0.80),   # violets / purples
+        (0.82, 0.92),   # magentas / pinks
+    )
+
+    def _reuse_color(self, i):
+        """Return a distinct colour for the i-th reuse group (0-based).
+
+        The first len(_REUSE_PALETTE) groups use the curated palette; any
+        further group gets a hue rotated by the golden angle but mapped
+        into _REUSE_SAFE_BANDS, so generated colours stay spread out,
+        never repeat, and never wander into a reserved app hue.
+        """
+        pal = self._REUSE_PALETTE
+        if i < len(pal):
+            return pal[i]
+        import colorsys
+        bands = self._REUSE_SAFE_BANDS
+        span = sum(hi - lo for lo, hi in bands)
+        # Golden-angle position, projected onto the concatenated bands.
+        t = (((i - len(pal) + 1) * 0.61803398875) % 1.0) * span
+        h = bands[-1][1]
+        for lo, hi in bands:
+            if t <= hi - lo:
+                h = lo + t
+                break
+            t -= hi - lo
+        r, g, b = colorsys.hsv_to_rgb(h, 0.6, 0.95)
+        return f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}"
+
+    def _compute_reuse_info(self, creds):
+        """Map cred.id → (group_size, colour) for every credential whose
+        NT hash is shared by at least one other credential.
+
+        Identical NT hash ⇒ identical password, so these are password
+        reuse groups.  Each distinct shared hash gets its own colour
+        (assigned in first-seen order via _reuse_color); the empty
+        password NT hash is never treated as reuse.  Only plain NT hashes
+        take part — DCC2/Kerberos blobs embed a nonce, so an identical
+        blob there would NOT imply a shared password.
+        """
+        _EMPTY_NT = "31d6cfe0d16ae931b73c59d7e0c089c0"
+        groups: dict[str, list] = {}          # nt_hash → [cred.id, ...]
+        for c in creds:
+            if getattr(c, "cred_type", "") != "hash":
+                continue
+            hv = (getattr(c, "hash_val", "") or "").strip()
+            # pwdump (user:RID:LM:NT:::), LM:NT, or a bare NT hash.
+            m = re.match(
+                r"^[^:]+:\d+:[a-fA-F0-9]{32}:([a-fA-F0-9]{32}):", hv)
+            if not m:
+                m = re.fullmatch(r"[a-fA-F0-9]{32}:([a-fA-F0-9]{32})", hv)
+            if not m:
+                m = re.fullmatch(r"([a-fA-F0-9]{32})", hv)
+            if not m:
+                continue
+            nt = m.group(1).lower()
+            if nt == _EMPTY_NT:
+                continue
+            cid = getattr(c, "id", None)
+            if cid is None:
+                continue
+            groups.setdefault(nt, []).append(cid)
+
+        info: dict = {}
+        color_idx = 0
+        for ids in groups.values():           # first-seen (insertion) order
+            if len(ids) < 2:
+                continue
+            colour = self._reuse_color(color_idx)
+            color_idx += 1
+            for cid in ids:
+                info[cid] = (len(ids), colour)
+        return info
 
     def _build_cred_row(self, cred, idx, grid_row=None):
         """Build one credential row.
@@ -1173,6 +1278,21 @@ class CredentialStoreWidget(ctk.CTkFrame):
                     text_color=COLORS["text_yellow"], corner_radius=2,
                     command=lambda c=cred: self._show_crack_dialog(c)
                     ).grid(row=0, column=3, padx=(4,8), pady=4)
+
+        # Password-reuse badge — an identical NT hash means an identical
+        # password, so every cred sharing a hash gets "reused ×N" in the
+        # group's colour (assigned once per distinct hash in
+        # _compute_reuse_info and never repeated), letting the operator
+        # spot the reuse groups at a glance right in the store — mirrors
+        # the Target Intel PASSWORD REUSE finding.
+        _ru = getattr(self, "_reuse_info", {}).get(
+            getattr(cred, "id", None))
+        if _ru:
+            _rn, _rc = _ru
+            ctk.CTkLabel(parent, text=f"reused ×{_rn}",
+                font=_mono(11, True), text_color=_rc,
+                anchor="w").grid(row=0, column=4, padx=(6, 8),
+                                 pady=4, sticky="w")
 
     # ─── Edit / Delete ────────────────────────────────────────────────────────
 
