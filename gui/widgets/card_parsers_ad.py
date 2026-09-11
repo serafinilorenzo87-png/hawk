@@ -1672,6 +1672,17 @@ class CardADParserMixin:
             except Exception as e:
                 print(f"[HAWK] adidnsdump csv parse failed: {e}")
 
+        # adidnsdump writes a header row (type,name,value in some order).
+        # Drop it so the count matches adidnsdump's own "Found N records"
+        # tally and the table doesn't render a header pseudo-row; use the
+        # header to map columns robustly across adidnsdump versions.
+        col = {"type": 0, "name": 1, "value": 2}   # canonical order
+        if records and {c.strip().lower() for c in records[0]} == {
+                "type", "name", "value"}:
+            hdr = [c.strip().lower() for c in records[0]]
+            col = {k: hdr.index(k) for k in ("type", "name", "value")}
+            records = records[1:]
+
         if not records:
             # Fall back to stdout count
             text = "\n".join(self._strip_ansi(ln) for _, ln in log)
@@ -1692,25 +1703,35 @@ class CardADParserMixin:
 
         desc = [
             f"ADIDNSDUMP — full AD DNS zone on {target}.",
-            f"",
-            f"Records: {len(records)} (first 40 shown)",
-            f"",
+            "",
+            f"Records: {len(records)}"
+            + ("  (first 40 shown)" if len(records) > 40 else ""),
+            "",
+            f"  {'NAME':<28} {'TYPE':<5} VALUE",
         ]
-        for row in records[1:41]:   # skip header
+        for row in records[:40]:
             if len(row) >= 3:
-                desc.append(f"  {row[0]:<30}  {row[1]:<10}  {row[2]}")
-        if len(records) > 41:
-            desc.append(f"  … {len(records)-41} more in records.csv")
+                desc.append(
+                    f"  {row[col['name']]:<28} "
+                    f"{row[col['type']]:<5} {row[col['value']]}")
+        if len(records) > 40:
+            desc.append(f"  … {len(records)-40} more in records.csv")
         desc += ["",
+                 "Records shown as '?' have their value hidden in LDAP — "
+                 "re-run with the -r chip to resolve them via a live DNS "
+                 "query.",
+                 "",
                  "Extract useful hosts from this list and add them to "
-                 "your scan scope — every A record is a potential "
-                 "pivot."]
+                 "your scan scope — every A record is a potential pivot."]
 
+        # Snapshot semantics: each run reports the CURRENT full zone, so a
+        # stable title (no volatile record count) + replace=True refreshes
+        # the single finding instead of stacking a new card per run.
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
-            title=f"ADIDNSDUMP — {len(records)} DNS records on {target}",
+            title=f"ADIDNSDUMP — AD DNS zone on {target}",
             description="\n".join(desc),
             severity="info", source=tool.name,
-            linked_run_id=rid))
+            linked_run_id=rid, replace=True))
         self.app.terminal.write(
             f"  [+] adidnsdump — {len(records)} records → Target Intel.",
             "success")
