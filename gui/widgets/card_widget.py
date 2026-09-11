@@ -2336,10 +2336,10 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                        "shown inline, rest in the .csv).  Use these "
                        "as new targets for your scan scope.",
             "extras":  [
-                "--print-zones            — default, list zones too",
-                "-r                       — resolve records HAWK can reach",
-                "--zone <name>            — dump a specific zone",
-                "--dns-tcp                — force DNS TCP",
+                "-r                       — resolve hidden records via a real DNS query (fills IPs LDAP hides)",
+                "--print-zones            — list zones only (no record dump); run first to discover zone names",
+                "--zone <name>            — dump a specific zone instead of the domain zone",
+                "--dns-tcp                — force DNS over TCP (flaky UDP / large zones)",
             ],
         },
     }

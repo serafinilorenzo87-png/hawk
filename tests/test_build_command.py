@@ -102,6 +102,15 @@ class BuildCommandRegistryTests(unittest.TestCase):
         self.assertNotIn("HAWK$", tmpl)
         self.assertNotIn("Hawk123!", tmpl)
 
+    def test_adidnsdump_default_dumps_records(self):
+        # ADIDNSDUMP's default must actually dump the zone to records.csv
+        # (what the parser reads), NOT run with --print-zones, which only
+        # lists zone names and exits without writing records.csv.
+        adi = [t for _m, t in self.tools if t.id == "adidnsdump"]
+        self.assertEqual(len(adi), 1,
+                         "expected exactly one adidnsdump tool")
+        self.assertNotIn("--print-zones", adi[0].cmd_template)
+
     def test_no_unresolved_placeholder_survives(self):
         """No `{name}` reaches the shell.
 
