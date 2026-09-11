@@ -27,6 +27,9 @@ configs/*
 *.ccache
 *.kirbi
 
+# adidnsdump DNS zone dump written to the working dir — NEVER commit
+records.csv
+
 # Keep empty runtime dirs in the tree
 !sessions/.gitkeep
 !outputs/.gitkeep
