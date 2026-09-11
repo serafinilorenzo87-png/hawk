@@ -2201,6 +2201,53 @@ class CardADRoutesMixin:
 
         self._route_ad_template(tool, prefill=pf)
 
+    def _route_addcomputer(self, tool):
+        """ADD COMPUTER — the standard AD auth dialog plus an OS-generation
+        advisory telling the operator which -method is likely to work:
+        SAMR (the impacket default) on legacy DCs, LDAPS on modern /
+        hardened ones.
+
+        The advisory is a HINT only — it never changes the command or
+        pre-selects a flag.  SAMR stays the default and the operator is
+        free to click -method SAMR / LDAPS / -k (or ignore the advisory
+        entirely) via the chips.  Generation comes from the same
+        classify_generation() the Connect terminal uses for compat flags,
+        so the classification stays consistent across the app.
+        """
+        gen, osname = "unknown", ""
+        try:
+            fp = getattr(getattr(self.app, "target_intel", None),
+                         "_fp", None)
+            if fp is not None:
+                gen = fp.classify_generation() or "unknown"
+                if getattr(fp, "platform", "") == "windows":
+                    osname = ("Windows " + (fp.version or "").strip()).strip()
+        except Exception:
+            gen, osname = "unknown", ""
+
+        _os = f" ({osname})" if osname else ""
+        if gen == "legacy":
+            advisory = (f"  Method advisory: target looks LEGACY{_os} — "
+                        f"SAMR (the default) is the right method here.  "
+                        f"Don't switch to LDAPS: legacy DCs usually have no "
+                        f"LDAPS/636 certificate.")
+            color = COLORS["text_green"]
+        elif gen == "modern":
+            advisory = (f"  Method advisory: target looks MODERN{_os} — try "
+                        f"SAMR (the default) first; if the DC rejects it, "
+                        f"click -method LDAPS below.  Also expect MAQ may be "
+                        f"0 on hardened DCs (creation blocked by design).")
+            color = COLORS["text_yellow"]
+        else:
+            advisory = ("  Method advisory: OS not fingerprinted yet — run "
+                        "enumeration (nmap -sV -sC / nxc smb) first for a "
+                        "method recommendation.  SAMR (the default) works on "
+                        "most DCs; LDAPS is the modern fallback.")
+            color = COLORS["text_dim"]
+
+        self._route_ad_template(
+            tool, prefill={"advisory": advisory, "advisory_color": color})
+
     def _route_ticketer_golden(self, tool):
         """Dedicated dialog for `impacket-ticketer`.
 
@@ -2894,6 +2941,15 @@ class CardADRoutesMixin:
                                 "10 — msDS-MachineAccountQuota).  The name "
                                 "you supplied to addcomputer is the value "
                                 "to paste here.",
+            "COMPUTER_NAME":    "Name of the NEW machine account to create — "
+                                "MUST end with '$' (e.g. HAWK$, PWN01$).  "
+                                "Pick a name that doesn't already exist in "
+                                "AD; each run creates a distinct account "
+                                "(up to msDS-MachineAccountQuota, default 10).",
+            "COMPUTER_PASS":    "Password for the new machine account — "
+                                "you'll need it later for RBCD / S4U, so use "
+                                "something you'll keep (a strong value; modern "
+                                "DCs may enforce a password policy).",
         }
 
         placeholder_vars = {}
@@ -2935,16 +2991,37 @@ class CardADRoutesMixin:
                 for ph_name, ph_val in prefill["placeholders"].items():
                     if ph_name in placeholder_vars:
                         placeholder_vars[ph_name].set(str(ph_val))
+            # Optional OS-generation advisory (e.g. addcomputer's SAMR-vs-
+            # LDAPS hint).  Purely informational — it never changes the
+            # command or pre-selects a flag; the operator stays free to
+            # pick any method via the chips below, or ignore it entirely.
+            if prefill.get("advisory"):
+                ctk.CTkLabel(
+                    win,
+                    text=prefill["advisory"],
+                    font=_f("sm", True),
+                    text_color=(prefill.get("advisory_color")
+                                or COLORS["text_cyan"]),
+                    wraplength=720, justify="left", anchor="w",
+                ).pack(fill="x", padx=14, pady=(6, 2))
             # Visual confirmation — cyan banner so the user sees this
             # dialog was pre-populated from somewhere (not random data).
-            origin = prefill.get("_origin") or "attack graph"
-            ctk.CTkLabel(
-                win,
-                text=f"  ✨  Pre-filled from {origin} — review & click RUN",
-                font=_f("sm", True),
-                text_color=COLORS["text_cyan"],
-                anchor="w",
-            ).pack(fill="x", padx=14, pady=(4, 2))
+            # Only shown when actual FIELD data was injected: an advisory-
+            # only prefill (addcomputer) hasn't pre-filled any field, so
+            # claiming "Pre-filled from ..." there would be misleading.
+            _did_prefill = (any(prefill.get(k) for k in
+                                ("user", "password", "hash", "domain",
+                                 "extras"))
+                            or isinstance(prefill.get("placeholders"), dict))
+            if _did_prefill:
+                origin = prefill.get("_origin") or "attack graph"
+                ctk.CTkLabel(
+                    win,
+                    text=f"  ✨  Pre-filled from {origin} — review & click RUN",
+                    font=_f("sm", True),
+                    text_color=COLORS["text_cyan"],
+                    anchor="w",
+                ).pack(fill="x", padx=14, pady=(4, 2))
 
         # ── Extra args row + suggestion chips ────────────────────────
         # Free-form text field the user can type ANY extra flags into

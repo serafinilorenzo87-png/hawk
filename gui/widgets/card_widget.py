@@ -2306,7 +2306,10 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
             "needs":   "Any domain user + domain not locked down "
                        "(MAQ > 0).  Check MAQ with "
                        "`ldapsearch ... objectclass=domain ms-DS-Mac"
-                       "hineAccountQuota`.",
+                       "hineAccountQuota`.  On hardened/modern DCs MAQ "
+                       "is often 0 by design (post-noPac) — then you "
+                       "need delegated CreateChild on an OU/Computers "
+                       "container, or another foothold.",
             "output":  "HAWK parses the 'Successfully added machine "
                        "account X with password Y' line → pushes X:Y "
                        "to the Credential Store (AD RESULTS box, "
@@ -2314,10 +2317,10 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                        "with the cleanup command.  No file on disk — "
                        "the account lives in AD.",
             "extras":  [
-                "-computer-name FOO$      — custom name (keep the $)",
-                "-computer-pass 'Pass1'   — custom password",
-                "-method SAMR             — SAMR instead of LDAP",
-                "-delete                  — remove the account you created",
+                "-method SAMR             — legacy DCs (this is the default): RPC/SAMR over SMB",
+                "-method LDAPS            — modern/hardened DCs that block SAMR or enforce LDAP signing (needs LDAPS/636)",
+                "-k                       — Kerberos auth for NTLM-disabled DCs; also add -dc-host <FQDN> (DNS HELPER + clock sync)",
+                "-delete                  — remove a machine account you created",
             ],
         },
         "adidnsdump": {

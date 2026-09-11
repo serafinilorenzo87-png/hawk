@@ -747,8 +747,9 @@ class CardADParserMixin:
                     f"Last output lines:\n{tail}\n\n"
                     f"Check the AD side manually — if the account exists, "
                     f"add it to the Credential Store by hand (username "
-                    f"{req_name or 'HAWK$'}, password "
-                    f"{req_pass or 'Hawk123!'})."),
+                    f"{req_name or '(the -computer-name you supplied)'}, "
+                    f"password "
+                    f"{req_pass or '(the -computer-pass you supplied)'})."),
                 severity="info", source=tool.name,
                 linked_run_id=rid))
         self.app.terminal.write(
