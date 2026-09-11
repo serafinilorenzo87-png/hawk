@@ -3870,24 +3870,15 @@ class TargetIntelRenderMixin:
             top = ctk.CTkFrame(fr, fg_color="transparent")
             top.pack(fill="x", padx=8, pady=(5, 2))
 
-            ctk.CTkLabel(top, text=f"[{finding['severity'].upper()}]",
-                         font=_f("sm", True), text_color=sev_color,
-                         width=80, anchor="w").pack(side="left")
-            ctk.CTkLabel(top, text=finding["title"],
-                         font=_f("md", True), text_color=COLORS["text_bright"],
-                         anchor="w").pack(side="left", padx=6)
-            if finding.get("source"):
-                ctk.CTkLabel(top, text=f"  via {finding['source']}",
-                             font=_f("sm"), text_color=COLORS["text_muted"],
-                             anchor="w").pack(side="left")
-            runs_text = self._format_finding_runs(finding)
-            if runs_text:
-                ctk.CTkLabel(top, text=f"  {runs_text}",
-                             font=_f("xs", True),
-                             text_color=COLORS["text_cyan"],
-                             anchor="w").pack(side="left", padx=(4, 0))
+            # Right-anchored fresh badge — packed FIRST so pack reserves its
+            # full width on the right before the title/source chain fills the
+            # rest.  Packed last (as it used to be) it was the BADGE that got
+            # clipped when the row was crowded, turning "◆ REFRESHED #4" into
+            # gibberish ("… 4 :SHED #4").  Now an over-long title truncates at
+            # the badge edge instead; the full title stays in the card body and
+            # the INFO dialog, whereas the fresh badge must always stay legible.
             if note:
-                # Right-anchored bright-green badge — "◆ NEW" or "◆ UPDATED".
+                # Bright-green badge — "◆ NEW" / "◆ UPDATED" / "◆ REFRESHED #N".
                 # Stays on until the user actually reads the entry.
                 badge_lbl = ctk.CTkLabel(
                     top, text=f"◆ {note}",
@@ -3898,6 +3889,26 @@ class TargetIntelRenderMixin:
                 finding["_badge_ref"] = badge_lbl
             else:
                 finding["_badge_ref"] = None
+
+            ctk.CTkLabel(top, text=f"[{finding['severity'].upper()}]",
+                         font=_f("sm", True), text_color=sev_color,
+                         width=80, anchor="w").pack(side="left")
+            ctk.CTkLabel(top, text=finding["title"],
+                         font=_f("md", True), text_color=COLORS["text_bright"],
+                         anchor="w").pack(side="left", padx=6)
+            if finding.get("source"):
+                ctk.CTkLabel(top, text=f"  via {finding['source']}",
+                             font=_f("sm"), text_color=COLORS["text_muted"],
+                             anchor="w").pack(side="left")
+            # Run counter — suppressed while a fresh badge is shown, since the
+            # note already carries the run number ("◆ REFRESHED #4"); a bare
+            # "4" beside "#4" duplicated it and stole width from the badge.
+            runs_text = self._format_finding_runs(finding)
+            if runs_text and not note:
+                ctk.CTkLabel(top, text=f"  {runs_text}",
+                             font=_f("xs", True),
+                             text_color=COLORS["text_cyan"],
+                             anchor="w").pack(side="left", padx=(4, 0))
 
             # Description — rendered as a CTkLabel (NOT a CTkTextbox) so
             # the mouse wheel event propagates to the outer Target Intel
