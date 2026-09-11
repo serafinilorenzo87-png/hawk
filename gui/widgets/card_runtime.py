@@ -2036,9 +2036,13 @@ class CardRuntimeMixin:
                 "ldapdomaindump":    self._parse_ldapdomaindump_to_intel,
                 "nxc_ldap":          self._parse_nxc_ldap_to_intel,
                 "findDelegation":    self._parse_findelegation_to_intel,
-                # rbcd_attack / ticketer produce mostly text output —
-                # handled by the generic fallback since they rarely
-                # produce structured creds/findings.
+                # ticketer forges a Golden Ticket — full domain-wide
+                # persistence, so it gets a dedicated CRITICAL parser
+                # instead of the low-severity generic dump.
+                "ticketer_golden":   self._parse_ticketer_to_intel,
+                # rbcd_attack produces mostly text output — handled by
+                # the generic fallback since it rarely produces
+                # structured creds/findings.
             }
             if (not used_specialized and log
                     and tool.id in AD_PARSER_BY_TOOL_ID):

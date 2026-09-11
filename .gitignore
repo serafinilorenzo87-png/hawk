@@ -22,6 +22,11 @@ cache/*
 logs/*
 configs/*
 
+# Kerberos ticket loot forged/dumped into the working dir
+# (ticketer, getTGT, secretsdump -k) — NEVER commit
+*.ccache
+*.kirbi
+
 # Keep empty runtime dirs in the tree
 !sessions/.gitkeep
 !outputs/.gitkeep

