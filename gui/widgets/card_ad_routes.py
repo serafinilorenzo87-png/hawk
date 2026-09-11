@@ -3706,7 +3706,7 @@ class CardADRoutesMixin:
                                  _btn_row, _btn, _safe_destroy)
         from utils.clipboard import add_context_menu
 
-        win = _make_win(self, "GPP-Decrypt", 620, 440)
+        win = _make_win(self, "GPP-Decrypt", 620, 500)
         _title(win, "GPP-DECRYPT  —  Groups.xml cpassword")
         _sub(win, "Paste a base64 cpassword blob to decrypt it locally.",
              COLORS["text_dim"])
@@ -3745,6 +3745,24 @@ class CardADRoutesMixin:
             font=_f("xs"), text_color=COLORS["text_muted"],
             anchor="w").pack(fill="x", padx=24, pady=(0, 4))
 
+        # Optional account name — it lives in the source Groups.xml, not in
+        # gpp-decrypt's output, so the operator supplies it here to label
+        # the recovered credential (the parser stores it on the cred).
+        ctk.CTkLabel(win, text="Account name (optional):",
+                     font=_f("md", True),
+                     text_color=COLORS["text_bright"],
+                     anchor="w").pack(fill="x", padx=24, pady=(6, 2))
+        uname_entry = ctk.CTkEntry(
+            win, font=_f("md"), height=30,
+            fg_color=COLORS["bg_card"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_green"],
+            border_width=1, corner_radius=3,
+            placeholder_text=("the userName from the source Groups.xml — "
+                              "labels the saved credential"))
+        uname_entry.pack(fill="x", padx=24, pady=(0, 8))
+        add_context_menu(uname_entry)
+
         def _run():
             blob = box.get("1.0", "end").strip()
             if not blob:
@@ -3755,6 +3773,9 @@ class CardADRoutesMixin:
             # Strip whitespace inside the blob (users sometimes paste
             # with embedded newlines from XML files).
             blob = "".join(blob.split())
+            # Stash the optional account name for the parser to label the
+            # recovered credential (read BEFORE the window is destroyed).
+            self._gpp_username = uname_entry.get().strip()
             _safe_destroy(win)
             # Shell-escape and run.  gpp-decrypt writes the decrypted
             # value to stdout; ToolRunner captures it so we see it in

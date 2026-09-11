@@ -2016,6 +2016,9 @@ class CardRuntimeMixin:
             # and "🔑 CREDS" navigation buttons linking the two sides.
             AD_PARSER_BY_TOOL_ID = {
                 "addcomputer":       self._parse_addcomputer_to_intel,
+                # gpp-decrypt recovers a reusable local-admin password —
+                # capture it as a credential + HIGH finding, not a dump.
+                "gpp_decrypt":       self._parse_gpp_decrypt_to_intel,
                 "getuserspns":       self._parse_kerberoast_to_intel,
                 "getnpusers":        self._parse_asrep_to_intel,
                 # The Exploitation-phase card uses id "impacket_getnpusers"

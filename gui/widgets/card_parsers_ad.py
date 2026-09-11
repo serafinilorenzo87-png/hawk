@@ -764,6 +764,118 @@ class CardADParserMixin:
             f"acknowledgment finding pushed.", "dim")
         return True
 
+    def _parse_gpp_decrypt_to_intel(self, tool, log: list) -> bool:
+        """gpp-decrypt output — a decrypted GPP (Group Policy Preferences)
+        cpassword.
+
+        Microsoft's AES key for cpassword was published (MS14-025), so a
+        cpassword blob pulled from SYSVOL decrypts to cleartext instantly.
+        The recovered value is almost always a LOCAL-ADMIN password pushed
+        to every machine by the same GPO — identical everywhere, i.e.
+        prime lateral-movement fuel.  So we capture it as a credential +
+        a HIGH finding instead of leaving it in the terminal (where the
+        generic fallback would file it as a low info dump).
+
+        The account name isn't in gpp-decrypt's output (it lives in the
+        source Groups.xml); the dialog stashes it on ``self._gpp_username``
+        when the operator supplied one.  Returns False (→ generic
+        fallback) when no plaintext was recovered — e.g. a malformed blob.
+        """
+        from utils.session import Credential
+        from utils.run_id import new_run_id, TOOL_RUN_CATEGORY
+
+        target = self._get_target() or "target"
+        rid = new_run_id()
+
+        # Consume the optional username the dialog stashed for this run so
+        # a later run with a blank field can't inherit this one's account.
+        uname = (getattr(self, "_gpp_username", "") or "").strip()
+        self._gpp_username = ""
+
+        # gpp-decrypt prints just the cleartext password.  Skip the command
+        # echo, HAWK/tool markers, and obvious error/usage noise; the first
+        # remaining non-empty line is the recovered secret.
+        password = ""
+        for _lvl, raw in log:
+            s = self._strip_ansi(raw).strip()
+            if not s:
+                continue
+            low = s.lower()
+            if s.startswith(("$", "[", "#")) or "gpp-decrypt" in low:
+                continue
+            if low.startswith(("traceback", "error", "usage:", "usage ",
+                               "valueerror", "no handlers", "warning")):
+                continue
+            password = s
+            break
+
+        if not password:
+            return False
+
+        if uname:
+            title = f"GPP-DECRYPT — recovered password for {uname}"
+            acct = uname
+            user_ph = uname
+        else:
+            title = "GPP-DECRYPT — recovered GPP local-admin password"
+            acct = "(unknown — see the userName in the source Groups.xml)"
+            user_ph = "<USER>"
+
+        try:
+            self.app.cred_store.add_credential(Credential(
+                username=uname or "gpp-local-admin",
+                password=password,
+                cred_type="cleartext",
+                services=["SMB", "local"],
+                source_phase=self.phase_id,
+                host=target,
+                notes=("Recovered from a SYSVOL GPP cpassword via the "
+                       "public MS AES key (MS14-025).\n"
+                       "GPP-set local passwords are normally IDENTICAL on "
+                       "every machine the GPO applied to — spray it across "
+                       "the estate (SMB --local-auth) for lateral "
+                       "movement."),
+                linked_run_id=rid,
+                category=TOOL_RUN_CATEGORY,
+                verified=False))
+        except Exception as e:
+            print(f"[HAWK] gpp-decrypt cred push failed: {e}")
+
+        self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
+            title=title,
+            description=(
+                f"Decrypted a Group Policy Preferences cpassword from "
+                f"SYSVOL using Microsoft's public AES key (MS14-025).\n\n"
+                f"Account  : {acct}\n"
+                f"Password : {password}\n\n"
+                f"Why it matters:\n"
+                f"  GPP cpassword set LOCAL accounts (usually the local "
+                f"Administrator) on every machine the GPO targeted, with "
+                f"the SAME password everywhere — so this one secret often "
+                f"unlocks the whole estate.\n\n"
+                f"Next steps — spray it as a LOCAL account across a host "
+                f"range (or the ADIDNSDUMP host list):\n"
+                f"  nxc smb <TARGETS> -u '{user_ph}' -p '{password}' "
+                f"--local-auth\n"
+                f"  (--local-auth because it is a local, not a domain, "
+                f"account)\n"
+                f"  On a hit:  nxc smb <HOST> -u '{user_ph}' -p "
+                f"'{password}' --local-auth -x whoami   (or evil-winrm / "
+                f"impacket-psexec).\n\n"
+                f"Remediation:\n"
+                f"  Remove the cpassword XML from SYSVOL and the GPP that "
+                f"wrote it — MS14-025 blocked NEW ones but did not scrub "
+                f"existing files.  Rotate the exposed password everywhere "
+                f"and move to LAPS for per-host randomised local-admin "
+                f"passwords."),
+            severity="high", source=tool.name,
+            linked_run_id=rid))
+
+        self.app.terminal.write(
+            f"  [+] gpp-decrypt — recovered password for {acct} → "
+            f"Credential Store + Target Intel.", "success")
+        return True
+
     def _parse_kerberoast_to_intel(self, tool, log: list) -> bool:
         """GetUserSPNs / Kerberoast output parser.
 

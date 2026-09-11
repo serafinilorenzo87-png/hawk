@@ -164,9 +164,10 @@ class ProducerContractTests(unittest.TestCase):
         self.assertEqual([True], vals)
 
     def test_ad_dumps_are_never_verified(self):
-        # Uncracked hashes and a machine account nobody logged in with.
+        # Uncracked hashes, a machine account nobody logged in with, and a
+        # decrypted GPP cpassword nobody has sprayed yet.
         vals = self._verified_literals("gui/widgets/card_parsers_ad.py")
-        self.assertEqual(8, len(vals))
+        self.assertEqual(9, len(vals))
         self.assertNotIn(True, vals)
 
     def test_peas_scrapes_are_never_verified(self):
