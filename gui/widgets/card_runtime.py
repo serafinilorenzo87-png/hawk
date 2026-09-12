@@ -2034,6 +2034,12 @@ class CardRuntimeMixin:
                 # server-side.
                 "certipy_quick":     self._parse_certipy_find_to_intel,
                 "certipy_find":      self._parse_certipy_find_to_intel,
+                # req mints a cert impersonating a privileged user — HIGH
+                # finding naming the identity + the actual .pfx path.
+                "certipy_req":       self._parse_certipy_req_to_intel,
+                # auth UnPAC's the target's NT hash — CRITICAL, and pushes
+                # the recovered hash to the Credential Store.
+                "certipy_auth":      self._parse_certipy_auth_to_intel,
                 "bloodhound_python": self._parse_bloodhound_to_intel,
                 "adidnsdump":        self._parse_adidnsdump_to_intel,
                 "ldapdomaindump":    self._parse_ldapdomaindump_to_intel,

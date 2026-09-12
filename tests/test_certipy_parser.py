@@ -103,6 +103,103 @@ _ESC1 = [
 ]
 
 
+# certipy req: an ESC1 cert minted for Administrator.
+_REQ_OK = [
+    "Certipy v5.0.3 - by Oliver Lyak (ly4k)",
+    "[!] DNS resolution failed: The DNS query name does not exist: "
+    "PROVA.PROVA.COM.",
+    "[*] Requesting certificate via RPC",
+    "[*] Request ID is 3",
+    "[*] Successfully requested certificate",
+    "[*] Got certificate with UPN 'Administrator@prova.prova.com'",
+    "[*] Certificate has no object SID",
+    "[*] Wrote certificate and private key to 'esc1.pfx'",
+]
+_REQ_FAIL = [
+    "Certipy v5.0.3 - by Oliver Lyak (ly4k)",
+    "[-] Got error: some RPC failure",
+]
+
+
+def _run_req(log):
+    from gui.widgets.card_parsers_ad import CardADParserMixin
+
+    findings = []
+
+    class Host(CardADParserMixin):
+        def __init__(self):
+            self.phase_id = "ad_pentesting"
+            self.app = types.SimpleNamespace(
+                target_intel=types.SimpleNamespace(
+                    add_auto_finding=lambda **k: findings.append(k)),
+                terminal=_Terminal(),
+                after=lambda _d, fn: fn())
+
+        def _get_target(self):
+            return "192.0.2.10"
+
+        def _strip_ansi(self, s):
+            return s
+
+    tool = types.SimpleNamespace(
+        name="CERTIPY — request cert (ESC1)", binary="certipy",
+        id="certipy_req")
+    claimed = Host()._parse_certipy_req_to_intel(
+        tool, [("out", ln) for ln in log])
+    return claimed, findings
+
+
+# certipy auth: PKINIT with the ESC1 cert -> TGT + UnPAC'd NT hash.
+_AUTH_HASH = [
+    "Certipy v5.0.3 - by Oliver Lyak (ly4k)",
+    "[*] Using principal: 'administrator@prova.prova.com'",
+    "[*] Trying to get TGT...",
+    "[*] Got TGT",
+    "[*] Saving credential cache to 'administrator.ccache'",
+    "[*] Wrote credential cache to 'administrator.ccache'",
+    "[*] Trying to retrieve NT hash for 'administrator'",
+    "[*] Got hash for 'administrator@prova.prova.com': "
+    "aad3b435b51404eeaad3b435b51404ee:62ab5460e57f01fb5540f5897538e8fa",
+]
+# auth against an account whose password expired -> no TGT, no hash.
+_AUTH_FAIL = [
+    "Certipy v5.0.3 - by Oliver Lyak (ly4k)",
+    "[*] Trying to get TGT...",
+    "[-] Got error while trying to request TGT: Kerberos SessionError: "
+    "KDC_ERR_KEY_EXPIRED(Password has expired; change password to reset)",
+]
+
+
+def _run_auth(log):
+    from gui.widgets.card_parsers_ad import CardADParserMixin
+
+    findings, creds = [], []
+
+    class Host(CardADParserMixin):
+        def __init__(self):
+            self.phase_id = "ad_pentesting"
+            self.app = types.SimpleNamespace(
+                cred_store=types.SimpleNamespace(
+                    add_credential=lambda c: creds.append(c)),
+                target_intel=types.SimpleNamespace(
+                    add_auto_finding=lambda **k: findings.append(k)),
+                terminal=_Terminal(),
+                after=lambda _d, fn: fn())
+
+        def _get_target(self):
+            return "192.0.2.10"
+
+        def _strip_ansi(self, s):
+            return s
+
+    tool = types.SimpleNamespace(
+        name="CERTIPY — auth with cert", binary="certipy",
+        id="certipy_auth")
+    claimed = Host()._parse_certipy_auth_to_intel(
+        tool, [("out", ln) for ln in log])
+    return claimed, findings, creds
+
+
 def _run(log):
     from gui.widgets.card_parsers_ad import CardADParserMixin
 
@@ -200,6 +297,44 @@ class CertipyParserTests(unittest.TestCase):
         self.assertIn("User", templates)
         # The CA-level ESC11 subject must NOT be picked up as a template.
         self.assertFalse(any(t.startswith("CA ") for t in templates))
+
+    def test_req_cert_is_high_and_actionable(self):
+        claimed, findings = _run_req(_REQ_OK)
+        self.assertTrue(claimed, "a minted cert must CLAIM the finding, "
+                        "not fall through to the generic info dump")
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertEqual(f["severity"], "high")
+        self.assertIn("Administrator@prova.prova.com", f["title"])
+        d = f["description"]
+        self.assertIn("esc1.pfx", d)        # the REAL path certipy wrote
+        self.assertIn("certipy auth", d)    # next step
+        self.assertIn("-sid", d)            # the no-object-SID caveat
+
+    def test_req_failure_falls_through(self):
+        claimed, findings = _run_req(_REQ_FAIL)
+        self.assertFalse(claimed)
+        self.assertEqual(findings, [])
+
+    def test_auth_recovers_hash_as_critical_credential(self):
+        claimed, findings, creds = _run_auth(_AUTH_HASH)
+        self.assertTrue(claimed)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["severity"], "critical")
+        d = findings[0]["description"]
+        self.assertIn("62ab5460e57f01fb5540f5897538e8fa", d)
+        self.assertIn("secretsdump", d)          # DCSync runbook
+        # The recovered hash is captured as a credential (verified=False).
+        self.assertEqual(len(creds), 1)
+        self.assertEqual(creds[0].username, "administrator")
+        self.assertIn("62ab5460", creds[0].hash_val)
+        self.assertFalse(creds[0].verified)
+
+    def test_auth_failure_falls_through(self):
+        claimed, findings, creds = _run_auth(_AUTH_FAIL)
+        self.assertFalse(claimed)
+        self.assertEqual(findings, [])
+        self.assertEqual(creds, [])
 
 
 if __name__ == "__main__":

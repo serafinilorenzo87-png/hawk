@@ -2216,9 +2216,11 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
             "needs":   "Domain user + a vulnerable template + UPN of "
                        "the user you want to impersonate.  Get CA_NAME "
                        "and TEMPLATE from `certipy find` output first.",
-            "output":  "<HAWK>/outputs/esc1.pfx on disk — hand it to certipy "
-                       "auth (the PFX is binary, not parsed by HAWK).  "
-                       "Terminal log shows the path.",
+            "output":  "esc1.pfx in the working dir (certipy v5 mangles "
+                       "-out paths, so HAWK writes a bare name).  HAWK "
+                       "raises a HIGH Target Intel finding naming the "
+                       "impersonated user + the real .pfx path; hand it to "
+                       "certipy auth.",
             "extras":  [
                 "-upn Administrator@<DOM> — UPN to impersonate (required)",
                 "-ca '<CA name>'          — the Enterprise CA name",
