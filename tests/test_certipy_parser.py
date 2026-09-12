@@ -68,6 +68,39 @@ _LDAPS_RESET = [
     "[-] Got error: socket ssl wrapping error: [Errno 104] "
     "Connection reset by peer",
 ]
+# certipy -vulnerable with a CA-level ESC11 and an ESC1 template (plus a
+# "[*] Remarks" section whose ESC15/ESC2/ESC3 lines must NOT be counted).
+_ESC1 = [
+    "Certipy v5.0.3 - by Oliver Lyak (ly4k)",
+    "[*] Enumeration output:",
+    "Certificate Authorities",
+    "  0",
+    "    CA Name                             : prova-VAGRANT-2008R2-CA",
+    "    DNS Name                            : vagrant-2008R2.prova.prova.com",
+    "    [!] Vulnerabilities",
+    "      ESC11                             : Encryption is not enforced "
+    "for ICPR (RPC) requests.",
+    "Certificate Templates",
+    "  0",
+    "    Template Name                       : User",
+    "    Enabled                             : True",
+    "    Client Authentication               : True",
+    "    Enrollee Supplies Subject           : True",
+    "    [!] Vulnerabilities",
+    "      ESC1                              : Enrollee supplies subject "
+    "and template allows client authentication.",
+    "      ESC15                             : Enrollee supplies subject "
+    "and schema version is 1.",
+    "      ESC4                              : User has dangerous "
+    "permissions.",
+    "    [*] Remarks",
+    "      ESC15                             : Only applicable if the "
+    "environment has not been patched. See CVE-2024-49019 or the wiki.",
+    "      ESC2 Target Template              : Template can be targeted "
+    "as part of ESC2 exploitation.",
+    "      ESC3 Target Template              : Template can be targeted "
+    "as part of ESC3 exploitation.",
+]
 
 
 def _run(log):
@@ -126,6 +159,24 @@ class CertipyParserTests(unittest.TestCase):
         self.assertIn("-ldap-scheme ldap", desc)
         # Must NOT flatly conclude the DC has no AD CS role.
         self.assertIn("does NOT", desc)
+
+    def test_esc1_finding_is_critical_and_actionable(self):
+        claimed, findings = _run(_ESC1)
+        self.assertTrue(claimed)
+        self.assertEqual(len(findings), 1)
+        f = findings[0]
+        self.assertEqual(f["severity"], "critical")
+        d = f["description"]
+        # CA-level ESC11 is captured, not only template ESCs.
+        self.assertIn("ESC11", f["title"])
+        self.assertIn("ESC1", f["title"])
+        # 4 real misconfigs (CA ESC11 + User ESC1/ESC15/ESC4); the
+        # "[*] Remarks" ESC15/ESC2/ESC3 lines are NOT double-counted.
+        self.assertIn("4 AD CS misconfiguration", d)
+        self.assertEqual(d.count("ESC15"), 1)
+        # The real template is pre-baked into the certipy-req command.
+        self.assertIn("-template 'User'", d)
+        self.assertNotIn("<template>", d)
 
 
 if __name__ == "__main__":
