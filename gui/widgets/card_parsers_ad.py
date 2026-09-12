@@ -1386,8 +1386,50 @@ class CardADParserMixin:
                 vulns.append((tmpl_name, em.group(1), em.group(2).strip()))
 
         if not vulns:
-            # ── Path A: AD CS enumerated successfully, no ESC vulns ──
-            if "Enterprise CA" in text or "Certificate Authorities" in text:
+            text_low = text.lower()
+            # How many CAs did certipy actually find?  certipy v5 prints
+            # "Found N certificate authorities"; N == 0 means the domain
+            # has NO Enterprise CA registered.  The "Certificate
+            # Authorities" header still prints in that case, so the old
+            # bare-substring Path A check wrongly reported a healthy AD CS.
+            m_ca_count = re.search(
+                r"found\s+(\d+)\s+certificate authorities", text_low)
+            ca_count = int(m_ca_count.group(1)) if m_ca_count else None
+
+            # ── No Enterprise CA registered (AD CS ran, 0 CAs) ──────────
+            if (ca_count == 0
+                    or "could not find any cas" in text_low
+                    or "could not find any certificate authorities"
+                    in text_low):
+                self.app.after(0, lambda:
+                    self.app.target_intel.add_auto_finding(
+                        title=f"CERTIPY FIND — no Enterprise CA on "
+                              f"{target}",
+                        description=(
+                            "Certipy enumerated AD over LDAP but found NO "
+                            "Enterprise CA registered in the domain "
+                            "(0 certificate authorities, 0 templates).\n\n"
+                            "The AD CS abuse chain (ESC1–ESC11) needs an "
+                            "Enterprise CA with published templates — "
+                            "there is nothing to attack here yet.  A "
+                            "'CertEnroll' share alone does NOT imply an "
+                            "Enterprise CA: a standalone or partial "
+                            "install creates it too.\n\n"
+                            "If you expected a CA, confirm on the CA host "
+                            "that the role is installed AND configured as "
+                            "an ENTERPRISE CA (certutil -cainfo) and "
+                            "registered under CN=Enrollment Services,"
+                            "CN=Public Key Services,CN=Services in the "
+                            "configuration NC."),
+                        severity="info", source=tool.name,
+                        linked_run_id=rid))
+                self.app.terminal.write(
+                    "  [i] certipy — no Enterprise CA registered (0 CAs); "
+                    "nothing to attack in the cert chain.", "info")
+                return True
+
+            # ── Path A: a CA IS present, just no ESC vulns ──────────────
+            if (ca_count and ca_count > 0) or "enterprise ca" in text_low:
                 self.app.after(0, lambda:
                     self.app.target_intel.add_auto_finding(
                         title=f"CERTIPY FIND — AD CS on {target} "
