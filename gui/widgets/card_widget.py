@@ -2107,9 +2107,9 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                        "Cypher queries.",
             "extras":  [
                 "-c DCOnly             — only collect from the DC (faster)",
-                "-c All                — full collection (default)",
-                "-c Group,ACL          — pick specific methods",
-                "--dns-tcp             — force DNS over TCP",
+                "-c Group,ACL          — pick specific methods (overrides -c All)",
+                "--dns-timeout 30      — raise DNS wait; use when the DC's DNS is slow/flaky",
+                "--dns-tcp             — force DNS over TCP (some DCs only answer TCP 53)",
                 "--disable-pooling     — if connection errors",
             ],
         },
@@ -2133,9 +2133,12 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
         },
         "nxc_ldap": {
             "purpose": (
-                "NetExec LDAP module — one-liner enumeration: users, "
-                "groups, admin-count outliers, kerberoastable / AS-REP "
-                "roastable / trusted-for-delegation users."),
+                "NetExec LDAP module — domain enumeration: users, groups, "
+                "admin-count outliers, trusted-for-delegation accounts.  "
+                "Kerberoast / AS-REP flags are available as extra args "
+                "below, but the dedicated KERBEROAST / AS-REP ROAST cards "
+                "are the cleaner path for credential extraction (no double "
+                "KDC noise)."),
             "needs":   "Any domain user.  Accepts NTLM hash via -H.",
             "output":  "HAWK parses stdout → admin-count users / SPNs / "
                        "delegation flags surface in Target Intel.  "
@@ -2166,6 +2169,23 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                 "-target-domain <DOMAIN>  — cross-forest kerberoast",
             ],
         },
+        "certipy_quick": {
+            "purpose": (
+                "Fast AD CS scan — shows ONLY vulnerable templates "
+                "(-vulnerable).  Run first; if it finds nothing, either "
+                "AD CS has no exploitable template, or (on a legacy DC) "
+                "LDAPS reset the scan — retry with the LDAP chip below."),
+            "needs":   "Any domain user + the DC reachable.  AD CS "
+                       "installed (an Enterprise CA registered in AD).",
+            "output":  "HAWK parses 'Vulnerable to: ESCx' lines into "
+                       "Target Intel findings; on an LDAPS handshake "
+                       "reset it tells you to retry over plain LDAP.",
+            "extras":  [
+                "-ldap-scheme ldap        — plain LDAP (389); use when LDAPS resets (legacy DCs, Server 2008-2012)",
+                "-vulnerable              — default, only vuln templates",
+                "-stdout                  — default, already set",
+            ],
+        },
         "certipy_find": {
             "purpose": (
                 "Certipy AD CS enumeration — lists Enterprise CAs, "
@@ -2178,6 +2198,7 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                        "severity=critical, with the certipy-req command "
                        "pre-baked (CA name + template name filled in).",
             "extras":  [
+                "-ldap-scheme ldap        — plain LDAP (389); use when LDAPS resets (legacy DCs, Server 2008-2012)",
                 "-vulnerable              — only show vuln templates",
                 "-text                    — text-only output",
                 "-json                    — emit machine-readable JSON",
@@ -2195,9 +2216,11 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
             "needs":   "Domain user + a vulnerable template + UPN of "
                        "the user you want to impersonate.  Get CA_NAME "
                        "and TEMPLATE from `certipy find` output first.",
-            "output":  "<HAWK>/outputs/esc1.pfx on disk — hand it to certipy "
-                       "auth (the PFX is binary, not parsed by HAWK).  "
-                       "Terminal log shows the path.",
+            "output":  "esc1.pfx in the working dir (certipy v5 mangles "
+                       "-out paths, so HAWK writes a bare name).  HAWK "
+                       "raises a HIGH Target Intel finding naming the "
+                       "impersonated user + the real .pfx path; hand it to "
+                       "certipy auth.",
             "extras":  [
                 "-upn Administrator@<DOM> — UPN to impersonate (required)",
                 "-ca '<CA name>'          — the Enterprise CA name",
@@ -2303,7 +2326,10 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
             "needs":   "Any domain user + domain not locked down "
                        "(MAQ > 0).  Check MAQ with "
                        "`ldapsearch ... objectclass=domain ms-DS-Mac"
-                       "hineAccountQuota`.",
+                       "hineAccountQuota`.  On hardened/modern DCs MAQ "
+                       "is often 0 by design (post-noPac) — then you "
+                       "need delegated CreateChild on an OU/Computers "
+                       "container, or another foothold.",
             "output":  "HAWK parses the 'Successfully added machine "
                        "account X with password Y' line → pushes X:Y "
                        "to the Credential Store (AD RESULTS box, "
@@ -2311,10 +2337,10 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                        "with the cleanup command.  No file on disk — "
                        "the account lives in AD.",
             "extras":  [
-                "-computer-name FOO$      — custom name (keep the $)",
-                "-computer-pass 'Pass1'   — custom password",
-                "-method SAMR             — SAMR instead of LDAP",
-                "-delete                  — remove the account you created",
+                "-method SAMR             — legacy DCs (this is the default): RPC/SAMR over SMB",
+                "-method LDAPS            — modern/hardened DCs that block SAMR or enforce LDAP signing (needs LDAPS/636)",
+                "-k                       — Kerberos auth for NTLM-disabled DCs; also add -dc-host <FQDN> (DNS HELPER + clock sync)",
+                "-delete                  — remove a machine account you created",
             ],
         },
         "adidnsdump": {
@@ -2330,10 +2356,10 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                        "shown inline, rest in the .csv).  Use these "
                        "as new targets for your scan scope.",
             "extras":  [
-                "--print-zones            — default, list zones too",
-                "-r                       — resolve records HAWK can reach",
-                "--zone <name>            — dump a specific zone",
-                "--dns-tcp                — force DNS TCP",
+                "-r                       — resolve hidden records via a real DNS query (fills IPs LDAP hides)",
+                "--print-zones            — list zones only (no record dump); run first to discover zone names",
+                "--zone <name>            — dump a specific zone instead of the domain zone",
+                "--dns-tcp                — force DNS over TCP (flaky UDP / large zones)",
             ],
         },
     }

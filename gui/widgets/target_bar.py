@@ -83,7 +83,7 @@ class TargetBar(ctk.CTkFrame):
         # ── IP Entry ──
         self._ip_entry = ctk.CTkEntry(
             self,
-            width=210, height=28,
+            width=160, height=28,
             placeholder_text="e.g. 10.10.10.1",
             font=ctk.CTkFont(family="Courier New", size=15),
             fg_color    = "#050505",
@@ -183,19 +183,27 @@ class TargetBar(ctk.CTkFrame):
             row=0, column=4, sticky="ew")
 
         # ── Action Buttons ──
+        # Per-button widths trimmed to each label (was a flat 160/120) so
+        # the five buttons + the IP / platform row fit the maximized window
+        # without the last one (DELETE SESSION) spilling past the right
+        # edge.  That overflow also clipped the ARGUS button on the
+        # network-health row, because row 0 is the widest row and sets the
+        # grid's total width, which row 4 (sticky="ew") then inherits.
+        # DELETE SESSION gets 150 px so its full label stops being cut off
+        # inside the button (the old 120 truncated "SESSION").
         btn_cfg = [
-            ("▶  NEW SESSION", self._new_session, COLORS["border_green"], COLORS["text_green"],  "#001500"),
-            ("💾  SAVE",        self._save_session, COLORS["border_dim"],  COLORS["text_dim"],   COLORS["bg_card"]),
-            ("⟳  AUTOSAVE",    self._toggle_autosave, COLORS["border_dim"], COLORS["text_dim"],  COLORS["bg_card"]),
-            ("📂  LOAD",        self._load_session, COLORS["border_dim"],  COLORS["text_dim"],   COLORS["bg_card"]),
-            ("🗑  DELETE SESSION", self._delete_session, COLORS["text_red"],     COLORS["text_red"],    "#1A0000"),
+            ("▶  NEW SESSION",    self._new_session,      COLORS["border_green"], COLORS["text_green"], "#001500",          150),
+            ("💾  SAVE",           self._save_session,     COLORS["border_dim"],   COLORS["text_dim"],   COLORS["bg_card"],   88),
+            ("⟳  AUTOSAVE",       self._toggle_autosave,  COLORS["border_dim"],   COLORS["text_dim"],   COLORS["bg_card"],  118),
+            ("📂  LOAD",           self._load_session,     COLORS["border_dim"],   COLORS["text_dim"],   COLORS["bg_card"],   88),
+            ("🗑  DELETE SESSION", self._delete_session,   COLORS["text_red"],     COLORS["text_red"],   "#1A0000",          150),
         ]
 
-        for idx, (label, cmd, border, fg, bg) in enumerate(btn_cfg):
+        for idx, (label, cmd, border, fg, bg, bwidth) in enumerate(btn_cfg):
             btn = ctk.CTkButton(
                 self,
                 text=label,
-                width=160 if idx == 0 else 120,
+                width=bwidth,
                 height=28,
                 font=ctk.CTkFont(family="Courier New", size=13, weight="bold" if idx == 0 else "normal"),
                 fg_color     = bg,
@@ -206,7 +214,7 @@ class TargetBar(ctk.CTkFrame):
                 corner_radius = 3,
                 command=cmd,
             )
-            btn.grid(row=0, column=5 + idx, padx=4, pady=3)
+            btn.grid(row=0, column=5 + idx, padx=2, pady=3)
             # Keep a handle on the AUTOSAVE button so _toggle_autosave
             # can repaint it green/gray on state change.
             if "AUTOSAVE" in label:
@@ -239,17 +247,26 @@ class TargetBar(ctk.CTkFrame):
         self._domain_entry.grid(row=2, column=1, columnspan=2, padx=4, pady=3, sticky="w")
         self._domain_entry.bind("<Return>", lambda e: self._save_domain())
 
-        # SAVE/CHANGE + DELETE buttons live in a shared sub-frame so they
-        # stay glued together regardless of column 3's weight=1 stretching.
+        # SAVE/CHANGE + DELETE + the "Saved - <domain>" status live in a
+        # shared sub-frame so they stay glued together.  It spans columns
+        # 3->9 (columnspan) instead of sitting in column 3 alone: the
+        # status label is variable-width, and in a single column it
+        # ballooned column 3 whenever a domain was saved / loaded, which
+        # pushed the row-0 action buttons (DELETE SESSION) and the row-4
+        # ARGUS button off the right edge.  Spanning lets that width be
+        # absorbed by the weight=1 spacer / button columns, so column 3
+        # stays as narrow as the platform selector above it regardless of
+        # the domain length.
         domain_btns = ctk.CTkFrame(self, fg_color="transparent")
-        domain_btns.grid(row=2, column=3, padx=4, pady=(0, 3), sticky="w")
+        domain_btns.grid(row=2, column=3, columnspan=7, padx=4, pady=(0, 3),
+                         sticky="w")
 
         # SAVE/CHANGE button — label switches to "CHANGE" once a domain has
         # been persisted on the current session.
         self._save_domain_btn = ctk.CTkButton(
             domain_btns,
             text="💾  SAVE DOMAIN",
-            width=160, height=28,
+            width=150, height=28,
             font=ctk.CTkFont(family="Courier New", size=13),
             fg_color     = COLORS["bg_card"],
             hover_color  = "#1A1A1A",
@@ -265,7 +282,7 @@ class TargetBar(ctk.CTkFrame):
         self._delete_domain_btn = ctk.CTkButton(
             domain_btns,
             text="🗑  DELETE",
-            width=120, height=28,
+            width=112, height=28,
             font=ctk.CTkFont(family="Courier New", size=13),
             fg_color     = "#1A0000",
             hover_color  = "#2A0505",
@@ -325,6 +342,11 @@ class TargetBar(ctk.CTkFrame):
             command=self._open_proxychains_dialog,
         )
         self._proxy_btn.pack(side="left", padx=(16, 0))
+        self._attach_tooltip(
+            self._proxy_btn,
+            "The proxy chain HAWK's proxied tools run through — Tor "
+            "(127.0.0.1:9050) by default. Click to view or edit "
+            "/etc/proxychains4.conf.")
         self.after(200, self._refresh_proxy_button)
 
         # Global API-key manager.  This is the settings row (net health,
@@ -352,6 +374,100 @@ class TargetBar(ctk.CTkFrame):
 
         # Reflect initial button state (no domain saved yet).
         self._refresh_domain_button_state(saved=False)
+
+    # ─── Hover tooltips ─────────────────────────────────────────────────────────
+    def _attach_tooltip(self, widget, text, delay_ms=2000):
+        """Show a small tooltip after the cursor rests `delay_ms` on
+        `widget` (or any descendant), hide it on leave.
+
+        The Toplevel is CREATED on show and DESTROYED on hide — an earlier
+        attempt reused one Toplevel with override-redirect + deiconify and
+        got stuck 'withdrawn' on Xfce (see _make_coming_soon_button).  The
+        hide is bounds-checked (winfo_containing) so moving between a
+        button and its child labels doesn't flicker the tip away.  Bound
+        with add='+' so it never clobbers CTk's own hover handling.
+        """
+        import tkinter as tk
+        st = {"show": None, "hide": None, "tip": None}
+
+        def _cancel(key):
+            if st[key] is not None:
+                try:
+                    widget.after_cancel(st[key])
+                except Exception:
+                    pass
+                st[key] = None
+
+        def _destroy():
+            if st["tip"] is not None:
+                try:
+                    st["tip"].destroy()
+                except Exception:
+                    pass
+                st["tip"] = None
+
+        def _show():
+            st["show"] = None
+            if st["tip"] is not None or not widget.winfo_exists():
+                return
+            try:
+                x = widget.winfo_rootx() + 14
+                y = widget.winfo_rooty() + widget.winfo_height() + 6
+                tip = tk.Toplevel(widget)
+                tip.wm_overrideredirect(True)
+                try:
+                    tip.attributes("-topmost", True)
+                except Exception:
+                    pass
+                tk.Label(
+                    tip, text=text, justify="left",
+                    bg=COLORS.get("bg_card", "#0A0A0A"),
+                    fg=COLORS.get("text_bright", "#E0E0E0"),
+                    font=("Courier New", 10), bd=1, relief="solid",
+                    padx=8, pady=5, wraplength=360,
+                ).pack()
+                tip.update_idletasks()
+                tip.wm_geometry(f"+{x}+{y}")
+                tip.lift()
+                st["tip"] = tip
+            except Exception:
+                _destroy()
+
+        def _enter(_e=None):
+            _cancel("hide")
+            if st["tip"] is None and st["show"] is None:
+                st["show"] = widget.after(delay_ms, _show)
+
+        def _maybe_hide():
+            st["hide"] = None
+            try:
+                under = widget.winfo_containing(*widget.winfo_pointerxy())
+            except Exception:
+                under = None
+            w = under
+            while w is not None:
+                if w is widget:
+                    return   # still over the button subtree — keep it
+                w = getattr(w, "master", None)
+            _cancel("show")
+            _destroy()
+
+        def _leave(_e=None):
+            _cancel("hide")
+            st["hide"] = widget.after(120, _maybe_hide)
+
+        def _press(_e=None):
+            _cancel("show")
+            _destroy()
+
+        def _bind(w):
+            w.bind("<Enter>", _enter, add="+")
+            w.bind("<Leave>", _leave, add="+")
+            w.bind("<ButtonPress>", _press, add="+")
+            for c in w.winfo_children():
+                _bind(c)
+
+        _bind(widget)
 
     # ─── Network Sweep row ──────────────────────────────────────────────────────
 
@@ -427,6 +543,10 @@ class TargetBar(ctk.CTkFrame):
             corner_radius=3,
         )
         self._sweep_phase2_chk.pack(side="left", padx=(10, 0))
+        self._attach_tooltip(
+            self._sweep_phase2_chk,
+            "After the host sweep, run a light nmap (top 100 ports, -T4) "
+            "on each live host to preview open services.")
 
         self._sweep_run_btn = ctk.CTkButton(
             sweep_frame,
@@ -442,6 +562,11 @@ class TargetBar(ctk.CTkFrame):
             command=self._run_sweep,
         )
         self._sweep_run_btn.pack(side="left", padx=(10, 0))
+        self._attach_tooltip(
+            self._sweep_run_btn,
+            "Scan the base network (IP / prefix) for live hosts. With "
+            "\"Port peek\" ticked, then nmap the top 100 ports on each "
+            "host found. Results feed the sweep graph.")
 
         self._sweep_graph_btn = ctk.CTkButton(
             sweep_frame,
@@ -1425,14 +1550,13 @@ class TargetBar(ctk.CTkFrame):
                                    on_click=None) -> None:
         """Create one teaser button inside `parent`.
 
-        The `tooltip` parameter is kept in the signature for call-site
-        compatibility but no longer used — we previously rendered a
-        custom hover tooltip via tk.Toplevel, but that combo fought
-        with Kali's Xfce WM (override-redirect + deiconify stuck the
-        window in withdrawn state) and the debug cycles dragged on.
-        All the hype info is surfaced in the click-dialog instead,
-        which is the native HAWK interaction everywhere else in the
-        app.  Keeping the file noise-free.
+        When `tooltip` is non-empty it is shown via `_attach_tooltip`
+        (create-on-hover / destroy-on-leave).  The earlier attempt that
+        REUSED one Toplevel with override-redirect + deiconify got stuck
+        'withdrawn' on Kali's Xfce WM; the create/destroy pattern in
+        `_attach_tooltip` sidesteps that.  The full pitch still lives in
+        the click-dialog — the tooltip is only the 2-second "what is
+        this button" hint.
 
         Optional extras (added in M1.5 for ARGUS state-aware buttons —
         defaults preserve the generic coming-soon teaser behaviour):
@@ -1442,7 +1566,6 @@ class TargetBar(ctk.CTkFrame):
                         "⏰" for expired, "⚠" for error, "" to drop)
           on_click      override the click handler (default is the
                         coming-soon dialog with the supplied texts)."""
-        _ = tooltip  # silence unused-arg warnings
 
         # Colours — keep them const here so the pulse code stays
         # self-contained.
@@ -1619,6 +1742,16 @@ class TargetBar(ctk.CTkFrame):
             except Exception:
                 pass
 
+        # ── Hover tooltip (2 s) ──────────────────────────────────
+        # Bound on the shell subtree; the click handler above and the
+        # bbox hover-poll are untouched (tooltip uses <Enter>/<Leave>/
+        # <ButtonPress>, add="+").
+        if tooltip:
+            try:
+                self._attach_tooltip(shell, tooltip)
+            except Exception:
+                pass
+
     # ═══════════════════════════════════════════════════════════════
     #  ARGUS — state-aware button + plugin window (M1.5)
     # ═══════════════════════════════════════════════════════════════
@@ -1654,6 +1787,10 @@ class TargetBar(ctk.CTkFrame):
                 title="ARGUS",
                 accent_color=None,        # default grey
                 lock_icon="🔒",
+                tooltip=(
+                    "ARGUS: paid HAWK plugin that maps a target's "
+                    "defensive controls (firewall, WAF, deception). "
+                    "Not installed — click to learn how."),
                 tagline="ARGUS plugin is not installed.",
                 description=(
                     "ARGUS is a paid plugin for HAWK that maps the "
@@ -1671,19 +1808,33 @@ class TargetBar(ctk.CTkFrame):
                 title="ARGUS — license required",
                 accent_color=amber,
                 lock_icon="🔒",
-                tagline="ARGUS is installed but no valid license was found.",
+                tooltip=(
+                    "ARGUS: paid add-on that maps a target's defensive "
+                    "controls (firewall, WAF, deception). No valid "
+                    "license found — click for how to unlock."),
+                tagline="ARGUS is a paid add-on — activate it with a "
+                        "license.",
                 description=(
-                    f"Reason: {loader.error}\n\n"
-                    "Drop your license file at:\n"
+                    "ARGUS is a paid add-on plugin for HAWK. It maps the "
+                    "defensive controls of an authorised target — "
+                    "outside-in (network blackbox) and inside-out (host "
+                    "snapshot): Network Filtering, Service Exposure, "
+                    "HTTP/TLS Mediation, Response Anomalies, Deception "
+                    "Likelihood.\n\n"
+                    "To unlock the ARGUS tab, place your license file at:\n"
                     "  ~/.hawk/argus_license.bin\n\n"
-                    "If you don't have one, get a license at the "
-                    "ARGUS landing page (Trial: 30 days free)."),
+                    "Get ARGUS and a license at the ARGUS landing page.\n\n"
+                    f"(Loader: {loader.error})"),
             )
         elif loader.state is PluginState.EXPIRED:
             cfg = dict(
                 title="ARGUS — license expired",
                 accent_color=amber,
                 lock_icon="⏰",
+                tooltip=(
+                    "ARGUS: maps a target's defensive controls "
+                    "(firewall, WAF, deception). License expired — "
+                    "click to renew."),
                 tagline="Your ARGUS license has expired.",
                 description=(
                     f"Details: {loader.error}\n\n"
@@ -1695,6 +1846,10 @@ class TargetBar(ctk.CTkFrame):
                 title="ARGUS — incompatible plugin",
                 accent_color=red,
                 lock_icon="⚠",
+                tooltip=(
+                    "ARGUS: maps a target's defensive controls. "
+                    "Plugin / HAWK version mismatch — click for "
+                    "details."),
                 tagline="ARGUS plugin requires a different HAWK API version.",
                 description=(
                     f"Details: {loader.error}\n\n"
@@ -1707,6 +1862,9 @@ class TargetBar(ctk.CTkFrame):
                 title="ARGUS — plugin error",
                 accent_color=red,
                 lock_icon="⚠",
+                tooltip=(
+                    "ARGUS: maps a target's defensive controls. "
+                    "Plugin failed to load — click for details."),
                 tagline="ARGUS plugin failed to load.",
                 description=(
                     f"Details: {loader.error}\n\n"
@@ -1714,7 +1872,7 @@ class TargetBar(ctk.CTkFrame):
                     "console for the underlying traceback."),
             )
 
-        self._make_coming_soon_button(parent, tooltip="", **cfg)
+        self._make_coming_soon_button(parent, **cfg)
 
     def _make_argus_active_button(self, parent) -> None:
         """Active ARGUS button — cyan accent, no lock, opens plugin window."""
@@ -1772,6 +1930,15 @@ class TargetBar(ctk.CTkFrame):
                 _w.configure(cursor="hand2")
             except Exception:
                 pass
+
+        try:
+            self._attach_tooltip(
+                shell,
+                "ARGUS: map this target's defensive controls (firewall, "
+                "WAF, deception), outside-in and inside-out. Click to "
+                "open the ARGUS panel.")
+        except Exception:
+            pass
 
     def _open_argus_window(self) -> None:
         """Mount the ARGUS plugin in a Toplevel CTk window.

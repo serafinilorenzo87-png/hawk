@@ -153,18 +153,22 @@ class ProducerContractTests(unittest.TestCase):
             self.assertNotIn(True, vals, func)
 
     def test_kerbrute_user_enumeration_is_never_verified(self):
-        # Kerbrute userenum proves the account exists, nothing more.
+        # Kerbrute userenum proves the account exists, nothing more, so it
+        # is recorded as a discovered user, NOT a credential.  The only
+        # Credential this parser builds is the VALID LOGIN spray hit
+        # (verified=True) — an empty username-only stub in the store was
+        # useless and has been removed.
         vals = self._verified_literals(
             "gui/widgets/card_parsers_service.py",
             "_parse_kerbrute_to_intel")
-        # Two producers in this parser: userenum (False) and the
-        # VALID LOGIN spray hit (True).
-        self.assertEqual([False, True], vals)
+        self.assertEqual([True], vals)
 
     def test_ad_dumps_are_never_verified(self):
-        # Uncracked hashes and a machine account nobody logged in with.
+        # Uncracked hashes, a machine account nobody logged in with, a
+        # decrypted GPP cpassword nobody has sprayed yet, and an ESC1
+        # UnPAC'd NT hash HAWK recovered but never NTLM-logged-in with.
         vals = self._verified_literals("gui/widgets/card_parsers_ad.py")
-        self.assertEqual(8, len(vals))
+        self.assertEqual(10, len(vals))
         self.assertNotIn(True, vals)
 
     def test_peas_scrapes_are_never_verified(self):
@@ -397,6 +401,67 @@ class UnverifiedPushTests(unittest.TestCase):
             reloaded = fresh.get_credentials()[0]
             self.assertTrue(reloaded.cracked)
             self.assertEqual("Password1", reloaded.cracked_pass)
+
+    def test_verified_duplicate_promotes_existing_unverified_row(self):
+        """W-06: a tool-confirmed (Pwn3d! / successful login) credential
+        that duplicates an existing unverified row must PROMOTE that row
+        to verified IN PLACE — not be silently dropped by the dedup, which
+        left a confirmed admin credential stuck unverified after netexec
+        reported Pwn3d! against a cred added earlier via the retry dialog."""
+        from utils.session import Credential
+        with self._temp_session() as sess:
+            sess.add_credential(Credential(
+                username="vagrant", password="vagrant",
+                cred_type="cleartext", services=["SMB"],
+                host="10.0.0.9", source_phase="manual",
+                notes="Added via NETEXEC (CME) retry dialog",
+                verified=False))
+            # Same identity, now proven (netexec Pwn3d!).
+            added = sess.add_credential(Credential(
+                username="vagrant", password="vagrant",
+                cred_type="cleartext", services=["SMB"],
+                host="10.0.0.9", source_phase="enumeration",
+                notes="Pwn3d! on 10.0.0.9", verified=True))
+            self.assertFalse(added, "a duplicate must not append a 2nd row")
+            self.assertEqual(1, len(sess.credentials))
+            self.assertTrue(
+                sess.credentials[0]["verified"],
+                "the Pwn3d! confirmation did not promote the existing row")
+
+    def test_unverified_duplicate_does_not_promote(self):
+        """The inverse guard: re-adding the SAME unproven credential must
+        never flip an existing row to verified."""
+        from utils.session import Credential
+        with self._temp_session() as sess:
+            sess.add_credential(Credential(
+                username="svc", password="p", cred_type="cleartext",
+                host="10.0.0.9", source_phase="manual", verified=False))
+            sess.add_credential(Credential(
+                username="svc", password="p", cred_type="cleartext",
+                host="10.0.0.9", source_phase="manual", verified=False))
+            self.assertEqual(1, len(sess.credentials))
+            self.assertFalse(sess.credentials[0]["verified"])
+
+    def test_verified_hash_crack_promotes_existing_row(self):
+        """A crack confirming a hash already on file promotes cracked in
+        place (same ratchet as verified), never a duplicate row."""
+        from utils.session import Credential
+        with self._temp_session() as sess:
+            sess.add_credential(Credential(
+                username="admin", hash_val="a" * 32, hash_type="NTLM",
+                cred_type="hash", host="10.0.0.9",
+                source_phase="post_exploit", verified=False))
+            dup = Credential(
+                username="admin", hash_val="a" * 32, hash_type="NTLM",
+                cred_type="hash", host="10.0.0.9",
+                source_phase="post_exploit", verified=False)
+            dup.cracked = True
+            dup.cracked_pass = "Password1"
+            added = sess.add_credential(dup)
+            self.assertFalse(added)
+            self.assertEqual(1, len(sess.credentials))
+            self.assertTrue(sess.credentials[0]["cracked"])
+            self.assertEqual("Password1", sess.credentials[0]["cracked_pass"])
 
 
 class CredentialStableIdTests(unittest.TestCase):

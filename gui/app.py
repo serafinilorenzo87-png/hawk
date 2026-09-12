@@ -154,7 +154,21 @@ class HawkApp(ctk.CTk):
         win.resizable(False, False)
         win.transient(self)
         win.grab_set()
-        win.protocol("WM_DELETE_WINDOW", lambda: None)
+
+        def _cancel(*_):
+            # The dialog's X (or Esc): the operator changed their mind and
+            # does NOT want to close HAWK.  Abort the shutdown and re-arm
+            # `_closing` so a later close still prompts.  Was `lambda: None`
+            # → the X did nothing, leaving Remove/Keep as the only way out,
+            # both of which quit the app.
+            self._closing = False
+            try:
+                win.destroy()
+            except Exception:
+                pass
+
+        win.protocol("WM_DELETE_WINDOW", _cancel)
+        win.bind("<Escape>", _cancel)
 
         ctk.CTkLabel(
             win,

@@ -167,19 +167,54 @@ class NetexecNullSessionTests(unittest.TestCase):
     def test_real_authenticated_run_still_harvests_the_cred(self):
         # Regression guard: a genuine -u user -p pass run must still be
         # recognised as authenticated and harvest that user's credential.
-        sess, _, findings = _run(
+        # It is routed through the credential STORE (so a new cred blinks
+        # and no "pushed" line prints on a dedup no-op), not
+        # sess.add_credential.
+        sess, store, findings = _run(
             "netexec smb 192.168.177.134 --port 445 -u msfadmin "
             "-p msfadmin --shares",
             _NXC_AUTH_LOG)
-        harvested = [c for c in sess.added
+        harvested = [c for c in store.added
                      if (c.username or "") == "msfadmin"]
         self.assertTrue(
             harvested,
-            "an authenticated netexec run must still push its credential")
+            "an authenticated netexec run must push its credential "
+            "through the store")
+        self.assertTrue(harvested[0].verified,
+                        "a Pwn3d! login must be stored verified")
         titles = [f.get("title", "") for f in findings]
         self.assertTrue(
             any(t.startswith("SMB Authenticated Access") for t in titles),
             f"authenticated run must raise the auth finding; got {titles}")
+
+    def test_auth_access_title_is_stable_so_netexec_and_smbclient_merge(self):
+        """netexec (Pwn3d) and smbclient (bare listing) on the same
+        user@host must produce the IDENTICAL 'SMB Authenticated Access'
+        title so they collapse into one card.  The LOCAL ADMIN / Pwn3d
+        status moves to the description + severity, not a title suffix
+        that would split the card in two."""
+        _, _, nxc_find = _run(
+            "netexec smb 192.168.177.134 --port 445 -u administrator "
+            "-p Passw0rd --shares",
+            [("info", "SMB 192.168.177.134 445 DC [+] "
+                      "dom\\administrator:Passw0rd (Pwn3d!)"),
+             ("info", "SMB 192.168.177.134 445 DC ADMIN$  READ,WRITE")])
+        nxc = next(f for f in nxc_find
+                   if "Authenticated Access" in f.get("title", ""))
+        self.assertTrue(nxc["title"].startswith("SMB Authenticated Access"))
+        self.assertIn("administrator@192.168.177.134", nxc["title"])
+        self.assertNotIn("LOCAL ADMIN", nxc["title"])   # no split suffix
+        self.assertIn("Pwn3d!", nxc["description"])     # status kept
+        self.assertEqual("high", nxc["severity"])
+
+        _, _, smb_find = _run(
+            "smbclient -L //192.168.177.134 -U 'administrator%Passw0rd'",
+            [("out", "\tADMIN$          Disk      Remote Admin"),
+             ("out", "\tC$              Disk      Default share")])
+        smb = next(f for f in smb_find
+                   if "Authenticated Access" in f.get("title", ""))
+        # Identical title -> the two collapse into ONE card on merge.
+        self.assertEqual(nxc["title"], smb["title"])
 
 
 if __name__ == "__main__":

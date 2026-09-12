@@ -412,6 +412,12 @@ class CardScanRoutesMixin:
             if tool.id == "rbcd_attack":
                 self._route_rbcd_attack(tool)
                 return
+            if tool.id == "addcomputer":
+                self._route_addcomputer(tool)
+                return
+            if tool.id in ("certipy_quick", "certipy_find"):
+                self._route_certipy_find(tool)
+                return
             self._route_ad_template(tool)
             return
 

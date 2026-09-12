@@ -104,6 +104,31 @@ def _http_get(host, port, path="/", timeout=3, recv_size=8192):
     return status, headers, body
 
 
+def _port_open(host, port, timeout=2.0):
+    """Fast TCP pre-gate: return True iff ``port`` accepts a connection.
+
+    A closed or filtered port would otherwise cost the full 9-probe
+    battery (~30s of accumulated connect/recv timeouts) before every
+    probe gives up.  A single quick connect settles it in <= ``timeout``
+    seconds.  Connect success is a TCP-level event, so this never
+    false-skips a DB that is merely slow at the application layer.
+    """
+    s = None
+    try:
+        s = socket.socket()
+        s.settimeout(timeout)
+        s.connect((host, port))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            if s is not None:
+                s.close()
+        except Exception:
+            pass
+
+
 def _tcp_send_recv(host, port, payload, timeout=3, recv_size=4096):
     """Open TCP, send ``payload`` (or none), read up to ``recv_size``
     bytes, return the response or ``None`` on error.
@@ -416,6 +441,11 @@ def fingerprint_port(host, port):
 
     Returns ``(svc_key, version, confidence)`` or ``None``.
     """
+    # Fast pre-gate: skip the whole probe battery on a port that will
+    # not even accept a TCP connection.  Without this, a closed/filtered
+    # port burns ~30s working through all 9 probes' individual timeouts.
+    if not _port_open(host, port):
+        return None
     hints = PORT_HINTS.get(port, [])
     tried = set()
     # 1) Port hint
@@ -480,6 +510,23 @@ def _parse_ports(argv_rest):
     return uniq
 
 
+def _scan_one(host, port):
+    """Fingerprint one port -> the output line to print, or ``None``.
+
+    Mirrors the old per-port body of ``main`` so it can run inside the
+    thread pool.  Never raises: any error becomes a diag line.
+    """
+    try:
+        result = fingerprint_port(host, port)
+    except Exception as e:
+        return f"[HAWK_DB_DIAG: port={port} error: {e}]"
+    if result:
+        svc, ver, conf = result
+        return (f"[HAWK_DB port={port} svc={svc} "
+                f"version={ver or '?'} confidence={conf}]")
+    return None
+
+
 def main(argv):
     if len(argv) < 3:
         sys.stderr.write(
@@ -491,18 +538,27 @@ def main(argv):
     if not ports:
         sys.stderr.write("no valid ports given\n")
         return 2
-    print(f"[HAWK_DB_DIAG: scanning {len(ports)} port(s) on {host}]")
-    for port in ports:
-        try:
-            result = fingerprint_port(host, port)
-        except Exception as e:
-            print(f"[HAWK_DB_DIAG: port={port} error: {e}]")
-            continue
-        if result:
-            svc, ver, conf = result
-            print(f"[HAWK_DB port={port} svc={svc} "
-                  f"version={ver or '?'} confidence={conf}]")
-    print("[HAWK_DB_DIAG: done]")
+    print(f"[HAWK_DB_DIAG: scanning {len(ports)} port(s) on {host}]",
+          flush=True)
+    # Probe every port concurrently.  Each port is independent and
+    # spends almost all its time blocked on socket timeouts, so a thread
+    # pool collapses the wall-clock from sum(per-port) to ~max(per-port).
+    # On a DC with 34 open ports (none of them DBs) this is the
+    # difference between ~17 minutes serial and well under a minute.
+    lines = [None] * len(ports)
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(32, len(ports))) as ex:
+            for idx, line in enumerate(
+                    ex.map(lambda p: _scan_one(host, p), ports)):
+                lines[idx] = line
+    except Exception:
+        # Fall back to a plain serial scan if the pool cannot start.
+        lines = [_scan_one(host, p) for p in ports]
+    for line in lines:
+        if line:
+            print(line, flush=True)
+    print("[HAWK_DB_DIAG: done]", flush=True)
     return 0
 
 

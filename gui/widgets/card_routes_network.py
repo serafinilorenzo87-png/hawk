@@ -1245,7 +1245,9 @@ class CardNetworkRoutesMixin:
         dc_var    = ctk.StringVar(value=target)
         target_user_var = ctk.StringVar(value="")  # only for bruteuser
 
-        def _row(label, var, hint=""):
+        import tkinter.filedialog as _fd
+
+        def _row(label, var, hint="", browse=False):
             f = ctk.CTkFrame(win, fg_color="transparent")
             f.pack(fill="x", padx=24, pady=(4, 0))
             ctk.CTkLabel(f, text=label, width=110, anchor="w",
@@ -1258,6 +1260,27 @@ class CardNetworkRoutesMixin:
                              border_width=1, corner_radius=3)
             e.pack(side="left", fill="x", expand=True)
             add_context_menu(e)
+            if browse:
+                # Down-arrow that opens the Kali file browser so the
+                # operator navigates to their own wordlist instead of
+                # typing the path from memory.  Starts in the usual
+                # wordlist roots.  The entry still accepts a typed path.
+                def _browse(_var=var, _lbl=label):
+                    start = next((d for d in ("/usr/share/seclists",
+                                              "/usr/share/wordlists")
+                                  if os.path.isdir(d)), "/")
+                    p = _fd.askopenfilename(title=f"Select {_lbl}",
+                                            initialdir=start)
+                    if p:
+                        _var.set(p)
+                ctk.CTkButton(f, text="▾", width=34, height=30,
+                              command=_browse, font=_f("md", True),
+                              fg_color=COLORS["bg_card"],
+                              hover_color=COLORS["bg_card_hover"],
+                              border_color=COLORS["border_green"],
+                              border_width=1,
+                              text_color=COLORS["text_green"],
+                              corner_radius=3).pack(side="left", padx=(4, 0))
             if hint:
                 ctk.CTkLabel(win, text=hint, font=_f("xs"),
                              text_color=COLORS["text_dim"],
@@ -1286,13 +1309,15 @@ class CardNetworkRoutesMixin:
         pass_var = ctk.StringVar(value="")
         passwl_var = ctk.StringVar(value=default_passes)
         entry_users = _row("Users file", user_var,
-             "userenum / passwordspray / bruteforce — one username per line")
+             "userenum / passwordspray / bruteforce — one username per line",
+             browse=True)
         entry_pass  = _row("Password",   pass_var,
              "Single password for passwordspray — "
              "e.g. 'Spring2024!', 'Welcome123', or the domain name + '1'. "
              "Editable in any mode — HAWK warns on mismatch.")
         entry_pwl   = _row("Pass file",  passwl_var,
-             "bruteuser — passwords to try against the target user")
+             "bruteuser — passwords to try against the target user",
+             browse=True)
 
         # Extra-flags: rate limit, verbose
         extra_var = ctk.StringVar(value="--delay 200")

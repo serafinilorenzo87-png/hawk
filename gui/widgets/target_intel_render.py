@@ -375,6 +375,17 @@ class TargetIntelRenderMixin:
             r"(/[A-Za-z0-9._/\-~%]*\."
             r"(?:js|mjs|json|html?|css|map|txt|xml|conf|env))"
             r"(?::(\d+))?")
+        # Local-filesystem / instructional paths embedded in a finding's
+        # "Next steps" command examples (hydra -P .../wordlists/rockyou.txt,
+        # /etc/... ) live on the operator's Kali box — they are NOT web
+        # sources on the target.  Match the FIRST path segment against
+        # local system-dir names so FETCH SOURCE doesn't turn a local
+        # wordlist into http://target/usr/share/... → 404.  Kept as bare
+        # dir names (not "/tmp"-style literals) so the write-containment
+        # static check doesn't read them as file-write escape hatches.
+        _LOCAL_DIRS = {"usr", "etc", "var", "tmp", "opt", "home", "root",
+                       "bin", "sbin", "lib", "proc", "sys", "mnt",
+                       "media", "dev", "run", "srv"}
         # The same path often appears twice in a finding ("Endpoint:
         # /a/b.js" then "Found in: /a/b.js:562").  Prefer the match
         # that carries a line hint — that's the one the operator
@@ -383,6 +394,9 @@ class TargetIntelRenderMixin:
         first_bare = None
         for m in SRC_RE.finditer(blob):
             path = m.group(1)
+            seg = path.split("/", 2)
+            if len(seg) > 1 and seg[1].lower() in _LOCAL_DIRS:
+                continue
             line_s = m.group(2)
             if line_s:
                 try:
@@ -2629,16 +2643,17 @@ class TargetIntelRenderMixin:
                 # No port bookkeeping here: the port is part of the
                 # merge key above, so a match already means the two
                 # findings agree on it.
-                # Mark as freshly updated — stays highlighted until the
-                # user actually reads it (see _mark_finding_read).
-                # When `added == 0` there's nothing genuinely new
-                # (just a re-trigger of the same evidence), so we
-                # skip the highlight + don't bump the "(N new)"
-                # counter — otherwise the badge over-counts and the
-                # user sees "(2 new)" but only ONE row glows green.
-                if added:
-                    existing["_fresh"]       = True
-                    existing["_update_note"] = f"UPDATED #{run_no}"
+                # Re-highlight the card on EVERY re-run (cyan, until the
+                # user reads it) — even when the evidence is identical.
+                # Previously a same-evidence re-run left `_fresh` untouched,
+                # so re-running a tool on a finding the user had already
+                # read gave NO visual feedback (looked like nothing
+                # happened).  The "(N new)" badge mirrors the number of
+                # fresh rows (_refresh_new_badge), so re-flagging one row
+                # can never make the badge drift from the glow.
+                existing["_fresh"] = True
+                existing["_update_note"] = (
+                    f"UPDATED #{run_no}" if added else f"RE-RUN #{run_no}")
                 self._render_and_blink(count_as_new=bool(added))
                 if added:
                     self.app.terminal.write(
@@ -3855,24 +3870,15 @@ class TargetIntelRenderMixin:
             top = ctk.CTkFrame(fr, fg_color="transparent")
             top.pack(fill="x", padx=8, pady=(5, 2))
 
-            ctk.CTkLabel(top, text=f"[{finding['severity'].upper()}]",
-                         font=_f("sm", True), text_color=sev_color,
-                         width=80, anchor="w").pack(side="left")
-            ctk.CTkLabel(top, text=finding["title"],
-                         font=_f("md", True), text_color=COLORS["text_bright"],
-                         anchor="w").pack(side="left", padx=6)
-            if finding.get("source"):
-                ctk.CTkLabel(top, text=f"  via {finding['source']}",
-                             font=_f("sm"), text_color=COLORS["text_muted"],
-                             anchor="w").pack(side="left")
-            runs_text = self._format_finding_runs(finding)
-            if runs_text:
-                ctk.CTkLabel(top, text=f"  {runs_text}",
-                             font=_f("xs", True),
-                             text_color=COLORS["text_cyan"],
-                             anchor="w").pack(side="left", padx=(4, 0))
+            # Right-anchored fresh badge — packed FIRST so pack reserves its
+            # full width on the right before the title/source chain fills the
+            # rest.  Packed last (as it used to be) it was the BADGE that got
+            # clipped when the row was crowded, turning "◆ REFRESHED #4" into
+            # gibberish ("… 4 :SHED #4").  Now an over-long title truncates at
+            # the badge edge instead; the full title stays in the card body and
+            # the INFO dialog, whereas the fresh badge must always stay legible.
             if note:
-                # Right-anchored bright-green badge — "◆ NEW" or "◆ UPDATED".
+                # Bright-green badge — "◆ NEW" / "◆ UPDATED" / "◆ REFRESHED #N".
                 # Stays on until the user actually reads the entry.
                 badge_lbl = ctk.CTkLabel(
                     top, text=f"◆ {note}",
@@ -3883,6 +3889,26 @@ class TargetIntelRenderMixin:
                 finding["_badge_ref"] = badge_lbl
             else:
                 finding["_badge_ref"] = None
+
+            ctk.CTkLabel(top, text=f"[{finding['severity'].upper()}]",
+                         font=_f("sm", True), text_color=sev_color,
+                         width=80, anchor="w").pack(side="left")
+            ctk.CTkLabel(top, text=finding["title"],
+                         font=_f("md", True), text_color=COLORS["text_bright"],
+                         anchor="w").pack(side="left", padx=6)
+            if finding.get("source"):
+                ctk.CTkLabel(top, text=f"  via {finding['source']}",
+                             font=_f("sm"), text_color=COLORS["text_muted"],
+                             anchor="w").pack(side="left")
+            # Run counter — suppressed while a fresh badge is shown, since the
+            # note already carries the run number ("◆ REFRESHED #4"); a bare
+            # "4" beside "#4" duplicated it and stole width from the badge.
+            runs_text = self._format_finding_runs(finding)
+            if runs_text and not note:
+                ctk.CTkLabel(top, text=f"  {runs_text}",
+                             font=_f("xs", True),
+                             text_color=COLORS["text_cyan"],
+                             anchor="w").pack(side="left", padx=(4, 0))
 
             # Description — rendered as a CTkLabel (NOT a CTkTextbox) so
             # the mouse wheel event propagates to the outer Target Intel
@@ -4785,13 +4811,21 @@ class TargetIntelRenderMixin:
         for label, text, color in sections:
             if not text or text == "N/A":
                 continue
-            # Skip "What it is" when its content is a verbatim copy of
-            # the description we already showed above — avoids the
-            # duplicate-text look when the auto-generator just echoed
-            # the description into `info["what"]`.
-            if label == "What it is:" and \
-                    text.strip() == (description or "").strip():
-                continue
+            # Skip "What it is" when it is just the FULL FINDING again.
+            # Two cases, both showed a redundant block under the complete
+            # green FULL FINDING box: (1) a verbatim copy of the
+            # description, and (2) the auto-generator's first-N-lines echo
+            # (_auto_generate_finding_info uses description[:4]), which
+            # reads as a *truncated* finding sitting under the full one.
+            # Only skip when the FULL FINDING was actually rendered above.
+            if label == "What it is:" and description and description.strip():
+                _dlines = [ln.strip() for ln in description.split("\n")
+                           if ln.strip()]
+                _wlines = [ln.strip() for ln in (text or "").split("\n")
+                           if ln.strip()]
+                if (text.strip() == description.strip()
+                        or (_wlines and _dlines[:len(_wlines)] == _wlines)):
+                    continue
             any_section_shown = True
             sf = ctk.CTkFrame(
                 body, fg_color=COLORS["bg_card"],

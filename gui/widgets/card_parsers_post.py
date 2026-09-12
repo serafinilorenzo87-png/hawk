@@ -440,18 +440,51 @@ class CardPostParserMixin:
                 if share_name.lower() not in ("", "sharename"):
                     shares.append((share_name, "Disk"))
 
-        # Connection failure always wins — even when smbclient manages to
-        # output a partial share table (e.g. IPC$ from a half-completed
-        # negotiate) before the error fires, the NT_STATUS_* error means
-        # the auth/session was never established.  We must not surface a
-        # "SMB Authenticated Access" finding for a connection that failed.
-        # Previous guard checked `not shares` which let IPC$-only results
-        # through and produced false-positive findings.
+        # smbclient -L ALWAYS ends with an SMB1 "workgroup listing"
+        # reconnect that fails NT_STATUS_RESOURCE_NAME_NOT_FOUND on modern
+        # targets — AFTER the share enum already succeeded.  That benign
+        # step must not mask a real listing: if we parsed REAL shares
+        # (disk shares beyond IPC$) and the ONLY failure marker is that
+        # workgroup one, the run actually succeeded.
+        real_shares = [s for s in shares if s[0].lower() != "ipc$"]
+        # smbclient prints the workgroup-step failure as
+        #   "Reconnecting with SMB1 for workgroup listing."
+        #   "do_connect: Connection to <ip> failed (Error
+        #    NT_STATUS_RESOURCE_NAME_NOT_FOUND)"
+        #   "Unable to connect with SMB1 -- no workgroup available"
+        # i.e. that single benign step trips MULTIPLE fail markers
+        # (do_connect + nt_status).  When real shares were listed AND the
+        # workgroup-step markers are present, it is that benign step, not
+        # a connection failure.
+        workgroup_step = (
+            "reconnecting with smb1 for workgroup listing" in text
+            or "no workgroup available" in text)
+        if connect_failed and real_shares and workgroup_step:
+            connect_failed = False
+
+        # Connection failure otherwise wins — even a partial share table
+        # (e.g. IPC$-only from a half-completed negotiate) before an
+        # NT_STATUS_* error means the auth/session was never established,
+        # so we must not surface a finding for it.  (Checking `not shares`
+        # alone let IPC$-only false positives through — hence the
+        # real-shares test above.)
         if connect_failed:
             self.app.terminal.write(
                 "  [i] SMB: connection / auth failed — no shares "
                 "enumerated, no finding added.", "dim")
             return
+
+        # Persist enumerated shares into the session so discovered_shares
+        # consumers see them, not just this finding's text.  (rpcclient /
+        # enum4linux already do this; netexec / smbclient share listings
+        # went only into the finding, leaving discovered_shares empty.)
+        if shares:
+            try:
+                _sess = self.app.session_manager.current
+                if _sess is not None:
+                    _sess.add_discovered_shares([s[0] for s in shares])
+            except Exception as e:
+                print(f"[HAWK] smb discovered-shares push failed: {e}")
 
         # Anonymous access is what the parse actually observed: no
         # credential on the command line, and the server still answered
@@ -492,18 +525,23 @@ class CardPostParserMixin:
                         # authentication (local admin), so verify only
                         # then; a bare listing stays unverified.
                         verified=pwn3d)
-                    sess.add_credential(cred)
-                    sess.save()
-                    pushed_cred = True
+                    # Route through the credential store (like the anon
+                    # Step 4b) so a genuinely NEW authenticated cred
+                    # blinks/badges in the store, and the store's terminal
+                    # note fires only on a REAL change.  The old path
+                    # (sess.add_credential + a bare cs.refresh) never
+                    # blinked and printed "pushed to Credential Store"
+                    # even on a dedup no-op (W-04 class).  The store merges
+                    # and promotes verified (ratchets up only), so a bare
+                    # listing (verified=False) can't downgrade a
+                    # Pwn3d-confirmed row.
                     cs = getattr(self.app, "cred_store", None)
                     if cs:
-                        cs.refresh()
-                    self.app.terminal.write(
-                        f"  [+] {tool.name}: credential "
-                        f"{uname}:{'*' * len(auth_pass)} "
-                        f"{'confirmed' if pwn3d else 'observed (unverified)'} "
-                        f"on {target} → pushed to Credential Store.",
-                        "success")
+                        cs.add_credential(cred)
+                    else:
+                        sess.add_credential(cred)
+                        sess.save()
+                    pushed_cred = True
             except Exception as e:
                 print(f"[HAWK] smb cred push failed: {e}")
 
@@ -563,8 +601,14 @@ class CardPostParserMixin:
                 desc_lines += ["",
                                f"→ Credential saved to Credential "
                                f"Store (host={target}, SMB)."]
-            title = (f"SMB Authenticated Access — {auth_user}@{target}"
-                     + ("  (LOCAL ADMIN)" if pwn3d else ""))
+            # Stable title WITHOUT the "(LOCAL ADMIN)" suffix so the SAME
+            # authenticated-access fact reported by netexec (Pwn3d -> the
+            # suffix) and by smbclient (a bare listing -> no suffix)
+            # collapses into ONE card with a run badge instead of two.
+            # The Pwn3d / local-admin status stays in the description (the
+            # "Local admin (Pwn3d!)" line above) and in the severity, which
+            # escalates to high on merge -- so nothing is lost.
+            title = f"SMB Authenticated Access — {auth_user}@{target}"
             self.app.target_intel.add_auto_finding(
                 title=title,
                 description="\n".join(desc_lines),

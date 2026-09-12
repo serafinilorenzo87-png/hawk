@@ -126,13 +126,13 @@ class GuiFacadeTests(unittest.TestCase):
                 [1, 2],
             )
             # Same evidence pushed twice: the FIRST add tagged it
-            # NEW #1 + _fresh=True; the SECOND add is a "seen again"
-            # with nothing new to show, so it does NOT overwrite the
-            # NEW #1 badge nor bump the "(N new)" badge counter.
-            # Without this guard the user would see "(2 new)" but
-            # only one row glowed green (re-trigger of the same
-            # finding wasn't actually new).
-            self.assertEqual(finding["_update_note"], "NEW #1")
+            # NEW #1 + _fresh=True; the SECOND add is a same-evidence
+            # re-run.  It re-highlights the card (so re-running a tool
+            # gives visual feedback even with nothing new to add) and
+            # refreshes the note to RE-RUN #2 — but it does NOT count as
+            # new: the "(N new)" badge mirrors the fresh rows, so it
+            # stays exact.
+            self.assertEqual(finding["_update_note"], "RE-RUN #2")
             self.assertTrue(finding.get("_fresh"))
             # New badge format: empty for 1 run, just the latest count
             # for 2+ runs.  See `_format_finding_runs`.

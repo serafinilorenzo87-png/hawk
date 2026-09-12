@@ -2016,6 +2016,9 @@ class CardRuntimeMixin:
             # and "🔑 CREDS" navigation buttons linking the two sides.
             AD_PARSER_BY_TOOL_ID = {
                 "addcomputer":       self._parse_addcomputer_to_intel,
+                # gpp-decrypt recovers a reusable local-admin password —
+                # capture it as a credential + HIGH finding, not a dump.
+                "gpp_decrypt":       self._parse_gpp_decrypt_to_intel,
                 "getuserspns":       self._parse_kerberoast_to_intel,
                 "getnpusers":        self._parse_asrep_to_intel,
                 # The Exploitation-phase card uses id "impacket_getnpusers"
@@ -2031,13 +2034,24 @@ class CardRuntimeMixin:
                 # server-side.
                 "certipy_quick":     self._parse_certipy_find_to_intel,
                 "certipy_find":      self._parse_certipy_find_to_intel,
+                # req mints a cert impersonating a privileged user — HIGH
+                # finding naming the identity + the actual .pfx path.
+                "certipy_req":       self._parse_certipy_req_to_intel,
+                # auth UnPAC's the target's NT hash — CRITICAL, and pushes
+                # the recovered hash to the Credential Store.
+                "certipy_auth":      self._parse_certipy_auth_to_intel,
                 "bloodhound_python": self._parse_bloodhound_to_intel,
                 "adidnsdump":        self._parse_adidnsdump_to_intel,
                 "ldapdomaindump":    self._parse_ldapdomaindump_to_intel,
                 "nxc_ldap":          self._parse_nxc_ldap_to_intel,
-                # findDelegation / rbcd_attack / ticketer produce mostly
-                # text output — handled by the generic fallback since
-                # they rarely produce structured creds/findings.
+                "findDelegation":    self._parse_findelegation_to_intel,
+                # ticketer forges a Golden Ticket — full domain-wide
+                # persistence, so it gets a dedicated CRITICAL parser
+                # instead of the low-severity generic dump.
+                "ticketer_golden":   self._parse_ticketer_to_intel,
+                # rbcd_attack produces mostly text output — handled by
+                # the generic fallback since it rarely produces
+                # structured creds/findings.
             }
             if (not used_specialized and log
                     and tool.id in AD_PARSER_BY_TOOL_ID):

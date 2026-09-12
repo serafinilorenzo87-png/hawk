@@ -719,6 +719,8 @@ class CardServiceParserMixin:
         mac_address    = ""
         listener_ports = []    # list of strings: "LDAP 389/tcp", ...
         is_dc          = False
+        min_pw_len     = ""    # rpcclient getdompwinfo
+        pw_complex     = None  # tri-state: None / True / False
 
         USER_RE   = re.compile(r'user:\[([^\]]+)\]\s+rid:\[([^\]]+)\]', re.I)
         # enum4linux-ng (the binary HAWK actually runs) prints each
@@ -737,7 +739,10 @@ class CardServiceParserMixin:
         SID_RE       = re.compile(r'domain sid[:\s]+(S-1-5-[\d\-]+)', re.I)
         SAMBA_RE     = re.compile(r'samba\s+([\d\.]+)', re.I)
         MEMBERSHIP_RE = re.compile(r'Derived membership[:\s]+(.+)', re.I)
-        OS_RE         = re.compile(r'^OS[:\s]+(.+)', re.I)
+        # Require a colon so enum4linux's "OS: Windows Server ..." matches
+        # but rpcclient's "os version : 6.1" does NOT get mis-captured as
+        # os_info="version : 6.1" (which rendered "OS : version : 6.1").
+        OS_RE         = re.compile(r'^OS\s*:\s*(.+)', re.I)
         COMPUTER_RE   = re.compile(r'NetBIOS computer name[:\s]+(\S+)', re.I)
         FQDN_RE       = re.compile(r'^FQDN[:\s]+(\S+)', re.I)
         DNS_DOMAIN_RE = re.compile(r'^DNS domain[:\s]+(\S+)', re.I)
@@ -756,6 +761,14 @@ class CardServiceParserMixin:
         LISTENER_RE   = re.compile(
             r'\[\+\]\s+(\S[^\n]*?)\s+is accessible on\s+(\d+/(?:tcp|udp))',
             re.I)
+        # rpcclient batch shapes (enumdomgroups / netshareenumall /
+        # getdompwinfo) — distinct from enum4linux-ng; without these the
+        # groups, shares and password policy an authenticated rpcclient
+        # run collects were silently dropped.
+        RPC_GROUP_RE = re.compile(r'^group:\[([^\]]+)\]', re.I)
+        NETNAME_RE   = re.compile(r'^netname:\s*(\S+)', re.I)
+        REMARK_RE    = re.compile(r'^remark:\s*(.+)$', re.I)
+        MINPW_RE     = re.compile(r'min_password_length:\s*(\d+)', re.I)
 
         for level, line in log:
             s = line.strip()
@@ -778,6 +791,10 @@ class CardServiceParserMixin:
             if m:
                 groups.append(m.group(1).strip())
                 continue
+            m = RPC_GROUP_RE.match(s)   # rpcclient: group:[name] rid:[..]
+            if m:
+                groups.append(m.group(1).strip())
+                continue
 
             # Shares (ignore header / separator lines)
             if "sharename" not in low and "---" not in s:
@@ -790,6 +807,18 @@ class CardServiceParserMixin:
                 sname = m.group(1)
                 if sname.lower() not in [sh[0].lower() for sh in shares]:
                     shares.append((sname, "Disk", ""))
+            # rpcclient netshareenumall: "netname: X" then "remark: Y"
+            m = NETNAME_RE.match(s)
+            if m:
+                sn = m.group(1)
+                if sn.lower() not in [sh[0].lower() for sh in shares]:
+                    shares.append((sn, "Disk", ""))
+                continue
+            m = REMARK_RE.match(s)
+            if m and shares and not shares[-1][2]:
+                shares[-1] = (shares[-1][0], shares[-1][1],
+                              m.group(1).strip())
+                continue
 
             # OS info (enum4linux-ng)
             m = OS_RE.match(s)
@@ -887,6 +916,13 @@ class CardServiceParserMixin:
                     or "appears to be a domain controller" in low:
                 is_dc = True
 
+            # Password policy (rpcclient getdompwinfo)
+            m = MINPW_RE.search(s)
+            if m and not min_pw_len:
+                min_pw_len = m.group(1)
+            if "domain_password_complex" in low:
+                pw_complex = True
+
         # Dedup
         users  = sorted(set(users),  key=str.lower)
         groups = sorted(set(groups), key=str.lower)
@@ -902,7 +938,7 @@ class CardServiceParserMixin:
         if not any([users, groups, shares, domain_name, null_session,
                     os_info, membership, computer_name, fqdn,
                     smb_dialects, mac_address, listener_ports,
-                    is_dc, smb_signing_required is not None]):
+                    is_dc, min_pw_len, smb_signing_required is not None]):
             return False
 
         # Persist to session for later re-use (hydra wordlist, etc.)
@@ -967,6 +1003,12 @@ class CardServiceParserMixin:
             parts.append(f"Membership           : {membership}")
         if is_dc:
             parts.append(f"Role                 : Domain Controller")
+        if min_pw_len:
+            comp = ("" if pw_complex is None
+                    else ", complexity ON" if pw_complex
+                    else ", complexity OFF")
+            parts.append(
+                f"Password policy      : min length {min_pw_len}{comp}")
         if null_session:
             parts.append("Null session         : ALLOWED (no credentials required)")
         if mac_address:
@@ -1167,8 +1209,10 @@ class CardServiceParserMixin:
 
     def _parse_kerbrute_to_intel(self, tool, log: list) -> bool:
         """Parse kerbrute output and:
-          - push valid usernames (userenum) to Credential Store as
-            'username-only' entries with AD follow-up commands in notes,
+          - record valid usernames (userenum) as discovered AD users in
+            the session / Target Intel — NOT the Credential Store: a
+            VALID USERNAME only proves the account exists (no password,
+            no hash), so a cred-store entry would be an empty stub,
           - push valid logins (passwordspray / bruteuser / bruteforce) as
             full cleartext credentials with host + usage hint,
           - emit one Target Intel finding summarizing the run.
@@ -1234,29 +1278,13 @@ class CardServiceParserMixin:
         except Exception:
             pass
 
-        # Push each valid user to the Credential Store. These are
-        # "known username, unknown password" entries — still useful as
-        # the next step is AS-REP roasting or password spray.
-        for user, r in valid_users:
-            note = (
-                f"Kerbrute — Valid AD user (userenum)\n"
-                f"Realm: {r or '<unknown>'}   DC: {dc}\n"
-                f"Next steps:\n"
-                f"  $ impacket-GetNPUsers {r}/{user} -no-pass -dc-ip {dc}\n"
-                f"  $ kerbrute passwordspray -d {r} --dc {dc} users.txt "
-                f"'Spring2024!'\n"
-                f"  $ nxc smb {target} -u {user} -p ''  # null-bind test"
-            )
-            cred = Credential(
-                username=user, password="",
-                cred_type="cleartext",
-                services=["KERBEROS"],
-                source_phase=self.phase_id,
-                host=target, notes=note,
-                # userenum proves the account EXISTS.  No password was
-                # ever tried, so there is nothing verified about it.
-                verified=False)
-            self.app.cred_store.add_credential(cred)
+        # Valid usernames (userenum) were recorded as discovered AD users
+        # above and are surfaced in the finding below.  They are NOT
+        # pushed to the Credential Store: a VALID USERNAME proves the
+        # account exists but carries no password or hash, so a store entry
+        # would be an empty stub with nothing to spray or crack.  A VALID
+        # LOGIN below (or an AS-REP hash from GetNPUsers) is a real secret
+        # and does belong in the store.
 
         # Valid logins — full cleartext creds.
         for user, r, pwd in valid_logins:
@@ -1316,19 +1344,23 @@ class CardServiceParserMixin:
                 f"      impacket-secretsdump {realm}/{u0}:'{p0}'@{target}")
 
         desc = "\n".join(parts)
-        title = (f"KERBRUTE — {len(valid_users)} users, "
-                 f"{len(valid_logins)} logins on {target}")
+        # Stable title (target only) + replace so re-running kerbrute
+        # UPDATES the one finding with a run-count badge instead of
+        # spawning a new finding when the user/login counts change; the
+        # counts live in the description.
+        title = f"KERBRUTE — {target}"
 
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=title, description=desc,
-            severity=severity, source=tool.name))
+            severity=severity, source=tool.name, replace=True))
 
         # Terminal summary so the user sees immediate feedback.
         if valid_users:
             self.app.terminal.write(
                 f"  [+] Kerbrute — {len(valid_users)} valid AD user"
                 f"{'s' if len(valid_users) != 1 else ''} "
-                f"added to Credential Store.", "success")
+                f"recorded in Target Intel (existence only, no password).",
+                "success")
         if valid_logins:
             self.app.terminal.write(
                 f"  [+] Kerbrute — {len(valid_logins)} valid login"

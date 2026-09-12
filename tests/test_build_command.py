@@ -87,6 +87,30 @@ class BuildCommandRegistryTests(unittest.TestCase):
                     self.fail(f"{mod_name}:{tool.id} raised "
                               f"{type(exc).__name__}: {exc}")
 
+    def test_addcomputer_default_stays_placeholder_based(self):
+        # ADD COMPUTER must NOT ship a hardcoded machine name/password in
+        # its default command: they are prompted as required
+        # <COMPUTER_NAME>/<COMPUTER_PASS> dialog fields instead.  Guards
+        # both the "minimal default" rule and the re-run collision fix
+        # against a regression that re-hardcodes a literal account.
+        addc = [t for _m, t in self.tools if t.id == "addcomputer"]
+        self.assertEqual(len(addc), 1,
+                         "expected exactly one addcomputer tool")
+        tmpl = addc[0].cmd_template
+        self.assertIn("<COMPUTER_NAME>", tmpl)
+        self.assertIn("<COMPUTER_PASS>", tmpl)
+        self.assertNotIn("HAWK$", tmpl)
+        self.assertNotIn("Hawk123!", tmpl)
+
+    def test_adidnsdump_default_dumps_records(self):
+        # ADIDNSDUMP's default must actually dump the zone to records.csv
+        # (what the parser reads), NOT run with --print-zones, which only
+        # lists zone names and exits without writing records.csv.
+        adi = [t for _m, t in self.tools if t.id == "adidnsdump"]
+        self.assertEqual(len(adi), 1,
+                         "expected exactly one adidnsdump tool")
+        self.assertNotIn("--print-zones", adi[0].cmd_template)
+
     def test_no_unresolved_placeholder_survives(self):
         """No `{name}` reaches the shell.
 
