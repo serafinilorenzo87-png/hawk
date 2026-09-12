@@ -1416,36 +1416,37 @@ class CardADParserMixin:
                     or "ssl: unexpected_eof" in text_low):
                 self.app.after(0, lambda:
                     self.app.target_intel.add_auto_finding(
-                        title=f"CERTIPY FIND — LDAPS unreachable on "
-                              f"{target}",
+                        title=f"CERTIPY FIND — LDAPS handshake reset on "
+                              f"{target} (retry over plain LDAP)",
                         description=(
-                            "Certipy tried to bind over LDAPS (636/tcp) "
-                            "but the connection reset before the TLS "
-                            "handshake completed.  Usually this means:\n"
-                            "  · AD CS (Active Directory Certificate "
-                            "Services) is NOT installed on the DC → "
-                            "nothing for certipy to enumerate\n"
-                            "  · LDAPS is running without a valid "
-                            "certificate → TLS fails\n"
-                            "  · 636/tcp is firewalled; only 389 "
-                            "(LDAP without TLS) is exposed\n\n"
-                            "Next moves:\n"
-                            "  · Check if 636/tcp is actually open — "
-                            "nmap -p 636 <target>\n"
-                            "  · Run  nxc ldap <target> -u <u> -p <p> "
-                            "--adcs  — uses plain LDAP (389) to probe "
-                            "CS presence without TLS\n"
-                            "  · If no AD CS is installed, skip the "
-                            "certipy chain entirely and pivot to "
-                            "BLOODHOUND + kerberoast for privesc\n"
-                            "  · Force LDAP (no TLS) via certipy "
-                            "-scheme ldap  (supported in recent "
-                            "versions)"),
+                            "Certipy binds over LDAPS (636/tcp) by "
+                            "default, but the DC reset the TLS handshake "
+                            "before it completed.  This is COMMON on "
+                            "legacy DCs (Server 2008/2012) whose LDAPS "
+                            "uses old TLS or has no certificate — it does "
+                            "NOT by itself mean AD CS is absent.\n\n"
+                            "Fix — retry over plain LDAP (389):\n"
+                            "  certipy find ... -ldap-scheme ldap   "
+                            "(certipy v5)\n"
+                            "  certipy find ... -scheme ldap        "
+                            "(certipy v4)\n"
+                            "  In HAWK: click the '-ldap-scheme ldap' chip "
+                            "in this card's dialog and re-run.\n\n"
+                            "If plain LDAP ALSO fails, then check:\n"
+                            "  · 389 and 636 both filtered — "
+                            "nmap -p 389,636 <target>\n"
+                            "  · AD CS genuinely absent — confirm with "
+                            "nxc ldap <target> -u <u> -p <p> --adcs\n"
+                            "  · Wrong creds / time skew — sanity-check "
+                            "auth first with  nxc smb <target> -u <u> "
+                            "-p <p>."),
                         severity="info", source=tool.name,
                         linked_run_id=rid))
                 self.app.terminal.write(
-                    "  [i] certipy — LDAPS unreachable.  Target "
-                    "probably has no AD CS role.", "info")
+                    "  [i] certipy — LDAPS handshake reset (common on "
+                    "legacy DCs).  Re-run over plain LDAP: add "
+                    "'-ldap-scheme ldap'.  AD CS may still be present.",
+                    "info")
                 return True
 
             # B2: authentication failed.

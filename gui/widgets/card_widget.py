@@ -2169,6 +2169,23 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                 "-target-domain <DOMAIN>  — cross-forest kerberoast",
             ],
         },
+        "certipy_quick": {
+            "purpose": (
+                "Fast AD CS scan — shows ONLY vulnerable templates "
+                "(-vulnerable).  Run first; if it finds nothing, either "
+                "AD CS has no exploitable template, or (on a legacy DC) "
+                "LDAPS reset the scan — retry with the LDAP chip below."),
+            "needs":   "Any domain user + the DC reachable.  AD CS "
+                       "installed (an Enterprise CA registered in AD).",
+            "output":  "HAWK parses 'Vulnerable to: ESCx' lines into "
+                       "Target Intel findings; on an LDAPS handshake "
+                       "reset it tells you to retry over plain LDAP.",
+            "extras":  [
+                "-ldap-scheme ldap        — plain LDAP (389); use when LDAPS resets (legacy DCs, Server 2008-2012)",
+                "-vulnerable              — default, only vuln templates",
+                "-stdout                  — default, already set",
+            ],
+        },
         "certipy_find": {
             "purpose": (
                 "Certipy AD CS enumeration — lists Enterprise CAs, "
@@ -2181,6 +2198,7 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                        "severity=critical, with the certipy-req command "
                        "pre-baked (CA name + template name filled in).",
             "extras":  [
+                "-ldap-scheme ldap        — plain LDAP (389); use when LDAPS resets (legacy DCs, Server 2008-2012)",
                 "-vulnerable              — only show vuln templates",
                 "-text                    — text-only output",
                 "-json                    — emit machine-readable JSON",

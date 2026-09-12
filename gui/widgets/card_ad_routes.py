@@ -2248,6 +2248,52 @@ class CardADRoutesMixin:
         self._route_ad_template(
             tool, prefill={"advisory": advisory, "advisory_color": color})
 
+    def _route_certipy_find(self, tool):
+        """certipy find / quick — the standard AD auth dialog plus an
+        OS-generation LDAP advisory.
+
+        certipy v5 binds over LDAPS (636) by DEFAULT.  Legacy DCs (Server
+        2008/2012, old TLS or no LDAPS cert) reset that handshake and the
+        scan dies with 'socket ssl wrapping error' — which looks like "no
+        AD CS" but usually isn't.  On a legacy target we advise adding the
+        '-ldap-scheme ldap' chip (plain LDAP, 389).  HINT only: modern DCs
+        often require LDAPS, so the operator stays free to keep it.
+        """
+        gen, osname = "unknown", ""
+        try:
+            fp = getattr(getattr(self.app, "target_intel", None),
+                         "_fp", None)
+            if fp is not None:
+                gen = fp.classify_generation() or "unknown"
+                if getattr(fp, "platform", "") == "windows":
+                    osname = ("Windows " + (fp.version or "").strip()).strip()
+        except Exception:
+            gen, osname = "unknown", ""
+
+        _os = f" ({osname})" if osname else ""
+        if gen == "legacy":
+            advisory = (f"  LDAP advisory: target looks LEGACY{_os} — "
+                        f"certipy binds over LDAPS by default and legacy "
+                        f"DCs usually reset the TLS handshake.  If it dies "
+                        f"with an SSL error, add the '-ldap-scheme ldap' "
+                        f"chip (plain LDAP, 389) and re-run.")
+            color = COLORS["text_yellow"]
+        elif gen == "modern":
+            advisory = (f"  LDAP advisory: target looks MODERN{_os} — the "
+                        f"default LDAPS should work (and may be required "
+                        f"by signing/channel-binding).  Only fall back to "
+                        f"'-ldap-scheme ldap' if LDAPS is filtered.")
+            color = COLORS["text_dim"]
+        else:
+            advisory = ("  LDAP advisory: certipy uses LDAPS by default.  "
+                        "If it fails with 'socket ssl wrapping error' "
+                        "(common on legacy DCs), add the '-ldap-scheme "
+                        "ldap' chip to force plain LDAP (389).")
+            color = COLORS["text_dim"]
+
+        self._route_ad_template(
+            tool, prefill={"advisory": advisory, "advisory_color": color})
+
     def _route_ticketer_golden(self, tool):
         """Dedicated dialog for `impacket-ticketer`.
 
