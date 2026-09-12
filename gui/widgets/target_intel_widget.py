@@ -255,7 +255,8 @@ class TargetIntelWidget(TargetIntelRenderMixin, TargetIntelExploitMixin, TargetI
         r'^\s*(Nmap scan report|Host is up|Not shown|PORT\s+STATE|'
         r'Nmap done|Service detection|Service Info|SF:|'
         r'MAC Address|Aggressive OS|Running:|OS CPE|OS details|'
-        r'Network Distance|TRACEROUTE)', re.I)
+        r'Network Distance|TRACEROUTE|Initiating NSE|Completed NSE|'
+        r'NSE[: ])', re.I)
 
     # ── NSE script-name regex (broad — catches any pipe-prefixed
     # "script-name:" header).  Used by update_from_vuln_scripts.
@@ -264,6 +265,17 @@ class TargetIntelWidget(TargetIntelRenderMixin, TargetIntelExploitMixin, TargetI
     # IDs:, References: …) via the meta-tag set below.
     _NSE_SCRIPT_HEADER_RE = re.compile(
         r"^\s*\|[_\s]*\s*([a-z][a-z0-9][\w-]{2,80}):\s*$"
+    )
+    # Inline "script-name: value" result on a single line — e.g.
+    # "|_smb-vuln-ms10-054: false" or
+    # "|_smb-vuln-ms10-061: NT_STATUS_ACCESS_DENIED".  Unlike a header
+    # (name alone on the line) it carries the verdict inline, so the
+    # header regex above (anchored ":\s*$") misses it.  Requires a hyphen
+    # in the name so it never matches meta-tags like "State:"/"IDs:".
+    # update_from_vuln_scripts uses it as a block boundary so a sibling
+    # script's one-line verdict doesn't bleed into the previous finding.
+    _NSE_SCRIPT_RESULT_RE = re.compile(
+        r"^\s*\|[_\s]*\s*([a-z][a-z0-9][\w]*-[\w-]{1,80}):\s+\S"
     )
     # Meta-tag tokens that the broad regex would otherwise mistake for
     # script names (they appear inside a script's output block).
