@@ -2700,11 +2700,47 @@ class CardADRoutesMixin:
         pfx_var.trace_add("write", _check_pfx)
         _check_pfx()
 
-        def _run():
+        def _build_cmd():
+            # This dedicated dialog builds its OWN command (it does not use
+            # the cmd_template's substitution).  -no-save is REQUIRED: when
+            # <user>.ccache already exists certipy prompts "Overwrite?
+            # (y/n)", which hangs the non-interactive terminal; the NT hash
+            # is still retrieved without saving the ticket.  -username /
+            # -domain are appended ONLY when set (otherwise certipy reads
+            # the identity + realm from the cert's UPN — and a stray
+            # -domain makes it do an SRV lookup that can hang).
             pfx = os.path.expanduser(pfx_var.get().strip())
             dc  = dc_var.get().strip()
             u   = user_var.get().strip()
             d   = domain_var.get().strip()
+            parts = [f"certipy auth "
+                     f"-pfx {_shq(pfx) if pfx else '<pfx>'} "
+                     f"-dc-ip {dc or '<dc-ip>'} -no-save"]
+            if u:
+                parts.append(f"-username {_shq(u)}")
+            if d:
+                parts.append(f"-domain {_shq(d)}")
+            return " ".join(parts)
+
+        # Live command preview — parity with the other AD tool dialogs.
+        ctk.CTkLabel(win, text="Preview:", font=_f("sm", True),
+                     text_color=COLORS["text_muted"], anchor="w").pack(
+            fill="x", padx=24, pady=(8, 0))
+        preview_var = ctk.StringVar(value="")
+        ctk.CTkLabel(win, textvariable=preview_var, font=_f("sm"),
+                     text_color=COLORS["text_cyan"], wraplength=600,
+                     justify="left", anchor="w").pack(
+            fill="x", padx=24, pady=(0, 4))
+
+        def _refresh_preview(*_):
+            preview_var.set(_build_cmd())
+        for _pv in (pfx_var, dc_var, user_var, domain_var):
+            _pv.trace_add("write", _refresh_preview)
+        _refresh_preview()
+
+        def _run():
+            pfx = os.path.expanduser(pfx_var.get().strip())
+            dc  = dc_var.get().strip()
 
             if not pfx or not os.path.isfile(pfx):
                 self.app.terminal.write(
@@ -2718,13 +2754,7 @@ class CardADRoutesMixin:
                     "required.", "warn")
                 return
 
-            parts = [f"certipy auth -pfx {_shq(pfx)} -dc-ip {dc}"]
-            if u:
-                parts.append(f"-username {_shq(u)}")
-            if d:
-                parts.append(f"-domain {_shq(d)}")
-            cmd = " ".join(parts)
-
+            cmd = _build_cmd()
             _safe_destroy(win)
             self.app.terminal.section(
                 f"AD PENTESTING  ·  {tool.name}")
