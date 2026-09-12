@@ -2027,12 +2027,15 @@ class CardADRoutesMixin:
             m = re.search(r"CA Name\s*:\s*(.+)", desc)
             if m and not ca_name:
                 ca_name = m.group(1).strip().strip("'\"")
-            # ESC entries:
-            #   · ESC1   'Template Name'   note
-            for tm in re.finditer(
-                    r"ESC\d+\s+['\"]([^'\"]+)['\"]", desc):
-                t = tm.group(1).strip()
-                if t and t not in templates:
+            # ESC list lines: "· ESCx  <subject>  <note>".  <subject> is a
+            # template name (bare, or 'quoted' in older findings); CA-level
+            # ESCs use "CA '<name>'" and are NOT request-able templates, so
+            # skip them.  Non-greedy up to the 2-space column gap.
+            for tm in re.finditer(r"ESC\d+\s+(.+?)\s{2,}", desc):
+                t = tm.group(1).strip().strip("'\"")
+                if not t or t.startswith("CA "):
+                    continue
+                if t not in templates:
                     templates.append(t)
             # Fallback: "Template Name : <name>" from raw certipy
             # summary if the dialog was ever pasted verbatim.

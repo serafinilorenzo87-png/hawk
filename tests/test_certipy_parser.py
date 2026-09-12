@@ -178,6 +178,29 @@ class CertipyParserTests(unittest.TestCase):
         self.assertIn("-template 'User'", d)
         self.assertNotIn("<template>", d)
 
+    def test_finding_feeds_certipy_req_prefill(self):
+        # The certipy_req dialog reads CA name + template back OUT of the
+        # certipy_find finding to pre-fill its <CA_NAME>/<TEMPLATE> fields.
+        # This locks the parser<->extractor contract (the finding's list
+        # format the extractor regex depends on).
+        _, findings = _run(_ESC1)
+        desc = findings[0]["description"]
+        from gui.widgets.card_ad_routes import CardADRoutesMixin
+
+        class RouteHost(CardADRoutesMixin):
+            def __init__(self):
+                self.app = types.SimpleNamespace(
+                    target_intel=types.SimpleNamespace(
+                        _auto_findings=[{
+                            "source": "CERTIPY — quick (vuln-only)",
+                            "description": desc}]))
+
+        ca, templates = RouteHost()._extract_certipy_find_results()
+        self.assertEqual(ca, "prova-VAGRANT-2008R2-CA")
+        self.assertIn("User", templates)
+        # The CA-level ESC11 subject must NOT be picked up as a template.
+        self.assertFalse(any(t.startswith("CA ") for t in templates))
+
 
 if __name__ == "__main__":
     unittest.main()
