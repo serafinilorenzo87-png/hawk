@@ -2030,8 +2030,10 @@ class CardADRoutesMixin:
             # ESC list lines: "· ESCx  <subject>  <note>".  <subject> is a
             # template name (bare, or 'quoted' in older findings); CA-level
             # ESCs use "CA '<name>'" and are NOT request-able templates, so
-            # skip them.  Non-greedy up to the 2-space column gap.
-            for tm in re.finditer(r"ESC\d+\s+(.+?)\s{2,}", desc):
+            # skip them.  Anchor on the "·" bullet so prose like "no
+            # exploitable ESC1-ESC11 misconfiguration" (from a no-vulns
+            # finding) can't leak "misconfiguration" as a template.
+            for tm in re.finditer(r"·\s*ESC\d+\s+(.+?)\s{2,}", desc):
                 t = tm.group(1).strip().strip("'\"")
                 if not t or t.startswith("CA "):
                     continue
@@ -2578,12 +2580,11 @@ class CardADRoutesMixin:
 
         Pre-fills:
           · target = current HAWK target (DC IP)
-          · PFX    = <HAWK>/outputs/esc1.pfx (the default certipy req path)
+          · PFX    = esc1.pfx (certipy req's output in the working dir)
           · domain = session.target_domain
-          · user   = first non-anonymous cred's username (best guess
-                     for whom the cert impersonates — usually it'll
-                     be Administrator from an ESC1 abuse, which the
-                     user can confirm)
+          · user   = empty — certipy reads the impersonated identity from
+                     the cert's UPN; a pre-filled cred-store username would
+                     override it with the wrong (low-priv) subject
 
         Validates the PFX file exists before firing so the user
         doesn't stare at a misleading "Could not find target" style
@@ -2597,25 +2598,16 @@ class CardADRoutesMixin:
         if not target:
             return
 
-        # Sensible defaults.
-        from utils.config import OUTPUTS_DIR as _OUTDIR
-        default_pfx = os.path.join(_OUTDIR, "esc1.pfx")
+        # Sensible defaults.  certipy req writes esc1.pfx in the working
+        # dir (certipy v5 mangles -out paths, so we pass a bare name), so
+        # default the PFX to that.  Leave username AND domain EMPTY:
+        # `certipy auth` reads the impersonated identity AND the realm from
+        # the cert's UPN.  A pre-filled username overrides the subject with
+        # a low-priv account, and a pre-filled -domain made certipy do an
+        # SRV/DNS lookup that HUNG the UnPAC-the-hash step on this lab.
+        default_pfx = "esc1.pfx"
         default_domain = ""
         default_user = ""
-        try:
-            sess = self.app.session_manager.current
-            if sess:
-                default_domain = getattr(sess, "target_domain", "") or ""
-                # Grab a usable cred's username as the impersonated
-                # subject guess (ESC1 flow => Administrator usually).
-                for c in (sess.get_credentials() or []):
-                    u = (c.username or "").strip()
-                    if u and u.lower() not in (
-                            "anonymous", "guest", "null", ""):
-                        default_user = u
-                        break
-        except Exception:
-            pass
 
         win = _make_win(self, "Certipy AUTH — PKINIT login", 680, 540)
         _title(win, "CERTIPY AUTH — log in with a certificate")
@@ -2676,7 +2668,7 @@ class CardADRoutesMixin:
                     anchor="w").pack(fill="x", padx=24)
 
         _row("PFX path", pfx_var,
-             "default: <HAWK>/outputs/esc1.pfx (certipy req's output path)",
+             "default: esc1.pfx (certipy req's output in the working dir)",
              with_browse=True)
         _row("DC IP", dc_var,
              "the Domain Controller certipy will talk Kerberos to")

