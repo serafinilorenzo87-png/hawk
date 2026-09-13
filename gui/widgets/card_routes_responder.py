@@ -407,7 +407,7 @@ class CardResponderRoutesMixin:
                 password="",
                 hash_val=raw,
                 hash_type="NetNTLMv2",
-                cred_type="NetNTLMv2",
+                cred_type="hash",
                 services=svc,
                 source_phase=self.phase_id,
                 host=domain or "(responder capture)",
