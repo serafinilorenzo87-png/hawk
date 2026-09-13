@@ -2170,15 +2170,19 @@ class CardADRoutesMixin:
         try:
             sess = self.app.session_manager.current
             if sess:
-                # Walk creds looking for machine accounts — username
-                # ending in '$' is the reliable signal (addcomputer
-                # always creates one that way).  Iterate in insertion
-                # order (latest-added usually wins on equal scoring).
+                fallback = ""
                 for c in (sess.get_credentials() or []):
                     u = (c.username or "").strip()
-                    if u.endswith("$") and len(u) > 1:
+                    if not (u.endswith("$") and len(u) > 1):
+                        continue
+                    svcs = getattr(c, "services", []) or []
+                    if "Computer" in svcs:
                         attacker = u.rstrip("$")
                         break
+                    if not fallback:
+                        fallback = u.rstrip("$")
+                if not attacker:
+                    attacker = fallback
         except Exception:
             pass
 
