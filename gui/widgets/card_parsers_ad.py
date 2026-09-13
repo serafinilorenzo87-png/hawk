@@ -216,7 +216,7 @@ class CardADParserMixin:
                         verified=False))
                     added += 1
                 except Exception as e:
-                    print(f"[HAWK] cred store add (NTLM) failed: {e}")
+                    self.app.terminal.write(f"  [!] cred store add (NTLM) failed: {e}", "warn")
 
             for h in dcc2:
                 # Domain Cached Credentials v2 — hashcat -m 2100
@@ -242,7 +242,7 @@ class CardADParserMixin:
                         verified=False))
                     added += 1
                 except Exception as e:
-                    print(f"[HAWK] cred store add (DCC2) failed: {e}")
+                    self.app.terminal.write(f"  [!] cred store add (DCC2) failed: {e}", "warn")
 
             for h in kerbs:
                 # Krb5 TGS (Kerberoast) → -m 13100, AS-REP → -m 18200
@@ -271,7 +271,7 @@ class CardADParserMixin:
                         verified=False))
                     added += 1
                 except Exception as e:
-                    print(f"[HAWK] cred store add (Krb) failed: {e}")
+                    self.app.terminal.write(f"  [!] cred store add (Krb) failed: {e}", "warn")
 
         # ── Build the Target Intel SUMMARY ──────────────────────────
         # Per user request: show EVERY extracted user + DCC2 + Kerb
@@ -606,7 +606,7 @@ class CardADParserMixin:
                     # The account was created, never logged into.
                     verified=False))
             except Exception as e:
-                print(f"[HAWK] addcomputer cred push failed: {e}")
+                self.app.terminal.write(f"  [!] addcomputer cred push failed: {e}", "warn")
 
             self.app.after(0, lambda:
                 self.app.target_intel.add_auto_finding(
@@ -839,7 +839,7 @@ class CardADParserMixin:
                 category=TOOL_RUN_CATEGORY,
                 verified=False))
         except Exception as e:
-            print(f"[HAWK] gpp-decrypt cred push failed: {e}")
+            self.app.terminal.write(f"  [!] gpp-decrypt cred push failed: {e}", "warn")
 
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=title,
@@ -1019,7 +1019,7 @@ class CardADParserMixin:
                     verified=False))
                 added += 1
             except Exception as e:
-                print(f"[HAWK] kerberoast cred push failed: {e}")
+                self.app.terminal.write(f"  [!] kerberoast cred push failed: {e}", "warn")
 
         # Clock skew aborts the TGS request (KRB_AP_ERR_SKEW): GetUserSPNs
         # still LISTS the SPN accounts over LDAP but retrieves no hash.
@@ -1218,7 +1218,7 @@ class CardADParserMixin:
                     verified=False))
                 added += 1
             except Exception as e:
-                print(f"[HAWK] asrep cred push failed: {e}")
+                self.app.terminal.write(f"  [!] asrep cred push failed: {e}", "warn")
 
         roasted_users = list(dict.fromkeys(roasted_users))
         _asrep_desc = [
@@ -1736,7 +1736,7 @@ class CardADParserMixin:
                     category=TOOL_RUN_CATEGORY,
                     verified=False))
             except Exception as e:
-                print(f"[HAWK] certipy auth cred push failed: {e}")
+                self.app.terminal.write(f"  [!] certipy auth cred push failed: {e}", "warn")
 
             tgt_line = f"TGT      : {ccache}\n" if ccache else ""
             if ccache:
@@ -1988,7 +1988,7 @@ class CardADParserMixin:
             try:
                 graph_data = build_graph_data(zip_path)
             except Exception as ge:
-                print(f"[HAWK] build_graph_data failed: {ge}")
+                self.app.terminal.write(f"  [!] build_graph_data failed: {ge}", "warn")
                 graph_data = None
             # on_run_tool = bound method of this CardWidget.  When the
             # user clicks a "RUN IN <tool>" button in the graph side
@@ -2003,7 +2003,7 @@ class CardADParserMixin:
                     graph_data=graph_data,
                     on_run_tool=self.launch_tool_prefilled))
         except Exception as e:
-            print(f"[HAWK] BloodHound summary dialog failed: {e}")
+            self.app.terminal.write(f"  [!] BloodHound summary dialog failed: {e}", "warn")
 
         return True
 
@@ -2032,7 +2032,7 @@ class CardADParserMixin:
                         if len(row) >= 3:
                             records.append(tuple(row[:3]))
             except Exception as e:
-                print(f"[HAWK] adidnsdump csv parse failed: {e}")
+                self.app.terminal.write(f"  [!] adidnsdump csv parse failed: {e}", "warn")
 
         # adidnsdump writes a header row (type,name,value in some order).
         # Drop it so the count matches adidnsdump's own "Found N records"
@@ -2396,7 +2396,7 @@ class CardADParserMixin:
                         if g not in sess.discovered_groups:
                             sess.discovered_groups.append(g)
         except Exception as e:
-            print(f"[HAWK] nxc-ldap session push failed: {e}")
+            self.app.terminal.write(f"  [!] nxc-ldap session push failed: {e}", "warn")
 
         # Push kerberoast / AS-REP hashes to Credential Store
         # (AD RESULTS section) so CRACK buttons pick them up.
@@ -2447,7 +2447,7 @@ class CardADParserMixin:
                     if store:
                         store.refresh()
         except Exception as e:
-            print(f"[HAWK] nxc-ldap cred push failed: {e}")
+            self.app.terminal.write(f"  [!] nxc-ldap cred push failed: {e}", "warn")
 
         # ── Build the Target Intel finding ─────────────────────────
         desc = [
@@ -2583,7 +2583,7 @@ class CardADParserMixin:
                 if sess and not getattr(sess, "ldap_base_dn", ""):
                     sess.ldap_base_dn = dn
             except Exception as e:
-                print(f"[hawk] ldap base_dn persist: {e}")
+                self.app.terminal.write(f"  [!] ldap base_dn persist: {e}", "warn")
 
             desc_lines = [
                 f"namingContexts (baseDN) discovered: {dn}",
