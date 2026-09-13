@@ -91,12 +91,17 @@ class ResponderFindingDedupTests(unittest.TestCase):
     def test_finding_has_stable_title_and_replaces(self):
         body = _method(
             _src("gui/widgets/card_routes_responder.py"),
-            "_show_responder_post_stop_dialog")
+            "_push_responder_finding")
         self.assertIn("replace=True", body)
         # snapshot: clear prior Responder cards (incl. stale ones) first
         self.assertIn("remove_auto_findings_by_source", body)
         # title no longer embeds the per-run counts/elapsed
         self.assertNotIn('f"RESPONDER — {counters', body)
+
+    def test_close_also_pushes_finding(self):
+        src = _src("gui/widgets/card_routes_responder.py")
+        body = _method(src, "_do_close_only")
+        self.assertIn("_push_responder_finding", body)
 
 
 if __name__ == "__main__":
