@@ -249,6 +249,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
         # every core and starves the UI thread; serialising them keeps
         # HAWK clickable throughout long cracks.
         self._active_cracks: dict = {}
+        self._last_fingerprint = None
         self._build_ui()
 
     def set_tab_label(self, widget):
@@ -732,7 +733,39 @@ class CredentialStoreWidget(ctk.CTkFrame):
 
     # ─── Render ──────────────────────────────────────────────────────────────
 
+    def _creds_fingerprint(self, creds):
+        parts = []
+        for c in creds:
+            parts.append((
+                getattr(c, "id", ""),
+                getattr(c, "username", ""),
+                getattr(c, "password", ""),
+                getattr(c, "hash_val", ""),
+                getattr(c, "hash_type", ""),
+                getattr(c, "cred_type", ""),
+                getattr(c, "host", ""),
+                getattr(c, "cracked", False),
+                getattr(c, "cracked_pass", ""),
+                getattr(c, "verified", True),
+                tuple(getattr(c, "services", [])),
+                getattr(c, "source_phase", ""),
+                getattr(c, "category", ""),
+                getattr(c, "linked_run_id", ""),
+                getattr(c, "notes", ""),
+            ))
+        active = tuple(sorted(
+            (k, v.get("strategy", ""))
+            for k, v in self._active_cracks.items()
+        ))
+        new_keys = tuple(sorted(self._new_cred_keys or set()))
+        return (tuple(parts), active, new_keys)
+
     def _render_creds(self, creds):
+        fp = self._creds_fingerprint(creds)
+        if fp == self._last_fingerprint:
+            return
+        self._last_fingerprint = fp
+
         for w in self._scroll.winfo_children():
             w.destroy()
         if not creds:
