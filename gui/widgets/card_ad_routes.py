@@ -539,29 +539,117 @@ class CardADRoutesMixin:
                 except Exception:
                     pass
 
-                if tool.id == "evil_winrm":
+                _EXEC_FINDING = {
+                    "evil_winrm": (
+                        "EVIL-WINRM",
+                        "WinRM shell on {t}",
+                        "WinRM shell session opened via evil-winrm.\n\n"
+                        "  Target : {t}:5985\n"
+                        "  Auth   : {a}\n"
+                        "  Domain : {dom}\n\n"
+                        "A working WinRM shell gives full interactive "
+                        "PowerShell access — equivalent to RDP without "
+                        "the GUI.\n\n"
+                        "Remediation:\n"
+                        "  • Disable WinRM if not needed: "
+                        "Disable-PSRemoting -Force\n"
+                        "  • Restrict WinRM to management VLANs "
+                        "via Windows Firewall\n"
+                        "  • Enforce Kerberos-only auth (disable NTLM)",
+                    ),
+                    "impacket_wmiexec": (
+                        "WMIEXEC",
+                        "WMI remote shell on {t}",
+                        "Remote command execution via WMI "
+                        "(Win32_Process.Create).\n\n"
+                        "  Target : {t}:135 (RPC)\n"
+                        "  Auth   : {a}\n"
+                        "  Domain : {dom}\n\n"
+                        "WMI exec spawns processes on the target "
+                        "without installing a service.  Smaller "
+                        "footprint than psexec but still full RCE.\n\n"
+                        "Remediation:\n"
+                        "  • Restrict remote WMI: "
+                        "Set-PSSessionConfiguration -ShowSecurityDescriptorUI\n"
+                        "  • Block RPC 135 + dynamic ports from "
+                        "untrusted VLANs\n"
+                        "  • Monitor WMI process-creation events "
+                        "(Sysmon Event ID 1, ParentImage wmiprvse.exe)",
+                    ),
+                    "impacket_psexec": (
+                        "PSEXEC",
+                        "PsExec SYSTEM shell on {t}",
+                        "Remote SYSTEM shell obtained via impacket-psexec "
+                        "(SMB service install).\n\n"
+                        "  Target : {t}:445 (SMB)\n"
+                        "  Auth   : {a}\n"
+                        "  Domain : {dom}\n\n"
+                        "PsExec uploads a service binary to ADMIN$, "
+                        "installs it as a Windows service, and executes "
+                        "as SYSTEM.  Noisy (antivirus + event logs) but "
+                        "gives highest privilege.\n\n"
+                        "Remediation:\n"
+                        "  • Restrict ADMIN$ share access to "
+                        "domain admins only\n"
+                        "  • Enable Windows Firewall rule blocking "
+                        "inbound SMB from workstations\n"
+                        "  • Monitor service-install events "
+                        "(Event ID 7045, random service names)",
+                    ),
+                    "impacket_atexec": (
+                        "ATEXEC",
+                        "Task Scheduler exec on {t}",
+                        "Remote command execution via Windows Task "
+                        "Scheduler (ITaskSchedulerService RPC).\n\n"
+                        "  Target : {t}:445 (SMB)\n"
+                        "  Auth   : {a}\n"
+                        "  Domain : {dom}\n\n"
+                        "AtExec creates a scheduled task, runs the "
+                        "command immediately, reads output from a temp "
+                        "file, then deletes the task.  Useful when "
+                        "psexec/wmiexec are blocked.\n\n"
+                        "Remediation:\n"
+                        "  • Restrict remote task creation: "
+                        "GPO > Computer > Admin Templates > "
+                        "Task Scheduler\n"
+                        "  • Monitor task-creation events "
+                        "(Event ID 4698)\n"
+                        "  • Block inbound SMB from untrusted VLANs",
+                    ),
+                    "impacket_dcomexec": (
+                        "DCOMEXEC",
+                        "DCOM remote shell on {t}",
+                        "Remote command execution via DCOM "
+                        "(ShellBrowserWindow / MMC20.Application).\n\n"
+                        "  Target : {t}:135 (RPC)\n"
+                        "  Auth   : {a}\n"
+                        "  Domain : {dom}\n\n"
+                        "DCOM exec leverages legitimate COM objects "
+                        "for lateral movement.  Less common in logs "
+                        "than psexec/wmiexec.\n\n"
+                        "Remediation:\n"
+                        "  • Restrict remote DCOM: dcomcnfg > "
+                        "Default Permissions > remove non-admin\n"
+                        "  • Block RPC 135 + dynamic ports from "
+                        "untrusted VLANs\n"
+                        "  • Monitor DCOM process spawns "
+                        "(Sysmon Event ID 1, ParentImage svchost.exe "
+                        "-k DcomLaunch)",
+                    ),
+                }
+                _finding = _EXEC_FINDING.get(tool.id)
+                if _finding:
                     try:
                         from utils.run_id import new_run_id
                         auth = f"{u} (hash)" if h else f"{u} (password)"
+                        src, ttl, desc = _finding
+                        fmt = {"t": target, "a": auth,
+                               "dom": d or "(none)"}
                         self.app.target_intel.add_auto_finding(
-                            title=f"EVIL-WINRM — WinRM shell on {target}",
-                            description=(
-                                f"WinRM shell session opened via evil-winrm.\n\n"
-                                f"  Target : {target}:5985\n"
-                                f"  Auth   : {auth}\n"
-                                f"  Domain : {d or '(none)'}\n\n"
-                                f"Verify the session authenticated successfully "
-                                f"in the xterm window.  A working WinRM shell "
-                                f"gives full interactive PowerShell access — "
-                                f"equivalent to RDP without the GUI.\n\n"
-                                f"Remediation:\n"
-                                f"  • Disable WinRM if not needed: "
-                                f"Disable-PSRemoting -Force\n"
-                                f"  • Restrict WinRM to management VLANs via "
-                                f"Windows Firewall\n"
-                                f"  • Enforce Kerberos-only auth (disable NTLM)"),
+                            title=f"{src} — {ttl.format(**fmt)}",
+                            description=desc.format(**fmt),
                             severity="high",
-                            source="EVIL-WINRM",
+                            source=src,
                             linked_run_id=new_run_id(),
                             replace=True)
                     except Exception:
