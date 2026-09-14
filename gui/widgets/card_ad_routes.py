@@ -524,7 +524,22 @@ class CardADRoutesMixin:
                         "error")
                     return
 
-                if tool.id == "evil_winrm" and ok:
+                self._set_tool_status(tool.id, "done")
+                try:
+                    sess = self.app.session_manager.current
+                    if sess is not None:
+                        eid = sess.start_tool_execution(
+                            tool_id=tool.id, tool_name=tool.name,
+                            phase_id=getattr(self, "phase_id", ""),
+                            command=cmd)
+                        if eid:
+                            sess.finish_tool_execution(
+                                eid, 0, ["(interactive xterm session)"],
+                                "done")
+                except Exception:
+                    pass
+
+                if tool.id == "evil_winrm":
                     try:
                         from utils.run_id import new_run_id
                         auth = f"{u} (hash)" if h else f"{u} (password)"
