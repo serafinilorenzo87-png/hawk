@@ -458,12 +458,19 @@ class CardADRoutesMixin:
                 "impacket_samrdump":      "impacket-samrdump",
                 "impacket_rpcdump":       "impacket-rpcdump",
                 "impacket_goldenpac":     "impacket-goldenPac",
+                "evil_winrm":            "evil-winrm",
             }
             bin_ = bin_map.get(tool.id, tool.binary)
 
-            # Hash-based: -hashes :<nthash>  + -no-pass to suppress
-            # the interactive password prompt entirely.
-            if h:
+            if tool.id == "evil_winrm":
+                if h:
+                    nt_only = h.split(":")[-1] if ":" in h else h
+                    cmd = (f"{bin_} -i {target} -u {_shq(u)} "
+                           f"-H {_shq(nt_only)}")
+                else:
+                    cmd = (f"{bin_} -i {target} -u {_shq(u)} "
+                           f"-p {_shq(p)}")
+            elif h:
                 # impacket accepts LM:NT or just :NT — if the user
                 # pasted LM:NT with colon, pass through; otherwise
                 # assume NT-only and prefix an empty LM.
@@ -487,7 +494,7 @@ class CardADRoutesMixin:
             _INTERACTIVE_IMPACKET = {
                 "impacket_psexec", "impacket_wmiexec", "impacket_atexec",
                 "impacket_dcomexec", "impacket_smbclient",
-                "impacket_mssqlclient",
+                "impacket_mssqlclient", "evil_winrm",
             }
             if tool.id in _INTERACTIVE_IMPACKET:
                 from utils.runner import _open_terminal
@@ -515,6 +522,35 @@ class CardADRoutesMixin:
                         "[!] No terminal emulator available. "
                         "Install xterm: sudo apt install -y xterm",
                         "error")
+                    return
+
+                if tool.id == "evil_winrm" and ok:
+                    try:
+                        from utils.run_id import new_run_id
+                        auth = f"{u} (hash)" if h else f"{u} (password)"
+                        self.app.target_intel.add_auto_finding(
+                            title=f"EVIL-WINRM — WinRM shell on {target}",
+                            description=(
+                                f"WinRM shell session opened via evil-winrm.\n\n"
+                                f"  Target : {target}:5985\n"
+                                f"  Auth   : {auth}\n"
+                                f"  Domain : {d or '(none)'}\n\n"
+                                f"Verify the session authenticated successfully "
+                                f"in the xterm window.  A working WinRM shell "
+                                f"gives full interactive PowerShell access — "
+                                f"equivalent to RDP without the GUI.\n\n"
+                                f"Remediation:\n"
+                                f"  • Disable WinRM if not needed: "
+                                f"Disable-PSRemoting -Force\n"
+                                f"  • Restrict WinRM to management VLANs via "
+                                f"Windows Firewall\n"
+                                f"  • Enforce Kerberos-only auth (disable NTLM)"),
+                            severity="high",
+                            source="EVIL-WINRM",
+                            linked_run_id=new_run_id(),
+                            replace=True)
+                    except Exception:
+                        pass
                 return
 
             # Non-interactive — run through the normal pipeline.

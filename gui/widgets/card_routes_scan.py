@@ -372,6 +372,7 @@ class CardScanRoutesMixin:
             "impacket_samrdump",
             "impacket_rpcdump",
             "impacket_goldenpac",
+            "evil_winrm",
         }
         if tool.id in _IMPACKET_AUTH_IDS:
             self._route_impacket_auth(tool)
