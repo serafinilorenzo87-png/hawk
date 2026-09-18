@@ -260,12 +260,26 @@ class LateralModule(BaseModule):
                   "Chisel release filenames include the version number so the URL "
                   "is resolved dynamically via the GitHub API."),
             cmd_template=(
-                "VER=$(curl -s https://api.github.com/repos/jpillora/chisel/"
-                "releases/latest | grep -o '\"tag_name\":\"[^\"]*\"' | grep -o 'v[^\"]*') "
-                "&& curl -L \"https://github.com/jpillora/chisel/releases/download/"
-                "${VER}/chisel_${VER#v}_windows_amd64.gz\" "
-                "-o {payloads}/chisel.gz && gunzip -f {payloads}/chisel.gz "
-                "&& mv {payloads}/chisel {payloads}/chisel.exe"
+                # Two API/asset changes to work around:
+                #   1) GitHub now returns pretty-printed JSON with a
+                #      space after `:` (e.g. `"tag_name": "v1.12.0"`);
+                #      the old `"tag_name":"..."` (no space) pattern
+                #      silently produced VER="" and the curl below
+                #      tried to fetch `chisel__windows_amd64.gz`,
+                #      exiting rc=1.  Same robust `[[:space:]]*`
+                #      pattern the ligolo_download tool already uses.
+                #   2) Since v1.12.0 the Windows assets are packaged
+                #      as `.zip` (containing `chisel.exe` directly)
+                #      instead of `.gz`; the previous URL yields 404.
+                "VER=$(curl -fsSL https://api.github.com/repos/"
+                "jpillora/chisel/releases/latest | "
+                "grep -oE '\"tag_name\"[[:space:]]*:[[:space:]]*"
+                "\"v[^\"]+\"' | head -1 | grep -oE 'v[0-9][^\"]*') "
+                "&& curl -fsSL -L \"https://github.com/jpillora/chisel/"
+                "releases/download/${VER}/chisel_${VER#v}_windows_amd64.zip\" "
+                "-o {payloads}/chisel.zip "
+                "&& unzip -o {payloads}/chisel.zip -d {payloads}/ "
+                "&& rm -f {payloads}/chisel.zip"
             ),
             binary="curl",
             category="tunnel",
