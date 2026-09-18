@@ -4405,6 +4405,10 @@ class CardADRoutesMixin:
         hash_var   = ctk.StringVar(value=dh)
         domain_var = ctk.StringVar(value=dd)
         extras_var = ctk.StringVar(value="")
+        # MODE state — only meaningful for the consolidated
+        # impacket_secretsdump card (Target dump | DCSync); ignored
+        # for every other AD tool routed through this dialog.
+        secretsdump_mode_var = ctk.StringVar(value="Target dump")
 
         _row("Username", user_var, "",
              "required — any domain user works for most commands")
@@ -4414,6 +4418,64 @@ class CardADRoutesMixin:
              "optional — pass-the-hash; overrides password when filled")
         _row("Domain",   domain_var, "",
              "required for most AD tools (e.g. CORP.LOCAL, htb.local)")
+
+        # ── MODE dropdown (impacket_secretsdump only) ────────────────
+        # Consolidated Target-dump / DCSync card: the mode picks the
+        # extra flags that turn a plain
+        # "impacket-secretsdump user:pass@target" into either
+        # (a) local SAM+LSA dump (no extras — the base template) or
+        # (b) DRSUAPI DCSync replica of the full NTDS.dit
+        #     (adds "-just-dc -outputfile <OUTPUTS>/ntds-<target>").
+        # Switching mode overwrites extras_var with the mode's
+        # defaults; the operator can still hand-edit / add chips
+        # afterwards.
+        if tool.id == "impacket_secretsdump":
+            from utils.config import OUTPUTS_DIR as _OUTPUTS_DIR
+            _DCSYNC_EXTRAS = (
+                f"-just-dc -outputfile {_OUTPUTS_DIR}/ntds-{target}")
+            _TARGET_DUMP_EXTRAS = ""
+
+            def _apply_mode(*_):
+                m = secretsdump_mode_var.get()
+                if m == "DCSync":
+                    extras_var.set(_DCSYNC_EXTRAS)
+                else:
+                    # Target dump: only clear extras if they still
+                    # match the auto-added DCSync defaults; anything
+                    # the operator hand-typed on top is preserved.
+                    if extras_var.get().strip() == _DCSYNC_EXTRAS:
+                        extras_var.set(_TARGET_DUMP_EXTRAS)
+
+            secretsdump_mode_var.trace_add("write", _apply_mode)
+
+            m_row = ctk.CTkFrame(body, fg_color="transparent")
+            m_row.pack(fill="x", padx=24, pady=(6, 0))
+            ctk.CTkLabel(m_row, text="Mode", width=110, anchor="w",
+                         font=_f("sm", True),
+                         text_color=COLORS["text_bright"]).pack(side="left")
+            ctk.CTkOptionMenu(
+                m_row, variable=secretsdump_mode_var,
+                values=["Target dump", "DCSync"],
+                width=180, height=30, font=_f("sm"),
+                fg_color=COLORS["bg_card"],
+                button_color=COLORS["border_green"],
+                button_hover_color=COLORS["border_dim"],
+                text_color=COLORS["text_bright"],
+                dropdown_fg_color=COLORS["bg_card"],
+                dropdown_hover_color=COLORS["border_green"],
+                dropdown_text_color=COLORS["text_bright"],
+            ).pack(side="left")
+            ctk.CTkLabel(
+                body,
+                text=("Target dump: SAM+LSA on the host you OWN "
+                      "(local admin required) · DCSync: NTDS.dit "
+                      "replica from the DC (DA / DS-Replication "
+                      "required)"),
+                font=_f("xs"),
+                text_color=COLORS["text_dim"],
+                anchor="w").pack(fill="x", padx=24)
+            # Apply the initial mode (Target dump = no extras added).
+            _apply_mode()
 
         # ── Anonymous warning (live) ─────────────────────────────────
         # Active Directory rejects anonymous LDAP binds since Server

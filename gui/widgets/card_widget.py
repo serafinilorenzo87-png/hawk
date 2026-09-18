@@ -2270,31 +2270,38 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                 "-k / -no-pass            — Kerberos only",
             ],
         },
-        "secretsdump_dcsync": {
+        "impacket_secretsdump": {
             "purpose": (
-                "Impacket secretsdump in remote DCSync mode — uses "
-                "the DRSUAPI RPC to replicate hashes of EVERY domain "
-                "user including krbtgt.  With krbtgt's hash you can "
-                "forge Golden Tickets (see TICKETER)."),
-            "needs":   "Account with 'Replicating Directory Changes' "
-                       "rights.  By default only Domain Admins and "
-                       "Enterprise Admins have it; check via BloodHound "
-                       "for less-obvious paths (GenericAll on DC object, "
-                       "AdminSDHolder abuse, etc.).",
-            "output":  "HAWK parses every NTLM / DCC2 / Kerberos hash "
-                       "line → each becomes a Credential Store entry "
-                       "(AD RESULTS box) pre-tagged with the right "
-                       "hashcat mode (-m 1000 / 2100 / 13100 / 18200).  "
-                       "Target Intel summary shows totals + top 5 users. "
-                       " Raw .ntds / .sam / .security also written to "
-                       "<HAWK>/outputs/ for john/impacket-secretsdump "
-                       "dump-tools.",
+                "Impacket secretsdump — one card, two modes selected "
+                "at run time via the MODE dropdown in the dialog:\n"
+                "  Target dump : SAM + LSA secrets from a specific "
+                "host you own (creds@target).  Local admin required.\n"
+                "  DCSync      : DRSUAPI RPC replica of the full "
+                "NTDS.dit from the DC — every domain user including "
+                "krbtgt.  With krbtgt's hash you can forge Golden "
+                "Tickets (see TICKETER)."),
+            "needs":   "Target dump: local admin on the host.\n"
+                       "DCSync: an account with 'Replicating "
+                       "Directory Changes' rights.  By default only "
+                       "Domain Admins and Enterprise Admins have it; "
+                       "check via BloodHound for less-obvious paths "
+                       "(GenericAll on DC object, AdminSDHolder "
+                       "abuse, etc.).",
+            "output":  "HAWK parses every NTLM / DCC2 / Kerberos "
+                       "hash line → each becomes a Credential Store "
+                       "entry (AD RESULTS box) pre-tagged with the "
+                       "right hashcat mode (-m 1000 / 2100 / 13100 / "
+                       "18200).  Password reuse across accounts gets "
+                       "its own HIGH-severity finding.  DCSync mode "
+                       "also writes raw .ntds / .sam / .security to "
+                       "<HAWK>/outputs/ntds-<target> for john / "
+                       "impacket-secretsdump dump-tools.",
             "extras":  [
-                "-just-dc                 — default, NTDS + krbtgt",
+                "-just-dc                 — DCSync default (auto-set)",
                 "-just-dc-ntlm            — NTLM hashes only (skip Kerb keys)",
                 "-history                 — include password history",
                 "-user-status             — include account status",
-                "-hashes :<NT>            — pass-the-hash",
+                "-hashes :<NT>            — pass-the-hash (or use NTLM hash field)",
             ],
         },
         "ticketer_golden": {

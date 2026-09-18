@@ -365,7 +365,11 @@ class CardScanRoutesMixin:
             # atexec/dcomexec at runtime via a METHOD dropdown in the
             # shared impacket auth dialog.
             "impacket_exec",
-            "impacket_secretsdump",
+            # NOTE: impacket_secretsdump used to route here as the
+            # Exploitation-phase Target-dump card.  It's now
+            # consolidated with the AD PENTESTING DCSync card into a
+            # single tool with a MODE dropdown, routed via
+            # _AD_TEMPLATE_AUTH_IDS below.
             "impacket_smbclient",
             "impacket_mssqlclient",
             "impacket_lookupsid",
@@ -395,7 +399,7 @@ class CardScanRoutesMixin:
             "getuserspns",
             "certipy_quick", "certipy_find", "certipy_req",
             "rbcd_attack", "findDelegation",
-            "secretsdump_dcsync",
+            "impacket_secretsdump",
             "addcomputer", "adidnsdump",
         }
         if tool.id in _AD_TEMPLATE_AUTH_IDS:

@@ -189,8 +189,15 @@ class CardADParserMixin:
         rid = new_run_id()
 
         # ── Push every credential into the Credential Store ─────────
+        # Wrapped in cred_store.batch() so the three loops (ntlm +
+        # dcc2 + kerbs) each defer sess.save() + refresh() until the
+        # whole push is done — a big DCSync (14+ hashes) used to lock
+        # the UI for tens of seconds otherwise, because every
+        # add_credential re-saved the session file and rebuilt the
+        # entire credential-store widget tree.
         added = 0
         if hasattr(self.app, "cred_store"):
+          with self.app.cred_store.batch():
             for user, rid_, lm, nt in ntlm:
                 # Build a hashcat-friendly full line so CRACK can pick
                 # it up in mode 1000 (NTLM) without stripping.

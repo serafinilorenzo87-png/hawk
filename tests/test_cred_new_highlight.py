@@ -12,9 +12,15 @@
 """New-credential row highlight (MSF3 B4.4).
 
 A freshly captured credential (e.g. a Responder NetNTLMv2 hash) must be
-marked NEW so its ROW is highlighted, not just the tab counter.  The
-identity used to key "new" rows has to survive a store refresh, and viewing
-the tab (_blink_stop) must clear it.  Runs headless via a customtkinter stub.
+marked NEW so its ROW is highlighted (cyan border), not just the tab
+counter.  The identity used to key "new" rows has to survive a store
+refresh AND a tab switch — a prior implementation cleared the set on
+_blink_stop (tab view), which raced with the fingerprint cache in
+_render_creds and often hid the cyan border between the render that
+put it there and the frame the operator actually saw.  Cyan now
+persists across tab switches; the set is cleared only on session
+reload (target_bar.apply_session).  Runs headless via a
+customtkinter stub.
 """
 
 import os
@@ -121,11 +127,42 @@ class NewKeyLifecycleTests(unittest.TestCase):
         self.assertIn(self._mod.cred_identity(cred), w._new_cred_keys)
         self.assertEqual(w.refreshed, 1)
 
-    def test_viewing_the_tab_clears_the_new_set(self):
+    def test_viewing_the_tab_does_not_clear_the_new_set(self):
+        """Regression guard for the fingerprint-cache race.
+
+        The old behaviour cleared _new_cred_keys inside _blink_stop
+        (which fires on tab-switch to the Credential Store).  Because
+        _render_creds caches by fingerprint AND the fingerprint
+        includes _new_cred_keys, the sequence:
+
+          1. cred added while operator is on Target Intel — refresh()
+             renders WITH cyan, fingerprint = (creds, {new_key})
+          2. operator switches to Credential Store — refresh() is
+             called first, fingerprint unchanged, EARLY RETURN
+             (widgets keep their cyan borders)
+          3. _blink_stop clears _new_cred_keys — no re-render fires
+             immediately, but the very next refresh (autosave,
+             blink tick, ...) sees fingerprint = (creds, {}) which
+             DIFFERS from cache, so it re-renders WITHOUT cyan
+
+        meant the operator could switch tabs at just the wrong
+        moment and never see the cyan border they were supposed to
+        notice.  Fixed by NOT clearing _new_cred_keys in
+        _blink_stop; the set is dropped on session reload (see
+        target_bar.apply_session)."""
         w = self._widget()
-        w._new_cred_keys.add(("svc", "dc01", "netntlmv2", "deadbeef"))
+        key = ("svc", "dc01", "netntlmv2", "deadbeef")
+        w._new_cred_keys.add(key)
         w._blink_stop()
-        self.assertEqual(w._new_cred_keys, set())
+        self.assertIn(
+            key, w._new_cred_keys,
+            "_blink_stop must NOT clear _new_cred_keys — that races "
+            "with the _render_creds fingerprint cache and hides the "
+            "cyan border on tab switch.")
+        # Tab counter side effects still happen: badge reset, blink
+        # off — assert those separately.
+        self.assertFalse(w._blink_active)
+        self.assertEqual(w._new_findings, 0)
 
 
 if __name__ == "__main__":
