@@ -2050,13 +2050,6 @@ class CardRuntimeMixin:
                 "gpp_decrypt":       self._parse_gpp_decrypt_to_intel,
                 "getuserspns":       self._parse_kerberoast_to_intel,
                 "getnpusers":        self._parse_asrep_to_intel,
-                # The Exploitation-phase card uses id "impacket_getnpusers"
-                # (the AD-phase one is "getnpusers"); both run GetNPUsers, so
-                # both must map to the AS-REP parser — otherwise AS-REP
-                # hashes from the Exploitation card are silently dropped on
-                # save (secretsdump is binary-keyed above and doesn't have
-                # this asymmetry; getnpusers was the only id-keyed gap).
-                "impacket_getnpusers": self._parse_asrep_to_intel,
                 # Quick and full certipy find share output format —
                 # reuse the same parser.  The quick variant just has
                 # fewer template blocks because -vulnerable filters

@@ -339,10 +339,10 @@ class CardScanRoutesMixin:
             return
 
         # Impacket GetNPUsers — needs a users wordlist + domain.
-        # Two ID spellings in use: "impacket_getnpusers" (classic
-        # Enumeration phase) and "getnpusers" (AD PENTESTING phase
-        # module).  Both route through the same dedicated dialog.
-        if tool.id in ("impacket_getnpusers", "getnpusers"):
+        # Homed in AD PENTESTING as "getnpusers" alongside the other
+        # roasting tools; the old duplicate Exploitation-phase card
+        # (id "impacket_getnpusers") was removed for tool coherence.
+        if tool.id == "getnpusers":
             self._route_getnpusers(tool)
             return
 
