@@ -2493,6 +2493,260 @@ class CardADRoutesMixin:
         copy_btn.pack(side="left", padx=6)
         _btn(btn_row, "CLOSE", lambda: _safe_destroy(win), w=100)
 
+    def _route_chisel_server(self, tool):
+        """Launch `chisel server --reverse` in an xterm background.
+
+        The bare RUN path routes chisel_server through ToolRunner's
+        captureable pipe — but chisel is a listener that never exits, so
+        the pipe fills, the card stays in RUNNING forever, and the
+        server dies the moment the operator closes the card, switches
+        session or exits HAWK.  Same problem sshuttle and penelope have,
+        and it's fixed the same way here: mini dialog collects the port,
+        previews the resolved command, spawns an xterm that owns the
+        server process, and records a LOW `launched, verify` finding
+        (LANCIO != successful tunnel — HAWK doesn't know if a client
+        will ever connect).
+        """
+        from gui.dialogs import (_make_win, _title, _sub, _note_box,
+                                 _btn_row, _btn, _safe_destroy)
+        from utils.runner import _open_terminal, lhost_detect
+
+        kali_ip = lhost_detect() or "<KALI_IP>"
+
+        win = _make_win(self, "CHISEL Server — Reverse tunnel listener",
+                        620, 560)
+        _title(win, "🔀  CHISEL SERVER — reverse tunnel listener")
+        _sub(win, f"Kali IP: {kali_ip}", COLORS["text_dim"])
+
+        _note_box(win,
+            "HOW IT WORKS\n\n"
+            "Starts `chisel server --reverse` on Kali.  A chisel client "
+            "on the pivot connects back and publishes a SOCKS5 proxy on "
+            "Kali at 127.0.0.1:1080 that carries traffic INTO the "
+            "pivot's network.\n\n"
+            "   Internal net  ←→  pivot (client)  ←—— tunnel ——→  "
+            "Kali (server here)\n"
+            "                                             "
+            "127.0.0.1:1080 SOCKS5",
+            COLORS["text_cyan"])
+
+        _note_box(win,
+            "⚠  LONG-RUNNING\n\n"
+            "The server keeps running until you CLOSE THE XTERM (or "
+            "CTRL+C inside it).  Closing this HAWK card does NOT stop "
+            "the server — that's on purpose so the tunnel survives "
+            "phase switches.",
+            COLORS["border_amber"], text_color=COLORS["text_yellow"])
+
+        # ── Port field ─────────────────────────────────────────
+        param = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                              border_color=COLORS["border_dim"],
+                              border_width=1, corner_radius=4)
+        param.pack(fill="x", padx=16, pady=(8, 4))
+        ctk.CTkLabel(param, text="  Listener port:",
+                     font=_f("sm", True),
+                     text_color=COLORS["text_bright"],
+                     anchor="w").pack(fill="x", padx=10, pady=(8, 4))
+
+        port_var = ctk.StringVar(value="9000")
+        entry = ctk.CTkEntry(param, textvariable=port_var, width=100,
+            height=28, font=_f("sm"),
+            fg_color=COLORS["bg_secondary"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_green"], border_width=1,
+            corner_radius=3, placeholder_text="9000")
+        entry.pack(anchor="w", padx=10, pady=(0, 4))
+        ctk.CTkLabel(param,
+            text=("  Must match the port the chisel client on the "
+                  "pivot connects to."),
+            font=_f("xs"), text_color=COLORS["text_dim"],
+            anchor="w").pack(fill="x", padx=10, pady=(0, 8))
+
+        # ── Live command preview ─────────────────────────────
+        preview_var = ctk.StringVar(value="")
+        _prev_box = ctk.CTkFrame(
+            win, fg_color=COLORS["bg_card"],
+            border_color=COLORS["border_green"],
+            border_width=1, corner_radius=3)
+        _prev_box.pack(fill="x", padx=16, pady=(8, 0))
+        ctk.CTkLabel(
+            _prev_box, text="COMMAND PREVIEW",
+            font=_f("xs", True), text_color=COLORS["text_dim"],
+            anchor="w").pack(fill="x", padx=8, pady=(4, 0))
+        ctk.CTkLabel(
+            _prev_box, textvariable=preview_var,
+            font=_f("sm"), text_color=COLORS["text_green"],
+            anchor="w", justify="left",
+            wraplength=560).pack(fill="x", padx=8, pady=(0, 6))
+
+        def _build_cmd(port):
+            return f"chisel server --port {port} --reverse"
+
+        def _update_preview(*_):
+            p = (port_var.get() or "").strip() or "9000"
+            preview_var.set(f"$ {_build_cmd(p)}")
+
+        try:
+            port_var.trace_add("write", _update_preview)
+        except Exception:
+            pass
+        _update_preview()
+
+        def _launch():
+            p = (port_var.get() or "").strip() or "9000"
+            if not p.isdigit() or not (1 <= int(p) <= 65535):
+                self.app.terminal.write(
+                    f"  [!] CHISEL Server — invalid port '{p}'.",
+                    "warn")
+                return
+
+            cmd = _build_cmd(p)
+            _safe_destroy(win)
+
+            self.app.terminal.section(
+                "LATERAL MOVEMENT  ·  CHISEL Server")
+            self.app.terminal.write(f"  $ {cmd}", "cmd")
+            self.app.terminal.write(
+                f"  [*] chisel server launching in xterm — listener "
+                f"on {kali_ip}:{p}. Close the xterm to stop it.",
+                "info")
+
+            script = (
+                f"echo '═══  HAWK — CHISEL Server :{p}  ═══'; "
+                f"echo 'Listening on {kali_ip}:{p} (--reverse).'; "
+                f"echo 'CTRL+C or close this window stops the server.'; "
+                f"echo ''; "
+                f"{cmd}; "
+                f"echo ''; "
+                f"read -p 'Server stopped. Press ENTER to close...'")
+            ok = _open_terminal(f"HAWK — CHISEL Server :{p}", script)
+            if not ok:
+                self.app.terminal.write(
+                    "  [!] No terminal emulator available — install "
+                    "xterm: sudo apt install -y xterm", "error")
+                return
+
+            # ── Tool status + session execution record ─────────
+            # Card stays RUNNING (yellow) because the listener is
+            # long-lived — HAWK cannot observe when the operator
+            # closes the xterm, so "done" would be a lie.  The
+            # executed_tools entry, on the other hand, IS done: it
+            # records the launch invocation, which completed the
+            # moment the xterm was spawned; the process itself
+            # continues outside HAWK.
+            self._set_tool_status(tool.id, "running")
+            try:
+                sess = self.app.session_manager.current
+                if sess is not None:
+                    eid = sess.start_tool_execution(
+                        tool_id=tool.id, tool_name=tool.name,
+                        phase_id=getattr(self, "phase_id", ""),
+                        command=cmd)
+                    if eid:
+                        sess.finish_tool_execution(
+                            eid, 0, ["(interactive xterm session)"],
+                            "done")
+            except Exception:
+                pass
+
+            # ── Register a stop-runner and flip RUN → STOP ─────
+            # HAWK already knows how to flip a tool row to STOP
+            # (red) and route the click to `runner.kill()` — we
+            # just need a runner object with a `.kill()` method.
+            # The listener lives in a bash child of the xterm, so
+            # a plain Popen.terminate() on the xterm wouldn't reach
+            # it (no shared process group); we `pkill -f` on the
+            # exact port instead, which is precise enough because
+            # any concurrent `chisel server --port N` on the same
+            # port would already be a bind clash.
+            #
+            # After the pkill we override the button's command to
+            # our own cleanup so the row lands back on READY
+            # instead of ERROR: the operator intentionally stopped
+            # the server, that isn't an error state.
+            import subprocess as _sp
+            _port = p
+
+            class _ChiselStopRunner:
+                def __init__(self, port):
+                    self.port = port
+
+                def kill(self):
+                    try:
+                        r = _sp.run(
+                            ["pkill", "-f",
+                             f"chisel server --port {self.port} "
+                             f"--reverse"],
+                            capture_output=True, text=True,
+                            timeout=5)
+                        # pkill returns 0 on kill, 1 on no-match.
+                        return r.returncode == 0
+                    except Exception:
+                        return False
+
+            self._tool_runners[tool.id] = _ChiselStopRunner(_port)
+            self._toggle_run_btn(tool, True)
+
+            def _stop_chisel_here(t=tool, port=_port):
+                runner = self._tool_runners.get(t.id)
+                killed = bool(runner and runner.kill())
+                self.app.terminal.write(
+                    (f"  [*] CHISEL Server on :{port} stopped."
+                     if killed
+                     else f"  [!] CHISEL Server on :{port}: nothing "
+                          "to kill (already closed?)."),
+                    "warn")
+                self._set_tool_status(t.id, "ready")
+                self._toggle_run_btn(t, False)
+                self._tool_runners.pop(t.id, None)
+                # _toggle_run_btn(..., False) resets the button's
+                # command to `_gate_check` (the generic capture-and-
+                # log runner path), which for chisel_server is exactly
+                # what we DON'T want — it would relaunch the listener
+                # inline in HAWK instead of an xterm.  Restore our
+                # own route so the next RUN reopens the dialog.
+                try:
+                    w2 = self._tool_widgets.get(t.id)
+                    if w2 and "run_btn" in w2:
+                        w2["run_btn"].configure(
+                            command=lambda tt=t:
+                                self._route_chisel_server(tt))
+                except Exception:
+                    pass
+
+            try:
+                w = self._tool_widgets.get(tool.id)
+                if w and "run_btn" in w:
+                    w["run_btn"].configure(command=_stop_chisel_here)
+            except Exception:
+                pass
+
+            # No target-intel finding here on purpose: chisel_server
+            # binds a Kali-local port, it does not touch the target.
+            # A target-intel row would be misleading — the Target
+            # Intel panel describes the REMOTE host, not what Kali is
+            # listening on.  RDP Connect and impacket-exec push
+            # findings because they actually reach out to the target;
+            # a bare listener does not.
+
+            # Chain hint.
+            try:
+                self.app.terminal.write(
+                    "→ Next: transfer chisel to the pivot ('Chisel "
+                    "(Windows, download)' card puts chisel.exe in "
+                    "payloads/; use smbclient put / wmiexec upload), "
+                    "then run 'chisel client "
+                    f"{kali_ip}:{p} R:socks' on the target.  A SOCKS5 "
+                    "proxy appears on Kali at 127.0.0.1:1080 — probe "
+                    "with 'proxychains nmap -sT -Pn <internal_ip>'.",
+                    "info")
+            except Exception:
+                pass
+
+        row = _btn_row(win)
+        _btn(row, "▶  START LISTENER", _launch, primary=True, w=180)
+        _btn(row, "CANCEL", lambda: _safe_destroy(win), w=100)
+
     def _route_chisel_client(self, tool):
         """Guided workflow for the chisel reverse-SOCKS tunnel.
 

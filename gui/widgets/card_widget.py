@@ -1426,6 +1426,14 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
             if t.id == "chisel_client":
                 self._route_chisel_client(t)
                 return
+            # chisel server is a long-running listener — the plain RUN
+            # path routes it through ToolRunner's captureable pipe,
+            # which blocks forever (chisel never exits) and dies the
+            # moment the operator closes the card.  Mini dialog +
+            # xterm background launch, same fix pattern as sshuttle.
+            if t.id == "chisel_server":
+                self._route_chisel_server(t)
+                return
             # sshuttle needs an SSH user (custom_args is opaque and often
             # blank) and sudo+SSH password prompts (subprocess can't
             # prompt) → mini dialog collects the user and launches in
