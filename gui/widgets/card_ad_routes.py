@@ -2027,7 +2027,7 @@ class CardADRoutesMixin:
         except Exception:
             dd = ""
 
-        win = _make_win(self, "RDP Connect", 560, 420)
+        win = _make_win(self, "RDP Connect", 620, 720)
         _title(win, "RDP CONNECT — xfreerdp3")
         _sub(win, f"Target: {target}  (port 3389)", COLORS["text_dim"])
 
@@ -2079,6 +2079,117 @@ class CardADRoutesMixin:
         _row("Domain",    domain_var,"",
              "optional — /d:<domain>, for AD targets")
 
+        # ── Target-aware hints (fingerprint-driven) ──────────────────
+        # xfreerdp3 has real interop pain across Windows generations
+        # (TLS handshake on 2008 R2, NLA + PtH interaction on 2016+).
+        # Surface only the ones that apply to THIS target so the
+        # operator knows why the connect might silently fail.
+        _tgt_tips = []
+        try:
+            fp = getattr(getattr(self.app, "target_intel", None),
+                         "_fp", None)
+            if fp is not None:
+                _os_ver = (getattr(fp, "version", "") or "").lower()
+                _gen    = (getattr(fp, "target_generation", "")
+                           or "").lower()
+                _ver_lit = getattr(fp, "version", "?")
+                if ("2008" in _os_ver or "2003" in _os_ver
+                        or "xp" in _os_ver or "vista" in _os_ver):
+                    _tgt_tips.append(
+                        f"Target = Windows {_ver_lit} — legacy TLS "
+                        "stack.  xfreerdp3 already forces "
+                        "/tls:seclevel:0; if the handshake still "
+                        "fails, add /sec:rdp (force pre-TLS RDP "
+                        "Security Layer) as a last resort.")
+                if ("2016" in _os_ver or "2019" in _os_ver
+                        or "2022" in _os_ver or "2025" in _os_ver
+                        or "10" == _os_ver or "11" == _os_ver):
+                    _tgt_tips.append(
+                        f"Target = Windows {_ver_lit} — Restricted "
+                        "Admin Mode (NLA) is usually ON.  "
+                        "Pass-the-hash (/pth:) needs the target's "
+                        "DisableRestrictedAdmin registry key set to "
+                        "0 AND the account in Remote Desktop Users; "
+                        "if you get 'CredSSP required' add "
+                        "/sec:nla and confirm the account has "
+                        "'Allow log on through RDP' rights.")
+                if _gen == "legacy":
+                    _tgt_tips.append(
+                        "Generation = legacy — HAWK's built-in "
+                        "compat flags (/tls:seclevel:0 + "
+                        "/cert:ignore) are already on.  If the "
+                        "xterm shows 'no common CredSSP flavor', "
+                        "the target only speaks vanilla RDP: add "
+                        "/sec:rdp.")
+        except Exception:
+            pass
+        if _tgt_tips:
+            _note_box(
+                win,
+                "TARGET-AWARE HINTS (from session fingerprint):\n\n"
+                + "\n\n".join(f"• {t}" for t in _tgt_tips),
+                COLORS["border_amber"])
+
+        # ── Command builder (shared by preview + run) ────────────────
+        def _build_rdp_cmd(placeholder=False):
+            def _v(x, ph):
+                return x if x else (f"<{ph}>" if placeholder else "")
+            u  = _v(user_var.get().strip(), "user")
+            p  = pass_var.get().strip()
+            h  = hash_var.get().strip()
+            d  = domain_var.get().strip()
+            parts = [
+                "xfreerdp3",
+                f"/v:{target}",
+                f"/u:{_shq(u)}",
+            ]
+            if d:
+                parts.append(f"/d:{_shq(d)}")
+            if h:
+                nt = h.split(":")[-1] if ":" in h else h
+                parts.append(f"/pth:{_shq(nt)}")
+            else:
+                pw = _v(p, "password")
+                parts.append(f"/p:{_shq(pw)}")
+            parts += [
+                "/cert:ignore",
+                "/tls:seclevel:0",
+                "/dynamic-resolution",
+            ]
+            return " ".join(parts)
+
+        # ── Live command preview ─────────────────────────────────────
+        preview_var = ctk.StringVar(value="")
+        _prev_box = ctk.CTkFrame(
+            win, fg_color=COLORS["bg_card"],
+            border_color=COLORS["border_green"],
+            border_width=1, corner_radius=3)
+        _prev_box.pack(fill="x", padx=24, pady=(8, 0))
+        ctk.CTkLabel(
+            _prev_box, text="COMMAND PREVIEW",
+            font=_f("xs", True),
+            text_color=COLORS["text_dim"],
+            anchor="w").pack(fill="x", padx=8, pady=(4, 0))
+        ctk.CTkLabel(
+            _prev_box, textvariable=preview_var,
+            font=_f("sm"),
+            text_color=COLORS["text_green"],
+            anchor="w", justify="left",
+            wraplength=490).pack(fill="x", padx=8, pady=(0, 6))
+
+        def _update_preview(*_):
+            try:
+                preview_var.set("$ " + _build_rdp_cmd(placeholder=True))
+            except Exception as e:
+                preview_var.set(f"$ (preview error: {e})")
+
+        for _v_trace in (user_var, pass_var, hash_var, domain_var):
+            try:
+                _v_trace.trace_add("write", _update_preview)
+            except Exception:
+                pass
+        _update_preview()
+
         def _run():
             u = user_var.get().strip()
             p = pass_var.get().strip()
@@ -2095,25 +2206,7 @@ class CardADRoutesMixin:
                     "NTLM hash.", "warn")
                 return
 
-            # Build xfreerdp3 command
-            cmd_parts = [
-                "xfreerdp3",
-                f"/v:{target}",
-                f"/u:{_shq(u)}",
-            ]
-            if d:
-                cmd_parts.append(f"/d:{_shq(d)}")
-            if h:
-                nt = h.split(":")[-1] if ":" in h else h
-                cmd_parts.append(f"/pth:{_shq(nt)}")
-            else:
-                cmd_parts.append(f"/p:{_shq(p)}")
-            cmd_parts += [
-                "/cert:ignore",
-                "/tls:seclevel:0",
-                "/dynamic-resolution",
-            ]
-            cmd = " ".join(cmd_parts)
+            cmd = _build_rdp_cmd(placeholder=False)
 
             _safe_destroy(win)
 
@@ -2138,6 +2231,91 @@ class CardADRoutesMixin:
                 self.app.terminal.write(
                     "[!] No terminal emulator available — "
                     "install xterm: sudo apt install -y xterm", "error")
+                return
+
+            # ── Tool status + session execution record ───────────────
+            # xterm-launched tools bypass ToolRunner, so we must
+            # flip the card status and log the run manually — same
+            # pattern the impacket_exec / evil_winrm xterm paths use.
+            self._set_tool_status(tool.id, "done")
+            try:
+                sess = self.app.session_manager.current
+                if sess is not None:
+                    eid = sess.start_tool_execution(
+                        tool_id=tool.id, tool_name=tool.name,
+                        phase_id=getattr(self, "phase_id", ""),
+                        command=cmd)
+                    if eid:
+                        sess.finish_tool_execution(
+                            eid, 0, ["(interactive xterm session)"],
+                            "done")
+            except Exception:
+                pass
+
+            # ── LOW-severity "launched, verify" finding ──────────────
+            # HAWK cannot observe the RDP session — we claim only
+            # what actually happened (the connect was launched).
+            # LAUNCH != successful login: xfreerdp3 may still fail
+            # on credentials, NLA, or TLS handshake.  Different
+            # title from any confirmed-shell finding so the two
+            # never merge over each other.
+            try:
+                from utils.run_id import new_run_id
+                auth = f"{u} (hash)" if h else f"{u} (password)"
+                self.app.target_intel.add_auto_finding(
+                    title=(f"RDP CONNECT — xfreerdp3 launched "
+                           f"against {target}"),
+                    description=(
+                        f"xfreerdp3 was launched in an xterm "
+                        f"against {target}.  HAWK does not capture "
+                        f"the RDP session — verify the graphical "
+                        f"window / xterm to know if the connect "
+                        f"actually succeeded.\n\n"
+                        f"  Target : {target}:3389\n"
+                        f"  Auth   : {auth}\n"
+                        f"  Domain : {d or '(none)'}\n\n"
+                        f"Common failure modes:\n"
+                        f"  • CredSSP / NLA: 'CredSSP required by "
+                        f"server' → add /sec:nla or use a domain "
+                        f"account with RDP-explicit rights.\n"
+                        f"  • Pass-the-hash rejected on Windows "
+                        f"2016+: target needs "
+                        f"DisableRestrictedAdmin=0 in "
+                        f"HKLM\\System\\CurrentControlSet\\Control\\"
+                        f"Lsa.\n"
+                        f"  • TLS handshake fail on legacy Windows: "
+                        f"already mitigated by "
+                        f"/tls:seclevel:0 /cert:ignore; last resort "
+                        f"is /sec:rdp.\n"
+                        f"  • Account not in Remote Desktop Users "
+                        f"group: grant with "
+                        f"'net localgroup \"Remote Desktop Users\" "
+                        f"<user> /add' from another shell.\n\n"
+                        f"If the RDP session landed, promote this "
+                        f"finding manually (HIGH — interactive shell "
+                        f"with GUI) and note the account context "
+                        f"seen inside the session."),
+                    severity="info",
+                    source="RDP-CONNECT",
+                    linked_run_id=new_run_id(),
+                    replace=True)
+            except Exception:
+                pass
+
+            # Chain hint written to the HAWK terminal so the
+            # operator sees the next logical move without opening
+            # Target Intel.
+            try:
+                self.app.terminal.write(
+                    "→ Next: if the RDP session landed, drop into "
+                    "a cmd/PowerShell prompt and run 'whoami "
+                    "/priv' + 'whoami /groups' to enumerate token "
+                    "rights; from there mimikatz LSASS if "
+                    "SeDebugPrivilege is available, or "
+                    "SECRETSDUMP Target dump for local SAM/LSA.",
+                    "info")
+            except Exception:
+                pass
 
         row = _btn_row(win)
         _btn(row, "CONNECT", _run, primary=True, w=120)
