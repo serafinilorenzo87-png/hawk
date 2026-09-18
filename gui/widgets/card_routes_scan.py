@@ -361,11 +361,11 @@ class CardScanRoutesMixin:
         # template `impacket-psexec administrator@{target}` hangs
         # forever waiting for a password that nobody's typing.
         _IMPACKET_AUTH_IDS = {
-            "impacket_psexec",
+            # Consolidated exec card — picks psexec/smbexec/wmiexec/
+            # atexec/dcomexec at runtime via a METHOD dropdown in the
+            # shared impacket auth dialog.
+            "impacket_exec",
             "impacket_secretsdump",
-            "impacket_wmiexec",
-            "impacket_atexec",
-            "impacket_dcomexec",
             "impacket_smbclient",
             "impacket_mssqlclient",
             "impacket_lookupsid",

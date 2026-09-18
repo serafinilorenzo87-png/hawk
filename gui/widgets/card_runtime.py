@@ -1814,8 +1814,21 @@ class CardRuntimeMixin:
             # refused" pattern and pops up a credentials dialog so the
             # user can immediately re-run with Administrator/vagrant
             # (or whatever) without retyping the whole command.
-            if tool.binary in ("netexec", "nxc", "crackmapexec", "cme") \
-                    or (tool.binary or "").startswith("impacket-"):
+            #
+            # Skipped for the consolidated IMPACKET EXEC card: it
+            # ALWAYS runs authenticated (the dialog forces user +
+            # password OR NTLM hash before RUN), so any
+            # SMB SessionError / ACCESS_DENIED in its output means
+            # something other than a null-session refusal — most
+            # commonly the atexec 2008 R2 STATUS_OBJECT_NAME_NOT_FOUND
+            # race, which _parse_impacket_exec_to_intel classifies as
+            # "launched (unclear)" rather than as an auth failure.
+            # Popping the cred-retry dialog on top of that is a false
+            # positive and confuses the operator.
+            if tool.id != "impacket_exec" and (
+                    tool.binary in ("netexec", "nxc",
+                                     "crackmapexec", "cme")
+                    or (tool.binary or "").startswith("impacket-")):
                 try:
                     self._maybe_offer_cred_retry(tool, log, returncode)
                 except Exception as e:
@@ -1869,6 +1882,22 @@ class CardRuntimeMixin:
                     "WEB ASSAULT card → ORACLE or BLOODY CRAWL.",
                     "info")
                 self.app._web_oracle_hint_shown = True
+
+            # IMPACKET EXEC (captureable methods) → parse the
+            # captured stdout for success/failure signals and push
+            # an honest finding (confirmed = HIGH, launched-unclear
+            # = MEDIUM, failed = INFO).  Xterm-only methods never
+            # reach _on_done — the dialog pushes their LOW
+            # "launched" finding directly.
+            if tool.id == "impacket_exec" and log:
+                try:
+                    used_specialized = (
+                        self._parse_impacket_exec_to_intel(tool, log)
+                        or used_specialized)
+                except Exception as e:
+                    self.app.terminal.write(
+                        f"  [!] IMPACKET EXEC parser error: {e}",
+                        "error")
 
             # SSH banner grab → extract version string to Target Intel
             if tool.id == "ssh_banner" and log:

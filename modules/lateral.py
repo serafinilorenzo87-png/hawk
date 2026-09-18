@@ -199,37 +199,33 @@ class LateralModule(BaseModule):
             os_hint="windows",
         ),
         Tool(
-            id="impacket_wmiexec",
-            name="WMIEXEC",
-            desc=("Remote command execution via Windows Management Instrumentation "
-                  "(WMI) — no service install, leaves a smaller footprint than "
-                  "psexec.  Connects on port 135 (RPC) + dynamic high ports, "
-                  "authenticates via NTLM, spawns a process via Win32_Process.Create() "
-                  "and reads output through ADMIN$ (SMB).  "
-                  "⚠ REQUIRES LOCAL ADMIN: WMI remote access and ADMIN$ share are "
-                  "restricted to local administrators by default.  Authenticating as "
-                  "a normal domain user will produce ACCESS_DENIED or total silence — "
-                  "you MUST use Administrator or a local admin account (cleartext "
-                  "password or NTLM hash)."),
-            cmd_template="impacket-wmiexec {user}:{password}@{target}",
-            binary="impacket-wmiexec",
-            category="shell",
-            os_hint="windows",
-        ),
-        Tool(
-            id="impacket_atexec",
-            name="ATEXEC",
-            desc=("Single-command remote execution via the Windows Task Scheduler "
-                  "service (port 445 / SMB + ITaskSchedulerService RPC).  Creates a "
-                  "scheduled task, runs the command immediately, captures the output "
-                  "and deletes the task.  Useful when psexec/wmiexec are blocked by "
-                  "endpoint controls but the scheduler service is still reachable.  "
-                  "⚠ REQUIRES LOCAL ADMIN: the Task Scheduler RPC interface requires "
-                  "administrator privileges on the target to register tasks remotely.  "
-                  "A normal domain user will get ACCESS_DENIED with no further output — "
-                  "use Administrator or a local admin (cleartext or NTLM hash)."),
-            cmd_template='impacket-atexec {user}:{password}@{target} "{extra}"',
-            binary="impacket-atexec",
+            id="impacket_exec",
+            name="IMPACKET EXEC",
+            desc=("Consolidated impacket-exec suite — one card, one auth "
+                  "dialog, five execution methods selected at run time:\n\n"
+                  "  psexec    SMB service install → SYSTEM shell.  "
+                  "Noisiest (Event 7045, RemComSvc binary on disk).\n"
+                  "  smbexec   SMB service + named-pipe shovel → SYSTEM.  "
+                  "No binary drop, semi-interactive.\n"
+                  "  wmiexec   WMI Win32_Process.Create → runs as the "
+                  "authenticated user (NOT SYSTEM).  Small footprint.\n"
+                  "  atexec    Task Scheduler single-shot → SYSTEM, "
+                  "requires the command up-front (no shell).\n"
+                  "  dcomexec  DCOM COM-object spawn (MMC20 / "
+                  "ShellWindows / ShellBrowserWindow) → runs as the "
+                  "authenticated user.\n\n"
+                  "⚠ ALL METHODS REQUIRE LOCAL ADMIN on the target — "
+                  "plain domain users get ACCESS_DENIED with no further "
+                  "output.  Pass-the-hash (-hashes :NTHASH) works when "
+                  "the NTLM hash is known from secretsdump / DCSync.  "
+                  "The HAWK dialog surfaces method-specific extras "
+                  "(atexec Command + -silentcommand ; wmiexec -nooutput ; "
+                  "dcomexec -object) as chips / checkbox / dropdown."),
+            # Informational template only — the real command is built at
+            # runtime by _build_impacket_cmd() from the METHOD dropdown
+            # + auth fields + method-specific extras.
+            cmd_template="impacket-<method> {user}:{password}@{target}",
+            binary="impacket-psexec",
             category="shell",
             os_hint="windows",
         ),

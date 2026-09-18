@@ -2807,3 +2807,274 @@ class CardADParserMixin:
 
         return True
 
+    def _parse_impacket_exec_to_intel(self, tool, log: list) -> bool:
+        """Parse output from the consolidated IMPACKET EXEC card
+        (captureable methods only: atexec always; wmiexec with a
+        Command — one-shot or -nooutput).
+
+        Called from _on_done when the dialog routed the run via
+        ToolRunner instead of xterm.  Reads the run context the
+        dialog stashed on _tool_widgets[tool.id] and inspects the
+        captured stdout for success / failure signals.  Pushes an
+        HONEST finding based on what actually happened:
+
+          confirmed → HIGH, rich RESULT/PROOF/NEXT STEPS from
+                      IMPACKET_EXEC_CONFIRMED_FINDING plus a
+                      captured-output snippet as evidence
+          launched  → MEDIUM, spawn observed but success unclear
+                      (2008 R2 ADMIN$ race, no WMI ReturnValue,
+                      ...) — operator can promote to HIGH manually
+          failed    → INFO, failure documented (ACCESS_DENIED,
+                      CLASSNOTREG, ...) — LAUNCH ≠ RCE
+
+        Xterm-only methods (psexec / smbexec / wmiexec-bare /
+        dcomexec / evil_winrm) never reach this parser — they push
+        a LOW-severity 'launched, verify' finding directly from the
+        dialog because HAWK cannot observe interactive xterm I/O.
+        """
+        from utils.run_id import new_run_id
+        try:
+            from gui.widgets.card_ad_routes import (
+                IMPACKET_EXEC_CONFIRMED_FINDING,
+                IMPACKET_EXEC_CHAIN_HINT,
+            )
+        except Exception:
+            return False
+
+        w = self._tool_widgets.get(tool.id) or {}
+        method = w.get("_impacket_exec_method", "")
+        if not method:
+            return False
+
+        target   = (w.get("_impacket_exec_target")
+                    or self._get_target() or "(target)")
+        auth     = w.get("_impacket_exec_auth", "")
+        domain   = w.get("_impacket_exec_domain", "(none)")
+        exec_cmd = w.get("_impacket_exec_run_cmd", "")
+        nooutput = bool(w.get("_impacket_exec_nooutput", False))
+
+        # log is a list of (name, line) tuples produced by
+        # ToolRunner via _out in _run_raw.
+        output = "\n".join(ln for _, ln in (log or []))
+        lo = output.lower()
+
+        # ── Failure signals first ──────────────────────────────────
+        status = None
+        failure_reason = ""
+        evidence_line = ""
+
+        if "access_denied" in lo or "access denied" in lo:
+            status = "failed"
+            failure_reason = ("ACCESS_DENIED — the account lacks "
+                              "local-admin rights on the target.")
+        elif "krb_ap_err_modified" in lo:
+            status = "failed"
+            failure_reason = ("Kerberos KRB_AP_ERR_MODIFIED — "
+                              "clock skew or bad ticket.")
+        elif "logon_failure" in lo or "status_logon_failure" in lo:
+            status = "failed"
+            failure_reason = ("authentication rejected (wrong "
+                              "password / hash).")
+        elif ("regdb_e_classnotreg" in lo
+                or "class not registered" in lo):
+            status = "failed"
+            failure_reason = ("REGDB_E_CLASSNOTREG — the target "
+                              "Windows version has no such COM "
+                              "class registered.")
+        elif ("unable to connect" in lo
+                or "connection refused" in lo
+                or "timed out" in lo
+                or "no route to host" in lo):
+            status = "failed"
+            failure_reason = ("network / port unreachable from "
+                              "Kali.")
+
+        # ── Method-specific success signals ────────────────────────
+        # Common noise from every impacket-* tool that the payload
+        # filter must strip: the banner line, WMI class markers,
+        # copyright lines, etc.  Otherwise "Impacket v0.13.0 -
+        # Copyright Fortra" would count as command output and turn
+        # a failed run into a false-positive "confirmed" finding.
+        def _is_impacket_noise(line):
+            s = line.strip()
+            if not s:
+                return True
+            if s.startswith("["):
+                return True
+            noise_prefixes = (
+                "Impacket ",  # banner: "Impacket v0.13.0 - ..."
+                "Copyright ",
+                "class __PARAMETERS",
+                "class __",
+                "{", "}",
+                "[abstract]",
+                "[Out",
+                "[out",
+                "[MappingStrings",
+                "[ID(",
+                "uint32 ",  # WMI __PARAMETERS field lines
+                "//",
+            )
+            for p in noise_prefixes:
+                if s.startswith(p):
+                    return True
+            return False
+
+        def _payload_lines(text):
+            return [ln for ln in text.splitlines()
+                    if not _is_impacket_noise(ln)]
+
+        if status is None:
+            if method == "atexec":
+                # Task lifecycle: Creating → Running → Deleting.
+                if ("creating task" in lo
+                        and "running task" in lo
+                        and "deleting task" in lo):
+                    payload = _payload_lines(output)
+                    if payload:
+                        status = "confirmed"
+                        evidence_line = payload[-1].strip()
+                    elif ("object_name_not_found" in lo
+                          or "status_object_name_not_found" in lo):
+                        status = "launched"
+                        failure_reason = (
+                            "task fired (Creating/Running/Deleting "
+                            "all captured) but ADMIN$\\Temp output "
+                            "read raced — known 2008 R2 timing "
+                            "bug.  The task DID run.")
+                    else:
+                        status = "launched"
+                        failure_reason = ("task fired but no "
+                                          "output captured.")
+                else:
+                    status = "launched"
+                    failure_reason = ("atexec exit; no task "
+                                      "lifecycle in output.  "
+                                      "Success unclear.")
+
+            elif method == "wmiexec":
+                if nooutput:
+                    if ("returnvalue = 0" in lo
+                            or "returnvalue: 0" in lo):
+                        status = "confirmed"
+                        evidence_line = (
+                            "WMI Win32_Process.Create "
+                            "ReturnValue=0 — command spawned "
+                            "on target.")
+                    else:
+                        status = "launched"
+                        failure_reason = ("no ReturnValue in "
+                                          "output; -nooutput "
+                                          "spawn unclear.")
+                else:
+                    if ("smbv2.1 dialect used" in lo
+                            or "smbv3.0 dialect used" in lo
+                            or "smbv1 dialect used" in lo):
+                        payload = _payload_lines(output)
+                        if payload:
+                            status = "confirmed"
+                            evidence_line = payload[-1].strip()
+                        else:
+                            status = "launched"
+                            failure_reason = (
+                                "authenticated but no command "
+                                "output captured.")
+                    else:
+                        status = "launched"
+                        failure_reason = ("wmiexec exit; success "
+                                          "unclear.")
+
+        # ── Push the appropriate finding ───────────────────────────
+        method_up = method.upper()
+        rid = new_run_id()
+
+        if status == "confirmed":
+            entry = IMPACKET_EXEC_CONFIRMED_FINDING.get(method)
+            if entry:
+                src, ttl, desc = entry
+                fmt = {"t": target, "a": auth, "dom": domain,
+                       "cmd": exec_cmd or "(none)"}
+                try:
+                    title = f"{src} — {ttl.format(**fmt)}"
+                    description = desc.format(**fmt)
+                    if evidence_line:
+                        description = (
+                            description
+                            + "\n\nCaptured evidence:\n"
+                            + "  " + evidence_line[:400])
+                    self.app.target_intel.add_auto_finding(
+                        title=title,
+                        description=description,
+                        severity="high",
+                        source=src,
+                        linked_run_id=rid,
+                        replace=True)
+                except Exception as e:
+                    self.app.terminal.write(
+                        f"  [!] impacket_exec finding push failed: "
+                        f"{e}", "error")
+
+        elif status == "launched":
+            try:
+                self.app.target_intel.add_auto_finding(
+                    title=(f"IMPACKET EXEC — {method} launched "
+                           f"on {target} (unclear)"),
+                    description=(
+                        f"impacket-{method} was run against {target} "
+                        f"but HAWK could not confirm success from "
+                        f"the captured output.\n\n"
+                        f"  Target : {target}\n"
+                        f"  Auth   : {auth}\n"
+                        f"  Domain : {domain}\n"
+                        f"  Method : {method}\n"
+                        f"  Cmd    : {exec_cmd or '(none)'}\n\n"
+                        f"Reason: {failure_reason}\n\n"
+                        f"Verify manually — check the HAWK terminal "
+                        f"for the actual impacket output.  If the "
+                        f"command succeeded, promote this finding to "
+                        f"HIGH."),
+                    severity="medium",
+                    source=f"IMPACKET-{method_up}",
+                    linked_run_id=rid,
+                    replace=True)
+            except Exception:
+                pass
+
+        elif status == "failed":
+            try:
+                self.app.target_intel.add_auto_finding(
+                    title=(f"IMPACKET EXEC — {method} attempt "
+                           f"failed on {target}"),
+                    description=(
+                        f"impacket-{method} attempt against {target} "
+                        f"failed.\n\n"
+                        f"  Target : {target}\n"
+                        f"  Auth   : {auth}\n"
+                        f"  Domain : {domain}\n"
+                        f"  Method : {method}\n"
+                        f"  Cmd    : {exec_cmd or '(none)'}\n\n"
+                        f"Reason: {failure_reason}\n\n"
+                        f"NOT an RCE.  Try a different method "
+                        f"(dropdown in the dialog), verify the "
+                        f"credentials in the Credential Store, or "
+                        f"check that the target port is reachable "
+                        f"from Kali."),
+                    severity="info",
+                    source=f"IMPACKET-{method_up}",
+                    linked_run_id=rid,
+                    replace=True)
+            except Exception:
+                pass
+
+        # Chain hint (only on confirmed — a failed / unclear run
+        # doesn't warrant advertising the next step).
+        if status == "confirmed":
+            hint = IMPACKET_EXEC_CHAIN_HINT.get(method)
+            if hint:
+                try:
+                    self.app.terminal.write(hint, "info")
+                except Exception:
+                    pass
+
+        return True
+
