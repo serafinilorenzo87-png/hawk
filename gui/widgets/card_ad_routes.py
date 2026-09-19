@@ -2509,9 +2509,24 @@ class CardADRoutesMixin:
         """
         from gui.dialogs import (_make_win, _title, _sub, _note_box,
                                  _btn_row, _btn, _safe_destroy)
-        from utils.runner import _open_terminal, lhost_detect
+        from utils.runner import (_open_terminal, lhost_detect,
+                                  lhost_for_target)
 
-        kali_ip = lhost_detect() or "<KALI_IP>"
+        # Pick the Kali IP the TARGET can actually reach: on a
+        # multi-homed Kali (typical lab setup — eth0 on an isolated
+        # attacker net, eth1 on the routed target subnet), the
+        # default route's IP is not the one the target can dial back
+        # to.  `lhost_for_target` uses `ip route get` to ask the
+        # kernel which source address it would use for this target,
+        # then falls back to the ranked global lhost when no session
+        # target is set.
+        target = ""
+        try:
+            target = self._get_target() or ""
+        except Exception:
+            target = ""
+        kali_ip = (lhost_for_target(target) if target
+                   else lhost_detect()) or "<KALI_IP>"
 
         win = _make_win(self, "CHISEL Server — Reverse tunnel listener",
                         620, 560)
