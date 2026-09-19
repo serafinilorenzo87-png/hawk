@@ -2031,12 +2031,32 @@ class CardADRoutesMixin:
         _title(win, "RDP CONNECT — xfreerdp3")
         _sub(win, f"Target: {target}  (port 3389)", COLORS["text_dim"])
 
+        # ── Bottom action row (packed FIRST at side=bottom so the
+        # scrollable body below claims the remaining space and never
+        # covers the CONNECT/CANCEL buttons on a short screen). ─────
+        bottom_row = ctk.CTkFrame(win, fg_color="transparent")
+        bottom_row.pack(side="bottom", pady=10)
+
+        # ── Scrollable body — the dialog is content-heavy (notes,
+        # 4 credential fields, target-aware hints, command preview,
+        # enable-RDP snippet) and needs to render on 720p laptops
+        # without cutting off the buttons.  Every widget below goes
+        # into `body`, not `win`, so the mouse wheel scrolls the
+        # dialog on any screen. ───────────────────────────────────
+        body = ctk.CTkScrollableFrame(
+            win, fg_color="transparent",
+            border_width=0, corner_radius=0)
+        body.pack(fill="both", expand=True, padx=0, pady=0)
+
         _note_box(
-            win,
+            body,
             "⚠  PREREQUISITES\n"
             "• RDP must be enabled on the target (port 3389 open,\n"
-            "  fDenyTSConnections = 0 in the registry).\n"
-            "  Use the 'RDP Enable (via shell)' card first if needed.\n"
+            "  fDenyTSConnections = 0 in the registry).  If it is\n"
+            "  not, use the 'Target RDP disabled?' section at the\n"
+            "  bottom of this dialog to grab the enable command\n"
+            "  and paste it into a shell you already own on the\n"
+            "  target.\n"
             "• You need valid credentials: local admin or domain user\n"
             "  with 'Allow log on through Remote Desktop Services' right.\n"
             "  A normal unprivileged domain user may be denied unless\n"
@@ -2046,7 +2066,7 @@ class CardADRoutesMixin:
             COLORS["text_yellow"])
 
         def _row(label, var, show="", hint=""):
-            f = ctk.CTkFrame(win, fg_color="transparent")
+            f = ctk.CTkFrame(body, fg_color="transparent")
             f.pack(fill="x", padx=24, pady=(4, 0))
             ctk.CTkLabel(f, text=label, width=110, anchor="w",
                          font=_f("sm", True),
@@ -2060,7 +2080,7 @@ class CardADRoutesMixin:
             e.pack(side="left", fill="x", expand=True)
             add_context_menu(e)
             if hint:
-                ctk.CTkLabel(win, text=hint, font=_f("xs"),
+                ctk.CTkLabel(body, text=hint, font=_f("xs"),
                              text_color=COLORS["text_dim"],
                              anchor="w").pack(fill="x", padx=24)
             return e
@@ -2123,9 +2143,29 @@ class CardADRoutesMixin:
                         "/sec:rdp.")
         except Exception:
             pass
+        # FreeRDP diagnostic noise, unrelated to real auth trouble:
+        # always applies (libkrb5's behaviour is baked into the
+        # binary, independent of the target), so it lives OUTSIDE
+        # the fingerprint branch — otherwise operators on a fresh
+        # session with no scan would never see the "ignore the
+        # Kerberos line" hint and would chase the red herring.
+        _tgt_tips.append(
+            "FreeRDP xterm noise you can ignore — before the NLA "
+            "fallback FreeRDP always tries Kerberos first and "
+            "prints a KDC error.  With /d:<domain> it complains "
+            "'Cannot find KDC for realm <DOMAIN>' (the DNS SRV "
+            "record for _kerberos._tcp.<domain> is missing on "
+            "Kali); without /d: it falls through to libkrb5's "
+            "baked-in default realm 'ATHENA.MIT.EDU'.  Neither "
+            "matters — HAWK never contacts MIT, Kerberos is "
+            "expected to fail in a lab without a resolvable KDC, "
+            "and FreeRDP retries with NTLM/CredSSP automatically. "
+            "Look for the LOGON_FAILED / CredSSP / TLS lines "
+            "that come AFTER the Kerberos error to know the "
+            "real outcome.")
         if _tgt_tips:
             _note_box(
-                win,
+                body,
                 "TARGET-AWARE HINTS (from session fingerprint):\n\n"
                 + "\n\n".join(f"• {t}" for t in _tgt_tips),
                 COLORS["border_amber"])
@@ -2161,7 +2201,7 @@ class CardADRoutesMixin:
         # ── Live command preview ─────────────────────────────────────
         preview_var = ctk.StringVar(value="")
         _prev_box = ctk.CTkFrame(
-            win, fg_color=COLORS["bg_card"],
+            body, fg_color=COLORS["bg_card"],
             border_color=COLORS["border_green"],
             border_width=1, corner_radius=3)
         _prev_box.pack(fill="x", padx=24, pady=(8, 0))
@@ -2295,7 +2335,7 @@ class CardADRoutesMixin:
                         f"finding manually (HIGH — interactive shell "
                         f"with GUI) and note the account context "
                         f"seen inside the session."),
-                    severity="info",
+                    severity="low",
                     source="RDP-CONNECT",
                     linked_run_id=new_run_id(),
                     replace=True)
@@ -2317,9 +2357,81 @@ class CardADRoutesMixin:
             except Exception:
                 pass
 
-        row = _btn_row(win)
-        _btn(row, "CONNECT", _run, primary=True, w=120)
-        _btn(row, "CANCEL", lambda: _safe_destroy(win))
+        # ── ENABLE-RDP section (assimilates the old rdp_enable card) ──
+        # RDP disabled on the target is the #1 reason CONNECT hangs
+        # on ERRCONNECT_CONNECT_FAILED.  Instead of a separate card
+        # that just shows a copy-paste command in isolation, the same
+        # snippet lives here — where the operator actually needs it,
+        # one dialog away from the CONNECT they just failed.
+        _enable_cmd = (
+            'reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\'
+            'Terminal Server" /v fDenyTSConnections /t REG_DWORD '
+            '/d 0 /f & '
+            'netsh advfirewall firewall set rule '
+            'group="remote desktop" new enable=Yes')
+
+        _en_frame = ctk.CTkFrame(
+            body, fg_color=COLORS["bg_card"],
+            border_color=COLORS["border_dim"],
+            border_width=1, corner_radius=4)
+        _en_frame.pack(fill="x", padx=24, pady=(10, 4))
+        ctk.CTkLabel(
+            _en_frame,
+            text="  Target RDP disabled?  Enable it on the target:",
+            font=_f("sm", True),
+            text_color=COLORS["text_bright"],
+            anchor="w").pack(fill="x", padx=10, pady=(8, 2))
+        ctk.CTkLabel(
+            _en_frame,
+            text=("  Paste in a shell you already own on the "
+                  "target (evil-winrm, wmiexec, psexec, atexec).  "
+                  "Requires admin — reg needs write on Terminal "
+                  "Server key, netsh needs firewall context."),
+            font=_f("xs"), text_color=COLORS["text_dim"],
+            anchor="w", justify="left",
+            wraplength=520).pack(fill="x", padx=10, pady=(0, 4))
+
+        _en_box = ctk.CTkTextbox(
+            _en_frame, height=54, font=("Courier New", 11),
+            fg_color=COLORS["bg_secondary"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_dim"], border_width=1,
+            corner_radius=3, wrap="word")
+        _en_box.pack(fill="x", padx=10, pady=(0, 6))
+        _en_box.insert("1.0", _enable_cmd)
+        _en_box.configure(state="disabled")
+
+        def _copy_enable():
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(_enable_cmd)
+                win.update()
+                _en_copy.configure(text="✓  COPIED")
+                def _reset():
+                    if _en_copy.winfo_exists():
+                        _en_copy.configure(
+                            text="📋  COPY ENABLE-RDP CMD")
+                win.after(1500, _reset)
+            except Exception:
+                pass
+            self.app.terminal.write(
+                "  [+] Enable-RDP command copied — paste in a "
+                "shell on the target (admin required).", "success")
+
+        _en_copy = ctk.CTkButton(
+            _en_frame, text="📋  COPY ENABLE-RDP CMD",
+            width=220, height=30, font=_f("sm", True),
+            fg_color=COLORS["bg_card"],
+            hover_color=COLORS["bg_card_hover"],
+            border_color=COLORS["text_cyan"], border_width=1,
+            text_color=COLORS["text_cyan"], corner_radius=3,
+            command=_copy_enable)
+        _en_copy.pack(anchor="w", padx=10, pady=(0, 10))
+
+        # bottom_row was reserved at the top of the dialog so the
+        # scrollable body never covers CONNECT/CANCEL.
+        _btn(bottom_row, "CONNECT", _run, primary=True, w=120)
+        _btn(bottom_row, "CANCEL", lambda: _safe_destroy(win))
 
     def _route_netsh_portfwd(self, tool):
         """Guided dialog for Netsh Port Forward.

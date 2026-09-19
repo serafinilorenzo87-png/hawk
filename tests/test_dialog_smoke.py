@@ -261,9 +261,14 @@ class TargetCommandDialogTests(_TkTestCase):
         return card
 
     def test_show_target_command_dialog(self):
+        # rdp_enable used to be the smoke-test subject here — it got
+        # absorbed into the RDP Connect dialog and removed from the
+        # registry, so the generic runs_on_target copy-to-shell
+        # dialog is now exercised through a different real tool
+        # (suid_finder, Post-Exploit, runs_on_target=True).
         from gui.widgets.card_routes_access import CardAccessRoutesMixin
         card = self._card(CardAccessRoutesMixin)
-        card._show_target_command_dialog(_a_tool("rdp_enable"))
+        card._show_target_command_dialog(_a_tool("suid_finder"))
         self.root.update_idletasks()
 
     def test_route_netsh_portfwd(self):

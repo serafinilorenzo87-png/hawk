@@ -238,20 +238,13 @@ class LateralModule(BaseModule):
             category="shell",
             os_hint="windows",
         ),
-        Tool(
-            id="rdp_enable",
-            name="RDP Enable (via shell)",
-            desc="Enable RDP on target from existing shell — run this ON the target",
-            cmd_template=(
-                'reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server" '
-                '/v fDenyTSConnections /t REG_DWORD /d 0 /f & '
-                'netsh advfirewall firewall set rule group="Remote Desktop" new enable=Yes'
-            ),
-            binary="reg",
-            category="shell",
-            os_hint="windows",
-            runs_on_target=True,
-        ),
+        # rdp_enable used to live here as a stand-alone card that
+        # just showed a copy-paste command; it was one dialog and
+        # one click removed from where the operator actually needs
+        # it (a failed RDP CONNECT).  The same reg + firewall
+        # snippet is now embedded in the RDP Connect dialog itself
+        # as a "Target RDP disabled?" section — see
+        # gui/widgets/card_ad_routes.py :: _route_rdp_connect.
         Tool(
             id="chisel_win_download",
             name="Chisel (Windows, download)",
