@@ -306,8 +306,9 @@ def _recommend_winpeas_exe_variant(fp, auto_findings) -> tuple[
     if fp is not None:
         os_raw   = (getattr(fp, "os_raw", "")   or "").lower()
         version  = (getattr(fp, "version", "")  or "").lower()
-        # arch hint can live in platform, os_raw, or any_arch_hint
+        # arch hint can live in fp.arch, platform, os_raw, or banners
         arch_hint = (
+            (getattr(fp, "arch", "")     or "") + " " +
             (getattr(fp, "platform", "") or "") + " " +
             (getattr(fp, "os_raw", "")   or "")
         ).lower()
@@ -434,6 +435,7 @@ def show_winpeas_exe_preflight_dialog(parent, app,
     # based on.
     fp_os   = (getattr(fp, "os_raw", "") if fp else "") or "<unknown>"
     fp_ver  = (getattr(fp, "version", "") if fp else "") or "—"
+    fp_arch = (getattr(fp, "arch", "")    if fp else "") or "<unknown>"
     av_seen = False
     try:
         for f in auto_findings:
@@ -466,6 +468,7 @@ def show_winpeas_exe_preflight_dialog(parent, app,
         win,
         f"Target fingerprint  :  {fp_os}\n"
         f"NT version          :  {fp_ver}\n"
+        f"Architecture        :  {fp_arch}\n"
         f"AV / EDR detected   :  "
         f"{'YES (from Target Intel findings)' if av_seen else 'No signal yet'}\n"
         f"\n"

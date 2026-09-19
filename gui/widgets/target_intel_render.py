@@ -1716,7 +1716,7 @@ class TargetIntelRenderMixin:
             # that weren't set before, so a later generic scan can't
             # clobber a precise earlier one.
             for attr in ("domain", "computer_name", "fqdn", "smb_signing",
-                         "ntlm_product_version", "os_raw"):
+                         "ntlm_product_version", "os_raw", "arch"):
                 if (not getattr(self._fp, attr, "") and
                         getattr(new_fp, attr, "")):
                     setattr(self._fp, attr, getattr(new_fp, attr))
