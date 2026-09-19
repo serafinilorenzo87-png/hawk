@@ -40,7 +40,8 @@ def show_windows_privesc_context_dialog(parent, app, on_tool_selected):
     `on_tool_selected(tool_id)` is called when the user picks a tool —
     the caller then opens the matching workflow.
 
-    tool_id is one of: "winpeas_bat", "winpeas_exe", "privesc_check", "manual"
+    tool_id is one of: "winpeas_bat", "winpeas_exe", "privesc_check",
+    "powerup", "manual"
     """
     # Dialog default bumped from 1000×700 → 1200×720.  The 1000×700
     # version looked wide enough at design time, but the AV/EDR/
@@ -131,6 +132,26 @@ def show_windows_privesc_context_dialog(parent, app, on_tool_selected):
                 "scheduled tasks, credentials, DLL hijacking. Generates a clean HTML + "
                 "CSV report. Requires AMSI bypass (included in the execution command). "
                 "Best choice when Windows Defender or an EDR is active."
+            ),
+        },
+        {
+            "id":       "powerup",
+            "name":     "PowerUp.ps1",
+            "icon":     "🔧",
+            "ctx":      ["lab", "av_base"],
+            "duration": "1-3 min",
+            "size":     "console output (no report)",
+            "av":       "🟡 Low — PowerShell script, dot-sourced from disk",
+            "edr":      "🔴 High — well-known PowerSploit signatures / AMSI",
+            "coverage": "🟢 Focused — service & registry privesc checks",
+            "desc":     (
+                "PowerSploit's PowerUp — the classic service-misconfig hunter. "
+                "Invoke-AllChecks looks for unquoted service paths, modifiable "
+                "service binaries/configs, AlwaysInstallElevated, weak scheduled-"
+                "task permissions and token privileges, and prints a ready-to-run "
+                "abuse function for each hit. Output is short and self-explanatory "
+                "(no parser needed). Older than PrivescCheck and heavily signatured "
+                "— prefer PrivescCheck when Defender / an EDR is active."
             ),
         },
         {

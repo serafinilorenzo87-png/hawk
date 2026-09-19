@@ -771,6 +771,11 @@ class CardAccessRoutesMixin:
                     "winpeas_bat":   "winpeas",
                     "winpeas_exe":   "winpeas_exe",
                     "privesc_check": "privesc_check",
+                    # PowerUp is funnel-only too (hidden card): the picker
+                    # resolves it here, then _request_run downloads it and
+                    # opens the shared PEAS Workflow guide, exactly as the
+                    # old standalone PowerUp card did.
+                    "powerup":       "powerup_download",
                 }
                 actual_id = tool_map.get(tool_id, tool.id)
                 actual_tool = self.module.get_tool(actual_id)
