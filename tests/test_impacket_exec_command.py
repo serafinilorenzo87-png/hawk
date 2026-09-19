@@ -25,10 +25,43 @@ which imports the dialog module and pokes the closure directly.
 
 import os
 import sys
+import types
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
+
+
+# ── headless customtkinter stub (before any gui.* import) ─────────
+class _DummyCtk:
+    def __init__(self, *a, **k):
+        pass
+
+    def __getattr__(self, _n):
+        return _DummyCtk
+
+    def __call__(self, *a, **k):
+        return _DummyCtk()
+
+
+def _install_customtkinter_stub():
+    module = types.ModuleType("customtkinter")
+    for name in (
+        "CTkFrame", "CTkFont", "CTkButton", "CTkLabel", "CTkEntry",
+        "CTkTextbox", "CTkToplevel", "CTkScrollableFrame",
+        "CTkOptionMenu", "CTkCheckBox", "CTkRadioButton",
+        "CTkProgressBar", "CTkTabview", "CTkSwitch",
+        "StringVar", "BooleanVar", "IntVar",
+    ):
+        setattr(module, name, _DummyCtk)
+    sys.modules["customtkinter"] = module
+
+
+try:
+    import customtkinter  # noqa: F401
+except ModuleNotFoundError:
+    _install_customtkinter_stub()
+# ──────────────────────────────────────────────────────────────────
 
 from modules.exploitation import ExploitationModule   # noqa: E402
 from modules.lateral import LateralModule            # noqa: E402
@@ -284,31 +317,6 @@ class CommandShapeContractTests(unittest.TestCase):
             cmd,
             "evil-winrm -i 10.0.0.1 -u Administrator "
             "-H " + "0123abcd" * 4)
-
-
-class _DummyCtk:
-    def __init__(self, *a, **k):
-        pass
-
-    def __getattr__(self, _n):
-        return _DummyCtk
-
-    def __call__(self, *a, **k):
-        return _DummyCtk()
-
-
-def _install_customtkinter_stub():
-    import types as _t
-    module = _t.ModuleType("customtkinter")
-    for name in (
-        "CTkFrame", "CTkFont", "CTkButton", "CTkLabel", "CTkEntry",
-        "CTkTextbox", "CTkToplevel", "CTkScrollableFrame",
-        "CTkOptionMenu", "CTkCheckBox", "CTkRadioButton",
-        "CTkProgressBar", "CTkTabview", "CTkSwitch",
-        "StringVar", "BooleanVar", "IntVar",
-    ):
-        setattr(module, name, _DummyCtk)
-    sys.modules["customtkinter"] = module
 
 
 class _Terminal:
