@@ -123,5 +123,120 @@ class WindowsSnippetQuotingTests(unittest.TestCase):
             post_rce_recon_win.generate_snippet().count('"'), 2)
 
 
+# ═══════════════════════════════════════════════════════════════════
+#  W-08 — the snippet must stay PowerShell-2.0-compatible (2008 R2)
+# ═══════════════════════════════════════════════════════════════════
+
+class Ps2CompatibleCmdletTests(unittest.TestCase):
+    """Server 2008 R2 ships Windows PowerShell 2.0, and it is exactly the
+    box where winPEASany.exe won't run — so the recon snippet is the only
+    enumeration that works there.  Get-CimInstance (PS 3.0+) and
+    Get-ScheduledTask (PS 3.0+ / Win8+ module) both error out on 2008 R2
+    and produced empty sections.  The snippet must use the PS 2.0 forms.
+    """
+
+    def setUp(self):
+        self.snippet = post_rce_recon_win.generate_snippet()
+
+    def test_service_enum_uses_get_wmiobject(self):
+        self.assertIn("Get-WmiObject Win32_Service", self.snippet)
+        self.assertNotIn("Get-CimInstance", self.snippet)
+
+    def test_scheduled_tasks_use_native_schtasks(self):
+        self.assertIn("schtasks /query", self.snippet)
+        self.assertNotIn("Get-ScheduledTask", self.snippet)
+
+    def test_av_enum_uses_get_wmiobject(self):
+        self.assertIn(
+            "Get-WmiObject -Namespace 'root\\SecurityCenter2'",
+            self.snippet)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  W-09 — _trim_to_markers must keep the FIRST real block
+# ═══════════════════════════════════════════════════════════════════
+
+# A genuine recon block: markers on their OWN lines, SeImpersonate enabled.
+_REAL_BLOCK = (
+    "___HAWK_BEGIN___\n"
+    "<<<SECTION:WHOAMI>>>\n"
+    "prova\\svc_sql\n"
+    "DC01\n"
+    "<<<END:WHOAMI>>>\n"
+    "<<<SECTION:PRIV_TOKENS>>>\n"
+    "SeImpersonatePrivilege        Impersonate a client after "
+    "authentication   Enabled\n"
+    "<<<END:PRIV_TOKENS>>>\n"
+    "___HAWK_END___\n"
+)
+
+# cmd.exe echoes the pasted command ABOVE the output: one line that
+# repeats every marker literally, mid-line, inside the Write-Host quotes.
+_CMD_ECHO_ABOVE = (
+    "PS C:\\> powershell -NoProfile -ExecutionPolicy Bypass -Command "
+    "\"Write-Host '___HAWK_BEGIN___'; Write-Host '<<<SECTION:WHOAMI>>>'; "
+    "whoami; Write-Host '<<<END:WHOAMI>>>'; "
+    "Write-Host '<<<SECTION:SCHED_TASKS>>>'; "
+    "schtasks /query; Write-Host '<<<END:SCHED_TASKS>>>'; "
+    "Write-Host '___HAWK_END___'\"\n"
+)
+
+# PowerShell 2.0 re-echoes the whole command in an error BELOW the real
+# output when a cmdlet is missing — the decoy that the old rfind grabbed,
+# dropping SeImpersonate and fabricating a SYSTEM-scheduled-task finding.
+_PS2_ERROR_ECHO_BELOW = (
+    "The term 'Get-ScheduledTask' is not recognized as the name of a "
+    "cmdlet, function, script file, or operable program.\n"
+    "At line:1 char:1\n"
+    "+ Write-Host '___HAWK_BEGIN___'; Write-Host '<<<SECTION:SCHED_TASKS>>>'; "
+    "Write-Host 'Run As User: SYSTEM'; Write-Host '<<<END:SCHED_TASKS>>>'; "
+    "Write-Host '___HAWK_END___'\n"
+)
+
+
+class TrimToFirstRealBlockTests(unittest.TestCase):
+    def _titles(self, out):
+        return [f["title"] for f in out["findings"]]
+
+    def test_command_echo_above_is_skipped(self):
+        out = post_rce_recon_win.analyze_output(
+            _CMD_ECHO_ABOVE + _REAL_BLOCK)
+        # WHOAMI came from the REAL block, not the echoed command line.
+        self.assertEqual(out["user"], "prova\\svc_sql")
+        self.assertTrue(
+            any("SeImpersonatePrivilege" in t for t in self._titles(out)),
+            self._titles(out))
+
+    def test_ps2_error_echo_below_is_skipped(self):
+        out = post_rce_recon_win.analyze_output(
+            _REAL_BLOCK + _PS2_ERROR_ECHO_BELOW)
+        # SeImpersonate is NOT dropped …
+        self.assertTrue(
+            any("SeImpersonatePrivilege" in t for t in self._titles(out)),
+            self._titles(out))
+        # … and the "Run As User: SYSTEM" inside the error echo does NOT
+        # fabricate a SYSTEM-scheduled-task finding (there was no real
+        # SCHED_TASKS section in the genuine block).
+        self.assertFalse(
+            any("scheduled task" in t.lower() for t in self._titles(out)),
+            self._titles(out))
+
+    def test_both_decoys_at_once(self):
+        out = post_rce_recon_win.analyze_output(
+            _CMD_ECHO_ABOVE + _REAL_BLOCK + _PS2_ERROR_ECHO_BELOW)
+        self.assertEqual(out["user"], "prova\\svc_sql")
+        self.assertTrue(
+            any("SeImpersonatePrivilege" in t for t in self._titles(out)))
+
+    def test_command_echo_alone_is_flagged_not_parsed(self):
+        # Only the echoed command, no real block: this is not snippet
+        # output and must warn instead of reporting a clean empty parse.
+        out = post_rce_recon_win.analyze_output(_CMD_ECHO_ABOVE)
+        self.assertTrue(out["parse_warnings"])
+        self.assertFalse(
+            any("SeImpersonatePrivilege" in f["title"]
+                for f in out["findings"]))
+
+
 if __name__ == "__main__":
     unittest.main()
