@@ -59,6 +59,19 @@ class _Store:
     def add_credential(self, cred):
         self.added.append(cred)
 
+    def batch(self):
+        """No-op batch() so the parser's
+        `with self.app.cred_store.batch():` wrapper works with the
+        fake store — the real widget defers per-cred save+refresh
+        inside batch(), but this fake has neither, so a plain
+        pass-through context manager is enough."""
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _cm():
+            yield
+        return _cm()
+
 
 # e02bc503… shared by Administrator + vagrant; 64f12cdd… shared by the two
 # svc accounts; krbtgt unique; Guest is the empty-password NT hash.
@@ -102,7 +115,7 @@ def _run(log):
 
     tool = types.SimpleNamespace(
         name="SECRETSDUMP (DCSync)", binary="impacket-secretsdump",
-        id="secretsdump_dcsync")
+        id="impacket_secretsdump")
     Host()._parse_secretsdump_to_intel(
         tool, [("out", ln) for ln in log])
     return findings, store

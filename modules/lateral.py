@@ -199,37 +199,33 @@ class LateralModule(BaseModule):
             os_hint="windows",
         ),
         Tool(
-            id="impacket_wmiexec",
-            name="WMIEXEC",
-            desc=("Remote command execution via Windows Management Instrumentation "
-                  "(WMI) — no service install, leaves a smaller footprint than "
-                  "psexec.  Connects on port 135 (RPC) + dynamic high ports, "
-                  "authenticates via NTLM, spawns a process via Win32_Process.Create() "
-                  "and reads output through ADMIN$ (SMB).  "
-                  "⚠ REQUIRES LOCAL ADMIN: WMI remote access and ADMIN$ share are "
-                  "restricted to local administrators by default.  Authenticating as "
-                  "a normal domain user will produce ACCESS_DENIED or total silence — "
-                  "you MUST use Administrator or a local admin account (cleartext "
-                  "password or NTLM hash)."),
-            cmd_template="impacket-wmiexec {user}:{password}@{target}",
-            binary="impacket-wmiexec",
-            category="shell",
-            os_hint="windows",
-        ),
-        Tool(
-            id="impacket_atexec",
-            name="ATEXEC",
-            desc=("Single-command remote execution via the Windows Task Scheduler "
-                  "service (port 445 / SMB + ITaskSchedulerService RPC).  Creates a "
-                  "scheduled task, runs the command immediately, captures the output "
-                  "and deletes the task.  Useful when psexec/wmiexec are blocked by "
-                  "endpoint controls but the scheduler service is still reachable.  "
-                  "⚠ REQUIRES LOCAL ADMIN: the Task Scheduler RPC interface requires "
-                  "administrator privileges on the target to register tasks remotely.  "
-                  "A normal domain user will get ACCESS_DENIED with no further output — "
-                  "use Administrator or a local admin (cleartext or NTLM hash)."),
-            cmd_template='impacket-atexec {user}:{password}@{target} "{extra}"',
-            binary="impacket-atexec",
+            id="impacket_exec",
+            name="IMPACKET EXEC",
+            desc=("Consolidated impacket-exec suite — one card, one auth "
+                  "dialog, five execution methods selected at run time:\n\n"
+                  "  psexec    SMB service install → SYSTEM shell.  "
+                  "Noisiest (Event 7045, RemComSvc binary on disk).\n"
+                  "  smbexec   SMB service + named-pipe shovel → SYSTEM.  "
+                  "No binary drop, semi-interactive.\n"
+                  "  wmiexec   WMI Win32_Process.Create → runs as the "
+                  "authenticated user (NOT SYSTEM).  Small footprint.\n"
+                  "  atexec    Task Scheduler single-shot → SYSTEM, "
+                  "requires the command up-front (no shell).\n"
+                  "  dcomexec  DCOM COM-object spawn (MMC20 / "
+                  "ShellWindows / ShellBrowserWindow) → runs as the "
+                  "authenticated user.\n\n"
+                  "⚠ ALL METHODS REQUIRE LOCAL ADMIN on the target — "
+                  "plain domain users get ACCESS_DENIED with no further "
+                  "output.  Pass-the-hash (-hashes :NTHASH) works when "
+                  "the NTLM hash is known from secretsdump / DCSync.  "
+                  "The HAWK dialog surfaces method-specific extras "
+                  "(atexec Command + -silentcommand ; wmiexec -nooutput ; "
+                  "dcomexec -object) as chips / checkbox / dropdown."),
+            # Informational template only — the real command is built at
+            # runtime by _build_impacket_cmd() from the METHOD dropdown
+            # + auth fields + method-specific extras.
+            cmd_template="impacket-<method> {user}:{password}@{target}",
+            binary="impacket-psexec",
             category="shell",
             os_hint="windows",
         ),
@@ -242,20 +238,13 @@ class LateralModule(BaseModule):
             category="shell",
             os_hint="windows",
         ),
-        Tool(
-            id="rdp_enable",
-            name="RDP Enable (via shell)",
-            desc="Enable RDP on target from existing shell — run this ON the target",
-            cmd_template=(
-                'reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server" '
-                '/v fDenyTSConnections /t REG_DWORD /d 0 /f & '
-                'netsh advfirewall firewall set rule group="Remote Desktop" new enable=Yes'
-            ),
-            binary="reg",
-            category="shell",
-            os_hint="windows",
-            runs_on_target=True,
-        ),
+        # rdp_enable used to live here as a stand-alone card that
+        # just showed a copy-paste command; it was one dialog and
+        # one click removed from where the operator actually needs
+        # it (a failed RDP CONNECT).  The same reg + firewall
+        # snippet is now embedded in the RDP Connect dialog itself
+        # as a "Target RDP disabled?" section — see
+        # gui/widgets/card_ad_routes.py :: _route_rdp_connect.
         Tool(
             id="chisel_win_download",
             name="Chisel (Windows, download)",
@@ -264,12 +253,26 @@ class LateralModule(BaseModule):
                   "Chisel release filenames include the version number so the URL "
                   "is resolved dynamically via the GitHub API."),
             cmd_template=(
-                "VER=$(curl -s https://api.github.com/repos/jpillora/chisel/"
-                "releases/latest | grep -o '\"tag_name\":\"[^\"]*\"' | grep -o 'v[^\"]*') "
-                "&& curl -L \"https://github.com/jpillora/chisel/releases/download/"
-                "${VER}/chisel_${VER#v}_windows_amd64.gz\" "
-                "-o {payloads}/chisel.gz && gunzip -f {payloads}/chisel.gz "
-                "&& mv {payloads}/chisel {payloads}/chisel.exe"
+                # Two API/asset changes to work around:
+                #   1) GitHub now returns pretty-printed JSON with a
+                #      space after `:` (e.g. `"tag_name": "v1.12.0"`);
+                #      the old `"tag_name":"..."` (no space) pattern
+                #      silently produced VER="" and the curl below
+                #      tried to fetch `chisel__windows_amd64.gz`,
+                #      exiting rc=1.  Same robust `[[:space:]]*`
+                #      pattern the ligolo_download tool already uses.
+                #   2) Since v1.12.0 the Windows assets are packaged
+                #      as `.zip` (containing `chisel.exe` directly)
+                #      instead of `.gz`; the previous URL yields 404.
+                "VER=$(curl -fsSL https://api.github.com/repos/"
+                "jpillora/chisel/releases/latest | "
+                "grep -oE '\"tag_name\"[[:space:]]*:[[:space:]]*"
+                "\"v[^\"]+\"' | head -1 | grep -oE 'v[0-9][^\"]*') "
+                "&& curl -fsSL -L \"https://github.com/jpillora/chisel/"
+                "releases/download/${VER}/chisel_${VER#v}_windows_amd64.zip\" "
+                "-o {payloads}/chisel.zip "
+                "&& unzip -o {payloads}/chisel.zip -d {payloads}/ "
+                "&& rm -f {payloads}/chisel.zip"
             ),
             binary="curl",
             category="tunnel",

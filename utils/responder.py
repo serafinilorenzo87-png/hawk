@@ -161,7 +161,7 @@ class ResponderWatcher:
             except Exception as e:
                 # Non-fatal: another loop iteration might succeed
                 # (file locks, transient read errors).
-                print(f"[HAWK] responder watcher poll: {e}")
+                self._warn(f"  [!] responder watcher poll: {e}")
 
     def _poll_session_log(self):
         """Read any new bytes at the end of Responder-Session.log and
@@ -281,6 +281,21 @@ class ResponderWatcher:
                 self.counters["NTLMv2"] += 1
                 self._emit_hash(entry)
 
+    def _warn(self, msg: str):
+        """Write a warning to the HAWK terminal, marshalled onto the
+        Tk main thread (safe to call from the poll thread)."""
+        try:
+            t = getattr(self.app, "terminal", None)
+            if t is None:
+                return
+            dispatch = getattr(self.app, "ui_call", None)
+            if dispatch:
+                dispatch(t.write, msg, "warn")
+            else:
+                t.write(msg, "warn")
+        except Exception:
+            pass
+
     # ── callback marshalling onto the Tk main thread ──────────────────
     def _emit_update(self):
         if not self.on_update:
@@ -301,7 +316,7 @@ class ResponderWatcher:
             else:
                 self.on_update(counters, unique_names, victims)
         except Exception as e:
-            print(f"[HAWK] responder watcher on_update: {e}")
+            self._warn(f"  [!] responder watcher on_update: {e}")
 
     def _emit_hash(self, entry):
         if not self.on_hash:
@@ -313,7 +328,7 @@ class ResponderWatcher:
             else:
                 self.on_hash(entry)
         except Exception as e:
-            print(f"[HAWK] responder watcher on_hash: {e}")
+            self._warn(f"  [!] responder watcher on_hash: {e}")
 
 
 # ── Control helpers ─────────────────────────────────────────────────

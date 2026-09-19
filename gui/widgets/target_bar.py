@@ -2995,8 +2995,20 @@ class TargetBar(ctk.CTkFrame):
         # Repoint the Credential Store at the loaded session.  Without
         # this the rows still belong to the previous session AND still
         # carry its list indices, so EDIT/DELETE address the wrong
-        # entry in the newly current session.
+        # entry in the newly current session.  Also clear the "new"
+        # cyan-highlight set: those identities belonged to the OLD
+        # session's tool runs, not the reloaded one, and would paint
+        # unrelated rows cyan in the freshly loaded session.
         try:
+            try:
+                self.app.cred_store._new_cred_keys = set()
+                # Drop the fingerprint cache too — the loaded session
+                # is likely a different credential set entirely, so we
+                # want a real re-render rather than the "same fp,
+                # skip" short-circuit.
+                self.app.cred_store._last_fingerprint = None
+            except Exception:
+                pass
             self.app.cred_store.refresh()
         except Exception as e:
             print(f"[HAWK] cred store refresh failed: {e}")

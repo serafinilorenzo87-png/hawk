@@ -339,10 +339,10 @@ class CardScanRoutesMixin:
             return
 
         # Impacket GetNPUsers — needs a users wordlist + domain.
-        # Two ID spellings in use: "impacket_getnpusers" (classic
-        # Enumeration phase) and "getnpusers" (AD PENTESTING phase
-        # module).  Both route through the same dedicated dialog.
-        if tool.id in ("impacket_getnpusers", "getnpusers"):
+        # Homed in AD PENTESTING as "getnpusers" alongside the other
+        # roasting tools; the old duplicate Exploitation-phase card
+        # (id "impacket_getnpusers") was removed for tool coherence.
+        if tool.id == "getnpusers":
             self._route_getnpusers(tool)
             return
 
@@ -361,17 +361,22 @@ class CardScanRoutesMixin:
         # template `impacket-psexec administrator@{target}` hangs
         # forever waiting for a password that nobody's typing.
         _IMPACKET_AUTH_IDS = {
-            "impacket_psexec",
-            "impacket_secretsdump",
-            "impacket_wmiexec",
-            "impacket_atexec",
-            "impacket_dcomexec",
+            # Consolidated exec card — picks psexec/smbexec/wmiexec/
+            # atexec/dcomexec at runtime via a METHOD dropdown in the
+            # shared impacket auth dialog.
+            "impacket_exec",
+            # NOTE: impacket_secretsdump used to route here as the
+            # Exploitation-phase Target-dump card.  It's now
+            # consolidated with the AD PENTESTING DCSync card into a
+            # single tool with a MODE dropdown, routed via
+            # _AD_TEMPLATE_AUTH_IDS below.
             "impacket_smbclient",
             "impacket_mssqlclient",
             "impacket_lookupsid",
             "impacket_samrdump",
             "impacket_rpcdump",
             "impacket_goldenpac",
+            "evil_winrm",
         }
         if tool.id in _IMPACKET_AUTH_IDS:
             self._route_impacket_auth(tool)
@@ -394,7 +399,7 @@ class CardScanRoutesMixin:
             "getuserspns",
             "certipy_quick", "certipy_find", "certipy_req",
             "rbcd_attack", "findDelegation",
-            "secretsdump_dcsync",
+            "impacket_secretsdump",
             "addcomputer", "adidnsdump",
         }
         if tool.id in _AD_TEMPLATE_AUTH_IDS:

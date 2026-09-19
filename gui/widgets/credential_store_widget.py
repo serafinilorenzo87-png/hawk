@@ -227,8 +227,27 @@ class CredentialStoreWidget(ctk.CTkFrame):
         # this tab.  A fresh capture (e.g. a Responder NetNTLMv2 hash) lands
         # UNVERIFIED in AD RESULTS; the tab shows "(N new)" but the ROW was
         # not marked, so the operator could miss it (MSF3 B4.4).  Rows whose
-        # identity is in this set are highlighted; cleared on tab view.
+        # identity is in this set are highlighted until the session is
+        # reloaded — see refresh_from_session() which resets it.  Tab-
+        # switch alone no longer clears the set: the previous behaviour
+        # raced with fingerprint caching and the cyan borders could vanish
+        # between the render that put them there and the frame the
+        # operator actually saw.
         self._new_cred_keys: set = set()
+        # ── Batch push state ────────────────────────────────────────
+        # Parsers that push many credentials in a row (secretsdump can
+        # emit 15+ hash lines in one shot) used to trigger sess.save()
+        # + full re-render per credential — quadratic UI freeze that
+        # locked HAWK for tens of seconds on a big DCSync.  A parser
+        # can now wrap the loop in
+        #   with self.app.cred_store.batch():
+        #       for c in ... : self.app.cred_store.add_credential(c)
+        # and the save + refresh happen ONCE when the block exits.
+        # _batch_depth counts nested batches (only the outermost
+        # commit runs the finalise); _batch_dirty tracks whether any
+        # add_credential call actually mutated the store.
+        self._batch_depth = 0
+        self._batch_dirty = False
         # ── Active-crack registry ────────────────────────────────────
         # credential.id → {"runner": CrackRunner, "strategy": "FAST" |
         #        "RULE-BASED" | "HYBRID" | "TARGET" | "MASK" | "FULL STACK"}
@@ -249,6 +268,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
         # every core and starves the UI thread; serialising them keeps
         # HAWK clickable throughout long cracks.
         self._active_cracks: dict = {}
+        self._last_fingerprint = None
         self._build_ui()
 
     def set_tab_label(self, widget):
@@ -502,18 +522,20 @@ class CredentialStoreWidget(ctk.CTkFrame):
             if (c.host or "").lower() != h_new:
                 continue
             # Same identity — compare the secret value.
-            if cred.cred_type == "hash":
-                if c.cred_type != "hash":
+            if cred.cred_type == "hash" or cred.hash_val:
+                if c.cred_type != "hash" and not c.hash_val:
                     continue
                 # Kerberos roast hashes (AS-REP / TGS) embed a per-request
                 # nonce + timestamp, so re-roasting the SAME account yields
                 # a DIFFERENT hash every time.  Matching on the exact
                 # hash_val would stack a duplicate row on every re-run, so
                 # for these dedup on identity (user, host, hash_type) — it
-                # is the same roastable account, just a fresh ticket.  Every
+                # is the same roastable account, just a fresh ticket.
+                # NetNTLMv2 captures likewise differ per challenge.  Every
                 # other hash type (NTLM, DCC2, …) is stable → match value.
-                _ROAST = ("Kerberos AS-REP", "Kerberos TGS")
-                if cred.hash_type in _ROAST:
+                _CHALLENGE_HASH = ("Kerberos AS-REP", "Kerberos TGS",
+                                   "NetNTLMv2")
+                if cred.hash_type in _CHALLENGE_HASH:
                     if c.hash_type == cred.hash_type:
                         return idx
                 elif c.hash_val == cred.hash_val:
@@ -532,6 +554,49 @@ class CredentialStoreWidget(ctk.CTkFrame):
         without modification.
         """
         return self._find_duplicate_index(cred) >= 0
+
+    def batch(self):
+        """Context manager that defers per-credential sess.save() +
+        widget refresh until the block exits.
+
+        Parsers that push many credentials at once (secretsdump can
+        push 15+ hashes on a single DCSync) call this to avoid the
+        O(N) save + O(N) full re-render cycle that used to freeze
+        HAWK for tens of seconds on a big AD dump.  Usage:
+
+            with self.app.cred_store.batch():
+                for cred in creds:
+                    self.app.cred_store.add_credential(cred)
+
+        Nested batches are allowed — only the outermost commit runs
+        the finalise pass.  If no add_credential inside the block
+        actually mutated the store (all duplicates, no changes),
+        the block exits without save/refresh (unchanged behaviour
+        from the single-cred path).
+        """
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _cm():
+            self._batch_depth += 1
+            try:
+                yield
+            finally:
+                self._batch_depth -= 1
+                if self._batch_depth == 0 and self._batch_dirty:
+                    self._batch_dirty = False
+                    try:
+                        sess = self.app.session_manager.current
+                        if sess is not None:
+                            sess.save()
+                    except Exception:
+                        pass
+                    try:
+                        self.refresh()
+                        self._blink_start()
+                    except Exception:
+                        pass
+        return _cm()
 
     def add_credential(self, cred: Credential):
         if not self.app.session_manager.current:
@@ -630,8 +695,11 @@ class CredentialStoreWidget(ctk.CTkFrame):
                 return
 
             sess._touch()
-            sess.save()
-            self.refresh()
+            if self._batch_depth == 0:
+                sess.save()
+                self.refresh()
+            else:
+                self._batch_dirty = True
             # Terminal feedback.  Two variants:
             #   • New services landed → list them ("merged: [+TELNET]")
             #   • Only flags/notes changed → generic "updated"
@@ -642,23 +710,28 @@ class CredentialStoreWidget(ctk.CTkFrame):
                 msg = (f"  ↗  Credential updated: {cred.username}  "
                        f"({', '.join(old_svcs) or 'no svc'})")
             self.app.terminal.write(msg, "finding")
-            self._blink_start()
+            if self._batch_depth == 0:
+                self._blink_start()
             return
 
         # No existing match → brand-new entry.  Remember its identity so the
         # ROW is highlighted as new (not just the tab counter) until the
         # operator views the store (MSF3 B4.4).
         sess.add_credential(cred)
-        sess.save()
         self._new_cred_keys.add(cred_identity(cred))
-        self.refresh()
+        if self._batch_depth == 0:
+            sess.save()
+            self.refresh()
+        else:
+            self._batch_dirty = True
         _lbl = (cred.password or cred.hash_type
                 or ("SSH key" if (getattr(cred, "cred_type", "") or "").lower()
                     == "key" else "hash"))
         self.app.terminal.write(
             f"  ↗  Credential: {cred.username}  [{_lbl}]",
             "finding")
-        self._blink_start()
+        if self._batch_depth == 0:
+            self._blink_start()
 
     def mark_captured(self, cred):
         """Register a credential that was pushed straight onto the session
@@ -715,11 +788,17 @@ class CredentialStoreWidget(ctk.CTkFrame):
     def _blink_stop(self):
         self._blink_active = False
         self._new_findings = 0
-        # The operator is now looking at the store: the rows have been
-        # rendered (app switches the tab -> refresh() -> _blink_stop()), so
-        # clearing the new-set here means the highlight fades on the NEXT
-        # render instead of persisting forever.
-        self._new_cred_keys = set()
+        # NOTE: we intentionally do NOT clear self._new_cred_keys
+        # here any more.  The old behaviour raced with the
+        # _render_creds fingerprint cache: refresh() on tab-switch
+        # short-circuited when the fingerprint was unchanged, then
+        # _blink_stop cleared the keys — the next unrelated refresh
+        # (autosave, blink tick, ...) noticed the fingerprint change
+        # and re-rendered WITHOUT cyan, so the operator could switch
+        # to the tab and never see the highlight that had been
+        # rendered while they were on Target Intel.  Cyan now
+        # persists across tab switches until session reload
+        # (refresh_from_session resets the set).
         if self._tab_label and self._tab_label.winfo_exists():
             try:
                 self._tab_label.configure(
@@ -730,7 +809,39 @@ class CredentialStoreWidget(ctk.CTkFrame):
 
     # ─── Render ──────────────────────────────────────────────────────────────
 
+    def _creds_fingerprint(self, creds):
+        parts = []
+        for c in creds:
+            parts.append((
+                getattr(c, "id", ""),
+                getattr(c, "username", ""),
+                getattr(c, "password", ""),
+                getattr(c, "hash_val", ""),
+                getattr(c, "hash_type", ""),
+                getattr(c, "cred_type", ""),
+                getattr(c, "host", ""),
+                getattr(c, "cracked", False),
+                getattr(c, "cracked_pass", ""),
+                getattr(c, "verified", True),
+                tuple(getattr(c, "services", [])),
+                getattr(c, "source_phase", ""),
+                getattr(c, "category", ""),
+                getattr(c, "linked_run_id", ""),
+                getattr(c, "notes", ""),
+            ))
+        active = tuple(sorted(
+            (k, v.get("strategy", ""))
+            for k, v in self._active_cracks.items()
+        ))
+        new_keys = tuple(sorted(self._new_cred_keys or set()))
+        return (tuple(parts), active, new_keys)
+
     def _render_creds(self, creds):
+        fp = self._creds_fingerprint(creds)
+        if fp == self._last_fingerprint:
+            return
+        self._last_fingerprint = fp
+
         for w in self._scroll.winfo_children():
             w.destroy()
         if not creds:
@@ -1005,7 +1116,7 @@ class CredentialStoreWidget(ctk.CTkFrame):
             self._cred_row_by_runid.setdefault(rid, row)
 
         # Main info row
-        if cred.cred_type == "hash":
+        if cred.cred_type == "hash" or cred.hash_val:
             self._build_hash_row(row, cred, idx)
         else:
             self._build_cleartext_row(row, cred, idx)

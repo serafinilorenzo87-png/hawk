@@ -58,6 +58,7 @@ def _build_intel():
         # widget, not of the mixin under test.  Borrow them by
         # reference so the test breaks loudly if they move.
         _NSE_SCRIPT_HEADER_RE = TargetIntelWidget._NSE_SCRIPT_HEADER_RE
+        _NSE_SCRIPT_RESULT_RE = TargetIntelWidget._NSE_SCRIPT_RESULT_RE
         _NSE_META_TAGS = TargetIntelWidget._NSE_META_TAGS
         _NSE_ERROR_RE = TargetIntelWidget._NSE_ERROR_RE
         _PORT_LINE_RE = TargetIntelWidget._PORT_LINE_RE
@@ -418,6 +419,88 @@ class NotVulnerableVerdictTests(unittest.TestCase):
         intel.update_from_vuln_scripts(_NMAP_VULN_CCS_NEGATIVE.splitlines())
         self.assertIsNone(_find(intel, "CVE-2014-0224"), _titles(intel))
         self.assertIsNone(_find(intel, "ccs-injection"), _titles(intel))
+
+
+# ─── Sibling inline results must not bleed into the description ─────
+#
+# nmap prints one-line verdicts for scripts that ran but did not open a
+# VULNERABLE block — "|_smb-vuln-ms10-054: false",
+# "|_smb-vuln-ms10-061: NT_STATUS_ACCESS_DENIED" — and closes the host
+# script section with NSE post-scan noise.  The header regex is anchored
+# ":\s*$", so it never treated those inline results as a block boundary:
+# they were collected as description lines of the PRECEDING VULNERABLE
+# finding (real MS3-B capture: the ms17-010 finding's References carried
+# "smb-vuln-ms10-054: false" and "NSE: Script Post-scanning.").  Real
+# nmap shape below, exercised through the real flow.
+
+_NMAP_VULN_MS17_WITH_SIBLINGS = """\
+Nmap scan report for 192.168.176.177
+Host is up (0.00070s latency).
+PORT    STATE SERVICE
+445/tcp open  microsoft-ds
+Host script results:
+|_smb-vuln-ms10-061: NT_STATUS_ACCESS_DENIED
+| smb-vuln-ms17-010:
+|   VULNERABLE:
+|   Remote Code Execution vulnerability in Microsoft SMBv1 servers (ms17-010)
+|     State: VULNERABLE
+|     IDs:  CVE:CVE-2017-0143
+|     Risk factor: HIGH
+|       A critical remote code execution vulnerability exists in Microsoft SMBv1
+|        servers (ms17-010).
+|
+|     Disclosure date: 2017-03-14
+|     References:
+|       https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2017-0143
+|_      https://technet.microsoft.com/en-us/library/security/ms17-010.aspx
+|_smb-vuln-ms10-054: false
+NSE: Script Post-scanning.
+Initiating NSE at 17:27
+Completed NSE at 17:27, 0.00s elapsed
+"""
+
+
+class VulnDescriptionBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        self._old_ctk = sys.modules.get("customtkinter")
+        _install_customtkinter_stub()
+
+    def tearDown(self):
+        if self._old_ctk is None:
+            sys.modules.pop("customtkinter", None)
+        else:
+            sys.modules["customtkinter"] = self._old_ctk
+
+    def test_ms17_010_still_reported_critical(self):
+        intel = _build_intel()
+        intel.update_from_vuln_scripts(
+            _NMAP_VULN_MS17_WITH_SIBLINGS.splitlines())
+        f = _find(intel, "CVE-2017-0143")
+        self.assertIsNotNone(f, _titles(intel))
+        self.assertEqual(f["severity"], "critical")
+
+    def test_description_excludes_sibling_and_nse_noise(self):
+        intel = _build_intel()
+        intel.update_from_vuln_scripts(
+            _NMAP_VULN_MS17_WITH_SIBLINGS.splitlines())
+        f = _find(intel, "CVE-2017-0143")
+        self.assertIsNotNone(f, _titles(intel))
+        desc = f["description"]
+        # The sibling script's inline verdict and the NSE post-scan noise
+        # must not appear in the ms17-010 finding.
+        self.assertNotIn("smb-vuln-ms10-054", desc)
+        self.assertNotIn("Post-scanning", desc)
+        self.assertNotIn("Completed NSE", desc)
+
+    def test_inline_results_do_not_spawn_phantom_findings(self):
+        """The ms10-054/ms10-061 one-line verdicts are boundaries, not
+        vulns: exactly one finding (the ms17-010 critical) is produced."""
+        intel = _build_intel()
+        intel.update_from_vuln_scripts(
+            _NMAP_VULN_MS17_WITH_SIBLINGS.splitlines())
+        self.assertIsNone(_find(intel, "ms10-054"), _titles(intel))
+        self.assertIsNone(_find(intel, "ms10-061"), _titles(intel))
+        self.assertEqual(len(intel._auto_findings), 1, _titles(intel))
 
 
 if __name__ == "__main__":

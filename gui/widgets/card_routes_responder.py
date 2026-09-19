@@ -255,6 +255,26 @@ class CardResponderRoutesMixin:
             self.after(800, lambda:
                        self._start_responder_live_session(tool, cmd))
 
+            # ── Early-death check ─────────────────────────────────
+            # Responder runs in xterm so HAWK never sees its stderr.
+            # If it crashes on startup (wrong interface, port clash)
+            # the user only notices in the xterm behind the dialog.
+            # After 3s, verify the process is still alive and warn.
+            def _check_responder_alive():
+                import subprocess as _sp
+                try:
+                    r = _sp.run(
+                        ["pgrep", "-f", r"python.*[Rr]esponder\.py"],
+                        capture_output=True, text=True, timeout=3)
+                    if not r.stdout.strip():
+                        self.app.terminal.write(
+                            "  [!] Responder process not found — it may "
+                            "have crashed on startup. Check the xterm "
+                            "window for error details.", "error")
+                except Exception:
+                    pass
+            self.after(3000, _check_responder_alive)
+
         row = _btn_row(win)
         _btn(row, "RUN RESPONDER", _run, primary=True, w=160)
         if conflicts:
@@ -407,7 +427,7 @@ class CardResponderRoutesMixin:
                 password="",
                 hash_val=raw,
                 hash_type="NetNTLMv2",
-                cred_type="NetNTLMv2",
+                cred_type="hash",
                 services=svc,
                 source_phase=self.phase_id,
                 host=domain or "(responder capture)",
@@ -692,6 +712,7 @@ class CardResponderRoutesMixin:
             self._show_ntlmrelayx_launcher(tool, state)
 
         def _do_close_only():
+            self._push_responder_finding(state)
             state["dialog"] = None
             _safe_destroy(win)
             # Watcher keeps running — hashes still auto-push.  The
@@ -704,24 +725,19 @@ class CardResponderRoutesMixin:
              primary=True, w=220)
         _btn(row, "CLOSE (keep watching)", _do_close_only, w=200)
 
-    def _show_responder_post_stop_dialog(self, tool, state):
-        """Summary shown after the user stops Responder.
+    def _push_responder_finding(self, state):
+        """Push (or replace) the Responder Target Intel finding.
 
-        Totals, unique queried names, captured hashes with actionable
-        buttons, and a pushed Target Intel finding with the top names.
+        Safe to call multiple times — replace=True ensures exactly one
+        finding.  Called from STOP and CLOSE so the finding is never
+        lost regardless of how the session ends.
         """
-        from gui.dialogs import (_make_win, _title, _sub, _note_box,
-                                 _btn_row, _btn, _safe_destroy,
-                                 _selectable_text)
-
-        counters = state.get("counters") or {}
-        hashes = state.get("hashes") or []
-        unique_names = state.get("unique_names") or {}
-        victims = state.get("victims") or []
-        elapsed = int(time.time() - state.get("started_at", time.time()))
-
-        # Build + push a Target Intel finding summarising the run.
         try:
+            counters = state.get("counters") or {}
+            unique_names = state.get("unique_names") or {}
+            victims = state.get("victims") or []
+            elapsed = int(time.time() - state.get("started_at",
+                                                   time.time()))
             from utils.run_id import new_run_id
             desc_lines = [
                 f"Responder session — {elapsed}s",
@@ -751,11 +767,6 @@ class CardResponderRoutesMixin:
                    "medium" if (counters.get("LLMNR", 0)
                                 + counters.get("NBT-NS", 0) > 0)
                    else "info")
-            # Snapshot: drop any earlier Responder card first (incl. a stale
-            # one from a pre-fix HAWK whose title embedded {elapsed}s), then
-            # write the fresh one under a STABLE title with replace=True — so
-            # there is always exactly ONE Responder finding instead of a new
-            # card stacked on every STOP.  Counts/elapsed live in the body.
             self.app.target_intel.remove_auto_findings_by_source(
                 "Responder")
             self.app.target_intel.add_auto_finding(
@@ -764,7 +775,26 @@ class CardResponderRoutesMixin:
                 severity=sev, source="Responder",
                 linked_run_id=new_run_id(), replace=True)
         except Exception as e:
-            print(f"[HAWK] responder target intel push: {e}")
+            self.app.terminal.write(
+                f"  [!] Responder finding push failed: {e}", "warn")
+
+    def _show_responder_post_stop_dialog(self, tool, state):
+        """Summary shown after the user stops Responder.
+
+        Totals, unique queried names, captured hashes with actionable
+        buttons, and a pushed Target Intel finding with the top names.
+        """
+        from gui.dialogs import (_make_win, _title, _sub, _note_box,
+                                 _btn_row, _btn, _safe_destroy,
+                                 _selectable_text)
+
+        counters = state.get("counters") or {}
+        hashes = state.get("hashes") or []
+        unique_names = state.get("unique_names") or {}
+        victims = state.get("victims") or []
+        elapsed = int(time.time() - state.get("started_at", time.time()))
+
+        self._push_responder_finding(state)
 
         # Dialog
         win = _make_win(self, "Responder — stopped", 780, 720)
