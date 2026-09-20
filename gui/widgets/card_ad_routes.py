@@ -4173,6 +4173,75 @@ class CardADRoutesMixin:
         _btn(row, "PROCEED ANYWAY", _proceed_anyway, w=170)
         _btn(row, "CANCEL", lambda: _safe_destroy(win), w=100)
 
+    @staticmethod
+    def _dc_predates_rbcd(fp):
+        """Tri-state (True / False / None): does the DC predate Server 2012
+        (NT < 6.2)?  RBCD writes msDS-AllowedToActOnBehalfOfOtherIdentity,
+        a Server 2012 schema attribute, and needs a 2012+ DC to service
+        S4U2Proxy — a 2008 R2 / 2008 / 2003 DC neither stores nor honours
+        it, so the write dies with "invalid attribute type".
+
+        Keys on the SMB/NTLM product version first (negotiated over the
+        wire, immune to a wrong nmap -O guess), then the version string.
+        classify_generation() is deliberately NOT used: it buckets
+        2012/2012 R2 as "legacy", yet those DCs DO support RBCD — the
+        boundary that matters here is 2012, not the compat-flag one."""
+        if fp is None:
+            return None
+        pv = (getattr(fp, "ntlm_product_version", "") or "").strip()
+        if pv:
+            mm = ".".join(pv.split(".")[:2])
+            if mm in ("5.0", "5.1", "5.2", "6.0", "6.1"):
+                return True
+            if mm in ("6.2", "6.3", "10.0"):
+                return False
+        base = re.sub(r"\s*sp\d+\s*$", "",
+                      (getattr(fp, "version", "") or "").lower()).strip()
+        if base in ("2000", "2003", "2003 r2", "2008", "2008 r2"):
+            return True
+        if base in ("2012", "2012 r2", "2016", "2019", "2022", "2025"):
+            return False
+        return None
+
+    def _rbcd_schema_advisory(self):
+        """(advisory_text, colour) for the RBCD dialog, keyed on whether
+        the DC's schema can support RBCD at all.  A pre-2012 DC makes the
+        attack impossible, not just suboptimal — say so up front and point
+        at classic constrained delegation, in the same HINT-only spirit as
+        the ADDCOMPUTER / certipy method advisories (never changes the
+        command)."""
+        try:
+            fp = getattr(getattr(self.app, "target_intel", None), "_fp", None)
+        except Exception:
+            fp = None
+        verdict = self._dc_predates_rbcd(fp)
+        osname = ""
+        if fp is not None and getattr(fp, "platform", "") == "windows":
+            osname = ("Windows " + (getattr(fp, "version", "") or "").strip()
+                      ).strip()
+        _os = f" ({osname})" if osname else ""
+        if verdict is True:
+            return (
+                f"  RBCD advisory: the DC looks PRE-2012{_os}.  RBCD writes "
+                f"msDS-AllowedToActOnBehalfOfOtherIdentity, a Server 2012 "
+                f"schema attribute a pre-2012 DC rejects with 'invalid "
+                f"attribute type' — the attack CANNOT work here.  Use classic "
+                f"constrained delegation (see FIND DELEGATION) instead.",
+                COLORS["text_red"])
+        if verdict is False:
+            return (
+                f"  RBCD advisory: DC looks 2012+{_os} — the schema supports "
+                f"RBCD.  You still need write over the TARGET computer object "
+                f"(GenericWrite / GenericAll, or a machine account you "
+                f"control) for the attribute write to land.",
+                COLORS["text_dim"])
+        return (
+            "  RBCD advisory: DC OS not fingerprinted yet — RBCD needs a "
+            "2012+ DC (the msDS-AllowedToActOnBehalfOfOtherIdentity attribute "
+            "is absent on 2008 R2 / 2008).  Run enumeration (nxc smb / nmap "
+            "-sV) first to confirm the schema supports it.",
+            COLORS["text_dim"])
+
     def _route_rbcd_attack(self, tool):
         """RBCD needs two computer names:
           · <ATTACKER_COMPUTER>  — a machine account we control
@@ -4223,6 +4292,14 @@ class CardADRoutesMixin:
                 "TARGET_COMPUTER":   "",
             },
         }
+
+        # Preflight: warn if the DC's schema can't support RBCD at all
+        # (pre-2012) BEFORE the operator runs a write that can only fail
+        # with "invalid attribute type" — honest signal, same as the
+        # ADDCOMPUTER method advisory.
+        adv, adv_color = self._rbcd_schema_advisory()
+        pf["advisory"] = adv
+        pf["advisory_color"] = adv_color
 
         if not attacker:
             self.app.terminal.write(

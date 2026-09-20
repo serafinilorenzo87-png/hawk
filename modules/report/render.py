@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 
 from utils.config import APP_NAME, APP_VERSION
 
@@ -351,3 +352,39 @@ def render_csv(ctx, sections=None) -> str:
             v["operator_note"].replace("\n", " "),
         )])
     return buf.getvalue()
+
+
+# ─── JSON (machine-readable; same curated data as HTML/MD) ──────────────────
+
+def render_json(ctx, sections) -> str:
+    """Machine-readable deliverable with format parity: the summary numbers
+    come from the SAME ReportContext the HTML/MD/CSV use, and the section
+    tree is the SAME ordered Sections the text renderers consume — so a
+    consumer parsing the JSON sees exactly the report's data, curated once.
+
+    The branding logo data-URI is deliberately excluded (only firm /
+    client / prepared-by strings are carried) so the JSON stays small and
+    free of an embedded base64 blob."""
+    b = ctx.branding
+    doc = {
+        "tool":      APP_NAME,
+        "version":   APP_VERSION,
+        "target":    ctx.session.target_ip or "",
+        "generated": ctx.generated_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "branding":  {k: b.get(k) for k in
+                      ("firm_name", "client_name", "prepared_by")
+                      if b.get(k)},
+        "summary": {
+            "total_findings":  ctx.total_findings,
+            "high_critical":   ctx.high_critical,
+            "severity_counts": dict(ctx.severity_counts),
+            "kev":             ctx.kev_count,
+            "kev_ransomware":  ctx.kev_ransomware_count,
+        },
+        "sections": [
+            {"id": s.id, "title": s.title,
+             "blocks": [{"type": bl.type, "data": bl.data} for bl in s.blocks]}
+            for s in sections
+        ],
+    }
+    return json.dumps(doc, indent=2, ensure_ascii=False)
