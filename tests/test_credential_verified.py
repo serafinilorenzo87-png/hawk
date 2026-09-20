@@ -354,7 +354,9 @@ class UnverifiedPushTests(unittest.TestCase):
         ctx.session = _Sess()
         section = CredentialsProvider().build(ctx)
         statuses = [row[-1] for row in section.blocks[0].data["rows"]]
-        self.assertEqual(["unverified", "-", "cracked"], statuses)
+        # verified=True is a live/valid credential — it now reads "valid"
+        # instead of the bare "-" that hid a proven credential's status.
+        self.assertEqual(["unverified", "valid", "cracked"], statuses)
 
     def test_unverified_then_promoted_persists_to_disk(self):
         """A cred pushed unverified, then proven by a real login, must

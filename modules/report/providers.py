@@ -44,6 +44,33 @@ def _phase_icon(phase_id: str) -> str:
     return _PHASE_META.get(phase_id, {}).get("icon", "")
 
 
+def _strip_internal_tracebacks(lines: list) -> list:
+    """Drop Python traceback blocks from captured tool output before it
+    lands in the client-facing report.  A crashed tool (e.g.
+    bloodhound-python failing an import) dumps a full
+    ``Traceback (most recent call last): ... <Error>: <msg>`` block into
+    its stdout, and the Phases section rendered it verbatim — a stack
+    trace has no place in a deliverable.  The block runs from the
+    ``Traceback`` header through its indented frames to the first
+    non-indented line (the exception summary that terminates it); it is
+    replaced by one neutral marker.  The session keeps the full output
+    untouched — only the report is sanitised."""
+    out: list = []
+    i, n = 0, len(lines)
+    while i < n:
+        if str(lines[i]).strip() == "Traceback (most recent call last):":
+            i += 1
+            while i < n and str(lines[i]).startswith((" ", "\t")):
+                i += 1          # frames / source echoes / caret markers
+            if i < n:
+                i += 1          # the terminating exception-summary line
+            out.append("    [tool traceback omitted from report]")
+        else:
+            out.append(lines[i])
+            i += 1
+    return out
+
+
 class ExecutiveSummaryProvider(SectionProvider):
     id = "exec_summary"
     title = "Executive Summary"
@@ -140,12 +167,51 @@ class CredentialsProvider(SectionProvider):
     id = "credentials"
     title = "Credentials Discovered"
 
+    # Cap for the Secret / Hash cell.  An NTLM pwdump line
+    # ("user:rid:lm:nt:::") is ~68 chars and shown whole; long uncracked
+    # Kerberos TGS/AS-REP blobs are previewed — the full value stays in
+    # the session for cracking, and once cracked the short cracked_pass is
+    # what's shown here.
+    _MAX_SECRET = 88
+
     def _creds(self, ctx) -> list:
         try:
             return [c for c in (getattr(ctx.session, "credentials", []) or [])
                     if isinstance(c, dict)]
         except Exception:
             return []
+
+    @staticmethod
+    def _status(c) -> str:
+        # verified=True is a live/valid credential — it used to fall to
+        # "-" (the vagrant cleartext showed no status at all).
+        if c.get("cracked"):
+            return "cracked"
+        if c.get("verified") is True:
+            return "valid"
+        if c.get("verified") is False:
+            return "unverified"
+        return "-"
+
+    @staticmethod
+    def _type(c) -> str:
+        t = c.get("cred_type") or "-"
+        ht = (c.get("hash_type") or "").strip()
+        return f"{t} ({ht})" if ht else t
+
+    @classmethod
+    def _secret(cls, c) -> str:
+        """The actual recovered secret to render: the cracked plaintext if
+        we have it, else a known cleartext password, else the raw hash /
+        pwdump line.  Without this column the report named the accounts but
+        dropped every recovered secret (the DCSync'd NT hashes, the
+        cracked svc_* passwords, the vagrant password)."""
+        val = (c.get("cracked_pass") or c.get("password")
+               or c.get("hash_val") or "")
+        val = str(val).replace("\n", " ").replace("\r", " ").strip()
+        if len(val) > cls._MAX_SECRET:
+            val = val[:cls._MAX_SECRET] + "…"
+        return val or "-"
 
     def applies(self, ctx) -> bool:
         return bool(self._creds(ctx))
@@ -156,25 +222,20 @@ class CredentialsProvider(SectionProvider):
             return None
         rows = []
         for i, c in enumerate(creds, 1):
-            if c.get("cracked"):
-                status = "cracked"
-            elif c.get("verified") is False:
-                status = "unverified"
-            else:
-                status = "-"
             rows.append([
                 str(i),
-                c.get("cred_type") or "-",
+                self._type(c),
                 c.get("username") or "-",
+                self._secret(c),
                 "+".join(c.get("services") or []) or "any",
                 c.get("host") or "any",
                 c.get("source_phase") or "-",
-                status,
+                self._status(c),
             ])
         return Section(self.id, self.title, [
             Block(BLOCK_TABLE, {
-                "columns": ["#", "Type", "Username", "Service(s)",
-                            "Host", "Source", "Status"],
+                "columns": ["#", "Type", "Username", "Secret / Hash",
+                            "Service(s)", "Host", "Source", "Status"],
                 "rows": rows}),
         ])
 
@@ -224,7 +285,8 @@ class PerPhaseProvider(SectionProvider):
                     "tool": entry.get("tool", "unknown"),
                     "ts": (entry.get("timestamp", "") or "")[:16]
                           .replace("T", " "),
-                    "lines": list(entry.get("lines") or []),
+                    "lines": _strip_internal_tracebacks(
+                        list(entry.get("lines") or [])),
                 })
             items.append({
                 "id": pid,
@@ -289,12 +351,18 @@ class AttackProvider(SectionProvider):
 
         tac_techs: dict = {}     # tactic -> {tech_id: name}
         tac_findings: dict = {}  # tactic -> set(finding number)
-        views = []
+        # Evidence is a compact index (finding title + severity +
+        # techniques), NOT a second copy of the full finding cards.  The
+        # findings render ONCE, in Target Intelligence: re-emitting them
+        # here as BLOCK_FINDINGS duplicated every ATT&CK-mapped finding,
+        # inflating the visible card count (75 findings -> 95 cards),
+        # giving two "Finding 1"s and pushing a HIGH card above the
+        # criticals.  The mapping is what this section is for.
+        evidence_rows = []
         for n, (f, techs) in enumerate(resolved, 1):
             view = ctx.finding_view(f, n)
             label = ", ".join(f"{t.id} {self._short(t.name)}" for t in techs)
-            view["fields"] = list(view["fields"]) + [["ATT&CK", label]]
-            views.append(view)
+            evidence_rows.append([view["severity"], view["title"], label])
             for t in techs:
                 for tac in (t.tactics or ("Unmapped",)):
                     tac_techs.setdefault(tac, {})[t.id] = t.name
@@ -312,7 +380,9 @@ class AttackProvider(SectionProvider):
             Block(BLOCK_TABLE, {
                 "columns": ["Tactic", "Techniques", "Findings"],
                 "rows": rows}),
-            Block(BLOCK_FINDINGS, {"items": views}),
+            Block(BLOCK_TABLE, {
+                "columns": ["Severity", "Finding", "Technique(s)"],
+                "rows": evidence_rows}),
         ])
 
 
