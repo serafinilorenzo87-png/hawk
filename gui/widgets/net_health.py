@@ -22,10 +22,17 @@ users can actually spot it.
 
 States (shown as the button's text + colour):
     ●  NET     green   — gateway + target both reachable
+    ●  NET     neutral — link up, no target set (nothing to verify)
     ⚠  TGT     amber   — our network fine, target unreachable
+    ⚠  IP?     red     — target was reachable, now gone (suspected drift)
     ✗  NET     red     — we lost our own gateway / interface
-    ?  NET     dim     — first probe still in flight / unknown
+    ?  NET     dim     — target probe pending / first probe in flight
     …  NET     dim     — an on-demand re-check is running
+
+GREEN is the ONE state that asserts the target is reachable: it is shown
+only when the gateway AND the target are both up.  Gateway reachability
+alone (no target set, or the target down) is never painted green — that
+false-green is what hid a dead target behind a healthy-looking pill.
 """
 
 import customtkinter as ctk
@@ -96,6 +103,43 @@ def _systemctl_active(unit: str) -> bool:
         return (r.stdout or "").strip() == "active"
     except Exception:
         return False
+
+
+# ─── Pill-state decision (pure, testable, no Tk) ────────────────────────────
+def _net_pill_state(gw_ok, has_tg, tg_ok, drift_suspected=False):
+    """The single source of truth for the pill model documented at the top
+    of this module.  Kept free of Tk so every state is exhaustively
+    unit-testable.
+
+    Args are the probe's tri-state booleans (True / False / None):
+      gw_ok   our own link/gateway reachable — the caller has already
+              normalised the on-link case, so None/False both mean "down"
+      has_tg  a target is set
+      tg_ok   the target is reachable
+
+    Returns ``(state, text, colour)``.  The invariant: GREEN is returned
+    ONLY when the gateway AND the target are BOTH reachable — never on
+    gateway reachability alone.  A set-but-unreachable target is amber
+    (red when IP drift is suspected); no target set is a neutral "link up,
+    nothing to verify" — not green.
+    """
+    # Our own link is the precondition for everything else.  None (probe
+    # inconclusive) is treated as down, exactly like an explicit failure.
+    if not gw_ok:
+        return "down", "✗  NET", COLORS["text_red"]
+    # Link is up.  When a target is set, its reachability decides the pill.
+    if has_tg:
+        if tg_ok is True:
+            return "ok", "●  NET", COLORS["text_green"]
+        if tg_ok is False:
+            if drift_suspected:
+                return "drift", "⚠  IP?", COLORS.get("text_red", "#FF6B6B")
+            return "degraded", "⚠  TGT", "#FFB600"
+        # tg_ok is None → the target probe is still in flight.
+        return "unknown", "?  NET", COLORS["text_dim"]
+    # Link up, no target set: nothing to verify reachability against, so
+    # NOT green.  Neutral colour so the operator still sees the link is up.
+    return "link", "●  NET", COLORS["text_dim"]
 
 
 # ─── Widget ─────────────────────────────────────────────────────────────────
@@ -329,23 +373,12 @@ class NetHealthIndicator(ctk.CTkFrame):
         else:
             r["drift_suspected"] = False
 
-        if gw_ok is False or gw_ok is None:
-            state, text, color = "down", "✗  NET", COLORS["text_red"]
-        elif gw_ok and has_tg and tg_ok is False:
-            # Drift suspected gets its own visual: the standard amber
-            # "target down" indicator becomes a more alarming label
-            # so the operator notices something CHANGED rather than
-            # the target just being briefly flaky.
-            if r.get("drift_suspected"):
-                state, text, color = (
-                    "drift", "⚠  IP?",
-                    COLORS.get("text_red", "#FF6B6B"))
-            else:
-                state, text, color = "degraded", "⚠  TGT", "#FFB600"
-        elif gw_ok and (not has_tg or tg_ok):
-            state, text, color = "ok", "●  NET", COLORS["text_green"]
-        else:
-            state, text, color = "unknown", "?  NET", COLORS["text_dim"]
+        # Drift suspected gets its own visual inside _net_pill_state: the
+        # standard amber "target down" indicator becomes a more alarming
+        # red "IP?" so the operator notices something CHANGED rather than
+        # the target just being briefly flaky.
+        state, text, color = _net_pill_state(
+            gw_ok, has_tg, tg_ok, r.get("drift_suspected"))
 
         self._net_status  = state
         self._net_details = r
@@ -501,6 +534,13 @@ class NetHealthIndicator(ctk.CTkFrame):
                 "Kali's network is fine — only the target is unreachable.\n"
                 "Nothing to do on Kali side.",
                 "#FFB600")
+        elif state == "link":
+            diag, color = (
+                "Your Kali network is up. No target is set yet, so there\n"
+                "is nothing to verify reachability against — this is not a\n"
+                "fault. Set a target on the target bar and the pill turns\n"
+                "green once it is reachable.",
+                COLORS["text_dim"])
         elif no_route:
             diag, color = (
                 "No default route — Kali has no DHCP lease.\n"
