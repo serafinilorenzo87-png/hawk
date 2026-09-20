@@ -58,10 +58,14 @@ _NMAP_SMB_X86 = """\
 |   OS: Windows 5.1
 """
 
+# No explicit arch token AND a genuinely ambiguous edition — Windows 10 client
+# shipped in both x86 and x64, so neither the token scan nor the x64-only-Server
+# inference may fire.  (A Server 2019 banner here would now correctly infer x64,
+# so it can no longer stand for "no arch signal".)
 _NMAP_NO_ARCH = """\
 445/tcp  open  microsoft-ds
 | smb-os-discovery:
-|   OS: Windows Server 2019 Standard 17763
+|   OS: Windows 10 Pro 19041 (Windows 10 Pro 10.0)
 """
 
 _NMAP_BANNER_64BIT = """\
@@ -126,6 +130,93 @@ class PreflightVariantSelectionTests(unittest.TestCase):
         variant_id, reason, redirect = rec(fp, [])
         self.assertTrue(redirect,
                         "legacy OS must redirect to .bat regardless of arch")
+
+
+# ── x64-only Windows Server inference (OBS-1 live) ─────────────────
+# nmap never prints an arch token for native Windows, so on a real 2008 R2
+# DC arch stayed '' and the preflight showed <unknown>.  Server 2008 R2 and
+# every later Server are x64-only, so infer x64 from the edition — but keep
+# plain 2008 / Windows 7 (which shipped x86 too) unknown.  These samples carry
+# NO explicit x64/x86 token: the inference is the only thing that can set arch.
+
+_NMAP_2008R2 = """\
+445/tcp  open  microsoft-ds  Windows Server 2008 R2 Standard 7601 Service Pack 1 microsoft-ds
+| smb-os-discovery:
+|   OS: Windows Server 2008 R2 Standard 7601 Service Pack 1 (Windows Server 2008 R2 Standard 6.1)
+|   Computer name: VAGRANT-2008R2
+"""
+
+_NMAP_2008_PLAIN = """\
+445/tcp  open  microsoft-ds  Windows Server 2008 Standard 6002 Service Pack 2 microsoft-ds
+| smb-os-discovery:
+|   OS: Windows Server 2008 Standard 6002 Service Pack 2 (Windows Server 2008 Standard 6.0)
+|   Computer name: SRV2008
+"""
+
+_NMAP_WIN7 = """\
+445/tcp  open  microsoft-ds  Windows 7 Professional 7601 Service Pack 1 microsoft-ds
+| smb-os-discovery:
+|   OS: Windows 7 Professional 7601 Service Pack 1 (Windows 7 Professional 6.1)
+|   Computer name: WS01
+"""
+
+_NMAP_2016 = """\
+445/tcp  open  microsoft-ds  Windows Server 2016 Standard 14393 microsoft-ds
+| smb-os-discovery:
+|   OS: Windows Server 2016 Standard 14393 (Windows Server 2016 Standard 10.0)
+|   Computer name: DC16
+"""
+
+_NMAP_2019 = """\
+445/tcp  open  microsoft-ds  Windows Server 2019 Standard 17763 microsoft-ds
+| smb-os-discovery:
+|   OS: Windows Server 2019 Standard 17763 (Windows Server 2019 Standard 10.0)
+|   Computer name: DC19
+"""
+
+_NMAP_2022 = """\
+445/tcp  open  microsoft-ds  Windows Server 2022 Standard 20348 microsoft-ds
+| smb-os-discovery:
+|   OS: Windows Server 2022 Standard 20348 (Windows Server 2022 Standard 10.0)
+|   Computer name: DC22
+"""
+
+
+class ArchInferenceX64OnlyServerTests(unittest.TestCase):
+    """Infer x64 from x64-only Windows Server editions when nmap gave no
+    explicit arch token (the real 2008 R2 DC case that <unknown>ed OBS-1)."""
+
+    def _arch(self, nmap):
+        return OSFingerprint.from_nmap_output(nmap.splitlines()).arch
+
+    def test_2008r2_infers_x64(self):
+        self.assertEqual(self._arch(_NMAP_2008R2), "x64")
+
+    def test_plain_2008_stays_unknown(self):
+        # Server 2008 (non-R2) shipped in x86 too — must NOT be inferred.
+        self.assertEqual(self._arch(_NMAP_2008_PLAIN), "")
+
+    def test_win7_client_stays_unknown(self):
+        # Client Windows 7 shipped x86 and x64 — genuinely ambiguous.
+        self.assertEqual(self._arch(_NMAP_WIN7), "")
+
+    def test_2016_infers_x64(self):
+        self.assertEqual(self._arch(_NMAP_2016), "x64")
+
+    def test_2019_infers_x64(self):
+        self.assertEqual(self._arch(_NMAP_2019), "x64")
+
+    def test_2022_infers_x64(self):
+        self.assertEqual(self._arch(_NMAP_2022), "x64")
+
+    def test_explicit_token_takes_precedence_over_inference(self):
+        # An explicit x86 token wins over the server inference (the guard is
+        # `if not fp.arch`), so a hypothetical x86 build is not mislabeled x64.
+        nmap = ("445/tcp open microsoft-ds Windows Server 2016 Standard "
+                "14393 x86 microsoft-ds\n"
+                "| smb-os-discovery:\n"
+                "|   OS: Windows Server 2016 Standard 14393 x86\n")
+        self.assertEqual(self._arch(nmap), "x86")
 
 
 if __name__ == "__main__":
