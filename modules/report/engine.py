@@ -31,10 +31,11 @@ from modules.report import render
 
 
 # Primary first: HTML is the rich deliverable, then the spreadsheet dump,
-# then the Markdown serializer, then the OPTIONAL best-effort PDF.  "pdf"
-# is just another format whose render target tries WeasyPrint and degrades
-# silently when it (or its native libs) is absent — the expected state.
-REPORT_FORMATS = ("html", "csv", "md", "pdf")
+# then the Markdown serializer, then the machine-readable JSON, then the
+# OPTIONAL best-effort PDF.  "pdf" is just another format whose render
+# target tries WeasyPrint and degrades silently when it (or its native
+# libs) is absent — the expected state.
+REPORT_FORMATS = ("html", "csv", "md", "json", "pdf")
 
 # Text render targets only.  PDF is handled separately: it is binary and
 # is produced from the already-rendered HTML, not from the sections.
@@ -42,6 +43,7 @@ _RENDERERS = {
     "html": render.render_html,
     "csv":  render.render_csv,
     "md":   render.render_markdown,
+    "json": render.render_json,
 }
 
 
@@ -165,7 +167,8 @@ def result_summary(paths: dict) -> str:
     show the operator.  When PDF was requested-but-skipped, appends a
     clear pointer to print the HTML from a browser.  Pure + headless so
     the caller's messaging is unit-testable."""
-    made = [f.upper() for f in ("html", "pdf", "md", "csv") if f in paths]
+    made = [f.upper() for f in ("html", "pdf", "md", "csv", "json")
+            if f in paths]
     msg = ("Generated: " + ", ".join(made)) if made \
         else "No report produced"
     if "pdf" not in paths:

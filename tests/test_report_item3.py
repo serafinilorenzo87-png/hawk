@@ -27,8 +27,11 @@ All headless — no display, no customtkinter.
 
 import csv
 import io
+import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -200,6 +203,91 @@ class TracebackStripTests(unittest.TestCase):
         self.assertNotIn("Traceback (most recent call last):", body)
         self.assertIn("[tool traceback omitted from report]", body)
         self.assertIn("INFO: collection finished", body)
+
+
+# ─── g — JSON is a real format with parity to HTML/MD/CSV ──────────────────
+
+class JsonFormatParityTests(unittest.TestCase):
+
+    def _session(self):
+        s = Session("10.0.0.4")
+        s.target_intel = {"auto_findings": [
+            {"title": "DCSYNC dumped hashes", "severity": "critical",
+             "source": "secretsdump", "technique_ids": ["T1003.006"]},
+            {"title": "KERBEROAST 2 TGS", "severity": "high",
+             "source": "kerberoast", "technique_ids": ["T1558.003"]},
+            {"title": "Anonymous FTP login", "severity": "medium",
+             "source": "nmap"},
+        ]}
+        s.credentials = [{"cred_type": "hash", "username": "Administrator",
+                          "hash_type": "NTLM", "hash_val": "Administrator:500"}]
+        return s
+
+    def test_json_is_registered_as_a_format(self):
+        self.assertIn("json", engine.REPORT_FORMATS)
+        self.assertIn("json", engine._RENDERERS)
+
+    def test_render_json_is_valid_and_carries_the_summary(self):
+        s = self._session()
+        ctx = ReportContext(s)
+        doc = json.loads(render.render_json(ctx, engine.build_sections(ctx)))
+        self.assertEqual(doc["summary"]["total_findings"], ctx.total_findings)
+        self.assertEqual(doc["summary"]["severity_counts"],
+                         dict(ctx.severity_counts))
+        self.assertEqual(doc["target"], "10.0.0.4")
+
+    def test_json_sections_mirror_the_other_formats(self):
+        s = self._session()
+        ctx = ReportContext(s)
+        sections = engine.build_sections(ctx)
+        doc = json.loads(render.render_json(ctx, sections))
+        self.assertEqual([sec["id"] for sec in doc["sections"]],
+                         [sec.id for sec in sections])
+        # a finding title and a recovered secret are both present
+        blob = json.dumps(doc)
+        self.assertIn("DCSYNC dumped hashes", blob)
+        self.assertIn("Administrator:500", blob)
+
+    def test_count_parity_json_matches_csv_and_markdown(self):
+        s = self._session()
+        ctx = ReportContext(s)
+        doc = json.loads(render.render_json(ctx, engine.build_sections(ctx)))
+        csv_rows = len(list(csv.reader(
+            io.StringIO(render.render_csv(ctx))))) - 1
+        md_cards = render.render_markdown(
+            ctx, engine.build_sections(ctx)).count("#### Finding ")
+        self.assertEqual(doc["summary"]["total_findings"], 3)
+        self.assertEqual(csv_rows, 3)
+        self.assertEqual(md_cards, 3)
+
+    def test_generate_writes_a_json_file(self):
+        d = tempfile.mkdtemp(prefix="_repjson_", dir=os.path.dirname(__file__))
+        try:
+            paths = engine.generate(self._session(),
+                                    formats=("csv", "md", "json"), out_dir=d)
+            self.assertIn("json", paths)
+            with open(paths["json"], encoding="utf-8") as fh:
+                doc = json.load(fh)
+            self.assertEqual(doc["summary"]["total_findings"], 3)
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_json_survives_a_dead_html_target(self):
+        """JSON has no third-party dependency, like MD/CSV: an HTML blow-up
+        must not cost it."""
+        d = tempfile.mkdtemp(prefix="_repjson2_",
+                             dir=os.path.dirname(__file__))
+        real = render.render_html
+        try:
+            render.render_html = lambda ctx, sections: (_ for _ in ()).throw(
+                RuntimeError("boom"))
+            paths = engine.generate(self._session(),
+                                    formats=("html", "json"), out_dir=d)
+            self.assertNotIn("html", paths)
+            self.assertIn("json", paths)
+        finally:
+            render.render_html = real
+            shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":
