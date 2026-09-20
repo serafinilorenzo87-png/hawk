@@ -288,6 +288,54 @@ def show_windows_privesc_context_dialog(parent, app, on_tool_selected):
     _btn(row, "CANCEL", lambda: _safe_destroy(win), w=140)
 
 
+# winPEAS.exe needs .NET Framework 4.  Map the Windows NT major.minor to
+# "ships .NET 4 by default?":  NT <= 6.1 (XP / 2003 / Vista / 7 / 2008 /
+# 2008 R2) predates it, so every .exe variant loads silently and drops a
+# 0-byte file there — the caller must redirect to winPEAS.bat instead.
+# 6.2 / 6.3 (8 / 8.1 / 2012 / 2012 R2) and 10.0 (10 / 11 / 2016+) ship
+# .NET 4.5+, so the .exe runs even though classify_generation() still
+# buckets 8..2012 R2 as "legacy" for Connect-flag purposes.
+_PRE_DOTNET4_NT    = {"5.0", "5.1", "5.2", "6.0", "6.1"}
+_DOTNET4_READY_NT  = {"6.2", "6.3", "10.0"}
+_PRE_DOTNET4_VER   = {"2000", "xp", "2003", "2003 r2", "vista",
+                      "2008", "2008 r2", "7"}
+_DOTNET4_READY_VER = {"8", "8.1", "2012", "2012 r2",
+                      "10", "11", "2016", "2019", "2022", "2025"}
+
+
+def _is_pre_dotnet4_windows(fp):
+    """Tri-state (True / False / None): does the target predate .NET 4?
+
+    Reads the SMB/NTLM product version FIRST — it is negotiated over the
+    wire and survives a wrong ``nmap -O`` guess.  The 2008 R2 DC here
+    mis-IDs as "Embedded Standard 7 / Windows Phone" in ``os_raw`` yet
+    negotiates ``6.1.7601`` over SMB, so the old ``os_raw``/``version``
+    keyword scan missed it and wrongly recommended a .exe variant.  The
+    ``version`` string (also SMB-sourced, e.g. "2008 R2 SP1") is the
+    secondary signal.
+
+    Returns None when neither reliable signal is present, so the caller
+    can fall back to the noisier ``os_raw`` keyword scan WITHOUT that scan
+    ever overriding a confirmed verdict (a modern box mis-guessed as
+    "Windows 7" by ``-O`` must still get the .exe)."""
+    if fp is None:
+        return None
+    pv = (getattr(fp, "ntlm_product_version", "") or "").strip()
+    if pv:
+        mm = ".".join(pv.split(".")[:2])
+        if mm in _PRE_DOTNET4_NT:
+            return True
+        if mm in _DOTNET4_READY_NT:
+            return False
+    base = re.sub(r"\s*sp\d+\s*$", "",
+                  (getattr(fp, "version", "") or "").lower()).strip()
+    if base in _PRE_DOTNET4_VER:
+        return True
+    if base in _DOTNET4_READY_VER:
+        return False
+    return None
+
+
 def _recommend_winpeas_exe_variant(fp, auto_findings) -> tuple[
         "str | None", str, bool]:
     """Pick the best winPEAS variant for the current target.
@@ -321,8 +369,15 @@ def _recommend_winpeas_exe_variant(fp, auto_findings) -> tuple[
         " 5.1", " 5.2", " 6.0", " 6.1",
         "vista",
     )
+    # Reliable pre-.NET-4 verdict (SMB/NTLM product version) wins; the
+    # os_raw keyword scan is only trusted when that verdict is unknown, so
+    # a wrong `nmap -O` guess can no longer flip the recommendation either
+    # way (2008 R2 mis-ID'd as "7" is still caught; a modern box mis-ID'd
+    # as "Windows 7" is NOT wrongly sent to the .bat).
     hay = f" {os_raw} {version} "
-    if any(k in hay for k in legacy_keywords):
+    pre_net4 = _is_pre_dotnet4_windows(fp)
+    if pre_net4 is True or (pre_net4 is None
+                            and any(k in hay for k in legacy_keywords)):
         return (None,
                 "Target reports a legacy Windows version (XP / "
                 "Server 2003 / 2008 / 2008 R2 / Vista / Windows 7) "
