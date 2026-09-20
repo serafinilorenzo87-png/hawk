@@ -219,5 +219,30 @@ class ArchInferenceX64OnlyServerTests(unittest.TestCase):
         self.assertEqual(self._arch(nmap), "x86")
 
 
+class ArchRoundTripPersistenceTests(unittest.TestCase):
+    """arch must survive a session save/reload (to_dict → from_dict) like every
+    other fingerprint field — otherwise the preflight reverts to <unknown> on
+    reload until the user re-scans (OBS-1 persistence gap found live)."""
+
+    def test_to_dict_includes_arch(self):
+        fp = OSFingerprint()
+        fp.arch = "x86"
+        self.assertEqual(fp.to_dict().get("arch"), "x86")
+
+    def test_x64_survives_round_trip(self):
+        fp = OSFingerprint()
+        fp.platform = "windows"
+        fp.version = "2008 R2 SP1"
+        fp.arch = "x64"
+        fp2 = OSFingerprint.from_dict(fp.to_dict())
+        self.assertEqual(fp2.arch, "x64")
+
+    def test_legacy_session_without_arch_key_loads_empty(self):
+        # A session saved before OBS-1 has no 'arch' key: load as '' (not crash).
+        fp = OSFingerprint.from_dict({"platform": "windows",
+                                      "version": "2008 R2 SP1"})
+        self.assertEqual(fp.arch, "")
+
+
 if __name__ == "__main__":
     unittest.main()
