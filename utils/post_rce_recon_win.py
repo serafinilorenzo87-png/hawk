@@ -171,14 +171,20 @@ def generate_snippet() -> str:
 
     # AlwaysInstallElevated — both keys must be 0x1 for the .msi
     # privesc to work.  reg query is the most universal probe.
-    # 2>&1 to capture "ERROR: The system was unable to find the
-    # specified registry key or value" which is a useful signal
-    # (means the policy isn't set, exploit won't work).
+    # stderr → $null, NOT 2>&1: on Windows PowerShell 2.0 (Server 2008 R2)
+    # merging reg.exe's "ERROR: ... unable to find ... registry key" into the
+    # success stream makes PS wrap it in a NativeCommandError and RE-ECHO the
+    # whole one-line command — markers and all — right inside this section.
+    # That echo carries an embedded ___HAWK_END___ that truncated the recon
+    # block, silently dropping every later section (live-validation W-08/W-09).
+    # The analyzer never used the error text (a missing key = no 0x1 line =
+    # "not set"), so we drop it — exactly like the SCHED_TASKS / AV sections,
+    # which already suppress their errors with 2>$null and come back clean.
     section("AIE", [
         "reg query HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows\\Installer "
-        "/v AlwaysInstallElevated 2>&1",
+        "/v AlwaysInstallElevated 2>$null",
         "reg query HKCU\\SOFTWARE\\Policies\\Microsoft\\Windows\\Installer "
-        "/v AlwaysInstallElevated 2>&1",
+        "/v AlwaysInstallElevated 2>$null",
     ])
 
     # Unquoted service paths.  Get-WmiObject Win32_Service is the
@@ -311,14 +317,24 @@ def generate_snippet() -> str:
 # ─── Analyzer ──────────────────────────────────────────────────────
 
 def _extract_section(blob: str, name: str) -> str:
-    start = blob.find(_SECTION_MARK.format(name))
-    end   = blob.find(_END_MARK.format(name))
-    if start == -1 or end == -1 or end < start:
+    """Return the body of one ``<<<SECTION:NAME>>> … <<<END:NAME>>>`` block.
+
+    Both markers must be LINE-ANCHORED — alone on their line, the way
+    ``Write-Host`` prints them.  A shell / PowerShell-2.0-error echo repeats
+    the markers mid-line (inside the echoed ``Write-Host '<<<SECTION:…>>>'``),
+    so a plain substring search grabbed the ECHOED copy first and returned the
+    echoed command text as the section body.  Anchoring the search to a whole
+    line rejects those decoys (live-validation W-09).
+    """
+    sec = re.search(r"(?m)^[^\S\n]*" + re.escape(_SECTION_MARK.format(name))
+                    + r"[^\S\n]*$", blob)
+    if sec is None:
         return ""
-    nl = blob.find("\n", start)
-    if nl == -1 or nl >= end:
+    end = re.search(r"(?m)^[^\S\n]*" + re.escape(_END_MARK.format(name))
+                    + r"[^\S\n]*$", blob[sec.end():])
+    if end is None:
         return ""
-    return blob[nl + 1:end].rstrip("\n").rstrip()
+    return blob[sec.end():sec.end() + end.start()].strip("\n").rstrip()
 
 
 _BEGIN_MARK = "___HAWK_BEGIN___"
@@ -330,53 +346,61 @@ _END_MARK_TOK = "___HAWK_END___"
 # quotes.  This is the discriminator between a real block and an echo.
 _REAL_SECTION_RE = re.compile(r"(?m)^[^\S\n]*<<<SECTION:")
 
+# The block delimiters are printed the same way — `Write-Host '<marker>'`, so
+# in real output each owns its line.  An echo only ever repeats them mid-line
+# (prefixed by `powershell.exe : ` / `+ ` / inside the Write-Host quotes), so
+# matching a whole line rejects the echoed copies just like _REAL_SECTION_RE.
+_BEGIN_LINE_RE = re.compile(r"(?m)^[^\S\n]*" + re.escape(_BEGIN_MARK)
+                            + r"[^\S\n]*$")
+_END_LINE_RE = re.compile(r"(?m)^[^\S\n]*" + re.escape(_END_MARK_TOK)
+                          + r"[^\S\n]*$")
+
 
 def _trim_to_markers(text: str) -> str:
     """Return the first REAL ``___HAWK_BEGIN___ … ___HAWK_END___`` block.
 
-    "Real" means the block's body carries a line-anchored
-    ``<<<SECTION:`` marker.  Two kinds of decoy block otherwise defeat a
-    naive first- or last-cut:
+    "Real" means the block's delimiters AND its section markers are
+    line-anchored (alone on their line, as ``Write-Host`` prints them).
+    Three kinds of decoy otherwise defeat a naive scan:
 
       • the shell's echo of the pasted command sits ABOVE the output and
         repeats every marker literally, mid-line, inside the Write-Host
         quotes — so cutting at the FIRST begin kept the command line and
         threw the output away (the Linux-module bug);
-      • on Windows PowerShell 2.0 (Server 2008 R2) a cmdlet that doesn't
-        exist prints an error that RE-ECHOES the whole one-line command,
-        markers included, BELOW the real output — so cutting at the LAST
-        begin (the previous behaviour here) grabbed the error echo,
-        discarded the real sections above it, dropped SeImpersonate, and
-        let the analyzer read the echoed command as data and fabricate a
-        "SYSTEM scheduled tasks" finding (live-validation W-09).
+      • on Windows PowerShell 2.0 (Server 2008 R2) a missing cmdlet — or a
+        native command whose stderr is merged with `2>&1` — prints an error
+        that RE-ECHOES the whole one-line command, markers included.  When it
+        lands BELOW the real output, cutting at the LAST begin grabbed the
+        echo and dropped SeImpersonate; when the erroring command sits
+        mid-snippet the echo lands INSIDE the block and its embedded
+        ``___HAWK_END___`` closed the block early, silently discarding every
+        later section (live-validation W-09);
+      • that same echo carries an embedded ``___HAWK_BEGIN___`` that could
+        seed a decoy block.
 
-    Selecting the FIRST begin whose block actually contains a line-start
-    section marker skips both decoys wherever they fall.  When no block
-    qualifies (genuinely truncated output — END or the sections lost) we
-    fall back to the last begin so the analyzer still sees something and
-    warns about the missing sections instead of silently parsing empty.
+    Matching BEGIN/END only when they own their line skips all three — an
+    echoed marker is always mid-line.  When no line-anchored block carries a
+    real section marker (genuinely truncated output) we fall back to the last
+    begin..end span so analyze_output still warns about the missing sections
+    instead of silently parsing empty.
     """
     blob = text or ""
-    mlen = len(_BEGIN_MARK)
 
-    for m in re.finditer(re.escape(_BEGIN_MARK), blob):
+    begins = list(_BEGIN_LINE_RE.finditer(blob))
+    for m in begins:
         after = blob[m.end():]
-        e = after.find(_END_MARK_TOK)
-        body = after[:e] if e != -1 else after
+        em = _END_LINE_RE.search(after)
+        body = after[:em.start()] if em else after
         if _REAL_SECTION_RE.search(body):
             return body.rstrip("\n").rstrip()
 
-    # Fallback: no block carried a real section marker.  Hand back the
-    # last begin..end span (old behaviour) so analyze_output can report
-    # the truncation rather than see nothing at all.
-    end = blob.rfind(_END_MARK_TOK)
-    begin = blob.rfind(_BEGIN_MARK, 0, end if end != -1 else len(blob))
-    if begin != -1:
-        blob = blob[begin + mlen:]
-        if end != -1:
-            end -= (begin + mlen)
-    if end != -1:
-        blob = blob[:end]
+    # Fallback: no line-anchored block carried a real section marker.  Hand
+    # back the last begin..end span so analyze_output can report the
+    # truncation rather than see nothing at all.
+    if begins:
+        after = blob[begins[-1].end():]
+        em = _END_LINE_RE.search(after)
+        return (after[:em.start()] if em else after).rstrip("\n").rstrip()
     return blob
 
 

@@ -40,7 +40,8 @@ def show_windows_privesc_context_dialog(parent, app, on_tool_selected):
     `on_tool_selected(tool_id)` is called when the user picks a tool —
     the caller then opens the matching workflow.
 
-    tool_id is one of: "winpeas_bat", "winpeas_exe", "privesc_check", "manual"
+    tool_id is one of: "winpeas_bat", "winpeas_exe", "privesc_check",
+    "powerup", "manual"
     """
     # Dialog default bumped from 1000×700 → 1200×720.  The 1000×700
     # version looked wide enough at design time, but the AV/EDR/
@@ -131,6 +132,26 @@ def show_windows_privesc_context_dialog(parent, app, on_tool_selected):
                 "scheduled tasks, credentials, DLL hijacking. Generates a clean HTML + "
                 "CSV report. Requires AMSI bypass (included in the execution command). "
                 "Best choice when Windows Defender or an EDR is active."
+            ),
+        },
+        {
+            "id":       "powerup",
+            "name":     "PowerUp.ps1",
+            "icon":     "🔧",
+            "ctx":      ["lab", "av_base"],
+            "duration": "1-3 min",
+            "size":     "console output (no report)",
+            "av":       "🟡 Low — PowerShell script, dot-sourced from disk",
+            "edr":      "🔴 High — well-known PowerSploit signatures / AMSI",
+            "coverage": "🟢 Focused — service & registry privesc checks",
+            "desc":     (
+                "PowerSploit's PowerUp — the classic service-misconfig hunter. "
+                "Invoke-AllChecks looks for unquoted service paths, modifiable "
+                "service binaries/configs, AlwaysInstallElevated, weak scheduled-"
+                "task permissions and token privileges, and prints a ready-to-run "
+                "abuse function for each hit. Output is short and self-explanatory "
+                "(no parser needed). Older than PrivescCheck and heavily signatured "
+                "— prefer PrivescCheck when Defender / an EDR is active."
             ),
         },
         {
@@ -285,8 +306,9 @@ def _recommend_winpeas_exe_variant(fp, auto_findings) -> tuple[
     if fp is not None:
         os_raw   = (getattr(fp, "os_raw", "")   or "").lower()
         version  = (getattr(fp, "version", "")  or "").lower()
-        # arch hint can live in platform, os_raw, or any_arch_hint
+        # arch hint can live in fp.arch, platform, os_raw, or banners
         arch_hint = (
+            (getattr(fp, "arch", "")     or "") + " " +
             (getattr(fp, "platform", "") or "") + " " +
             (getattr(fp, "os_raw", "")   or "")
         ).lower()
@@ -413,6 +435,7 @@ def show_winpeas_exe_preflight_dialog(parent, app,
     # based on.
     fp_os   = (getattr(fp, "os_raw", "") if fp else "") or "<unknown>"
     fp_ver  = (getattr(fp, "version", "") if fp else "") or "—"
+    fp_arch = (getattr(fp, "arch", "")    if fp else "") or "<unknown>"
     av_seen = False
     try:
         for f in auto_findings:
@@ -445,6 +468,7 @@ def show_winpeas_exe_preflight_dialog(parent, app,
         win,
         f"Target fingerprint  :  {fp_os}\n"
         f"NT version          :  {fp_ver}\n"
+        f"Architecture        :  {fp_arch}\n"
         f"AV / EDR detected   :  "
         f"{'YES (from Target Intel findings)' if av_seen else 'No signal yet'}\n"
         f"\n"
