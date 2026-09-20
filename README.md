@@ -1,6 +1,41 @@
-# HAWK
+# HAWK — Hostile Assessment War-Kit
 
-HAWK (Hostile Assessment War-Kit) is a portable Kali-oriented pentest GUI.
+HAWK is a portable, Kali-oriented **penetration-testing GUI**. It organises an
+engagement around a ten-phase kill-chain — from reconnaissance to reporting —
+with a live **Target Intelligence** panel that turns raw tool output into
+structured, actionable findings.
+
+It runs fully offline: no cloud, no telemetry, no AI inside the app. You copy the
+folder onto Kali and run it.
+
+> ⚠️ **Authorized use only.** HAWK is for security professionals performing
+> **authorized** penetration testing and security research, and for learning on
+> systems you own or have explicit written permission to test (lab VMs, CTFs,
+> Hack The Box, and similar). Using it against systems without authorization is
+> illegal and unethical. You are solely responsible for your actions and for
+> complying with all applicable laws. The author accepts no liability for misuse.
+
+## What it does
+
+A NETWORK/HOST kill-chain, one card column per phase:
+
+- **Reconnaissance** — ping, traceroute, whois, DNS, subdomain/OSINT
+- **Scanning** — nmap (profiles), masscan, rustscan
+- **Enumeration** — SMB, LDAP, RPC, SNMP, web content discovery, DB fingerprinting
+- **Web assault** — web profiler, crawler, injection, JWT analysis
+- **Vulnerability analysis** — nikto, nuclei, sqlmap, wpscan, OpenVAS/Greenbone
+- **Exploitation** — Metasploit, Hydra/ncrack, Responder, impacket
+- **AD pentesting** — BloodHound, kerberoast/AS-REP, certipy (AD CS / ESC), DCSync, delegation
+- **Post-exploitation** — LinPEAS/winPEAS funnels, privilege-escalation cheat-sheets
+- **Lateral movement** — impacket exec, ligolo-ng/chisel/sshuttle, RDP, SOCKS
+- **Reporting** — one-click deliverable (HTML/CSV/Markdown, optional PDF)
+
+The **Target Intel** panel correlates findings to CWE / OWASP / CVSS / CISA-KEV /
+MITRE ATT&CK, tracks recovered credentials, and feeds the report engine.
+
+HAWK **wraps** the standard open-source tools (nmap, impacket, nuclei, …): it
+orchestrates the workflow and produces the reporting — it does not reimplement
+the tools themselves.
 
 ## Run
 
@@ -26,14 +61,11 @@ application stay inside this folder:
 The only expected external persistent change is explicit system integration,
 such as HAWK-marked temporary entries in `/etc/hosts`.
 
-## Python Dependencies
+## Python dependencies
 
 ```bash
 python3 -m pip install -r requirements.txt --break-system-packages
 ```
-
-Kali/system tools are documented separately in `docs/kali-setup.md`. There is
-no installer script: setup commands are meant to be reviewed and run manually.
 
 The report engine produces a self-contained HTML deliverable (plus CSV and
 Markdown) with no extra dependencies. PDF export is an **optional** enhancement:
@@ -43,6 +75,15 @@ HAWK also writes a `.pdf` rendered from the same HTML. WeasyPrint is **not** in
 portability) — without it, simply open the HTML and print to PDF from your
 browser.
 
+## Requirements
+
+- Developed and tested on **Kali GNU/Linux 2025.1** (rolling), kernel 6.12.x.
+- The Kali/system tools HAWK drives (nmap, impacket, nuclei, hydra, netexec,
+  responder, bloodhound, certipy, ligolo-ng, chisel, …) come from the Kali
+  repositories and are documented in [`docs/kali-setup.md`](docs/kali-setup.md).
+  There is no installer script: setup commands are meant to be reviewed and run
+  manually.
+
 ## Notes
 
 - Run from the `hawkc` directory with `python3 hawk.py`.
@@ -50,3 +91,16 @@ browser.
   `cache/`, `logs/`, or `configs/`.
 - API keys are stored locally under `sessions/.apikeys.json` with restrictive
   permissions where the platform supports them.
+
+## License
+
+HAWK is released under the **Apache License 2.0** — see [`LICENSE`](LICENSE).
+
+Per the [`NOTICE`](NOTICE) file (Apache 2.0 §4(d)), the attribution
+**"Created by Lorenzo Serafini"** must be preserved in redistributions and
+derivative works. Within those terms you are free to use, modify, fork and
+redistribute HAWK.
+
+## Author
+
+Created by **Lorenzo Serafini**.
