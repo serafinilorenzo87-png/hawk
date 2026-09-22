@@ -1845,19 +1845,25 @@ class GreenboneDialog:
         # — otherwise the card stays grey forever, because the GMP
         # path's done_callback never fires.
         self._callback_setup_complete = callback_setup_complete
-        from utils.runner import GreenBoneRunner
+        from utils.runner import GreenBoneRunner, greenbone_web_up
         installed = GreenBoneRunner.is_available()
         if not installed:
             self._show_install_dialog(parent)
             return
-        # `is_running()` does a synchronous gvm-cli socket probe that can
-        # block the UI thread for up to 5s. Run it in a worker and show a
-        # lightweight "Checking…" modal so the app stays responsive.
+        # The "already ready → open the dashboard" branch must hinge on
+        # the WEB UI (gsad on :9392), NOT the Manager (gvmd).  is_running()
+        # only probes gvmd via gvm-cli, so on a gvmd-up / gsad-down box it
+        # reported "running" and RUN opened the Access Panel + a browser on
+        # a dead :9392.  greenbone_web_up() probes gsad directly: a
+        # gvmd-up / gsad-down box now falls through to the START flow (which
+        # brings gsad up) instead of flinging a browser at a dead port.
+        # The socket probe runs in a worker + "Checking…" modal so it
+        # can't block the UI thread.
         self._show_checking_modal(
-            parent, "Checking Greenbone daemon status…",
-            lambda: GreenBoneRunner.is_running(),
-            lambda running: (self._open_web_and_panel(parent) if running
-                             else self._show_start_dialog(parent)))
+            parent, "Checking Greenbone web UI status…",
+            lambda: greenbone_web_up(),
+            lambda web_up: (self._open_web_and_panel(parent) if web_up
+                            else self._show_start_dialog(parent)))
 
     def _open_web_and_panel(self, parent):
         """GVM is up.  The operator drives scans from the Greenbone web
@@ -2132,6 +2138,18 @@ class GreenboneDialog:
                 "info")
 
         def _open_browser():
+            # Don't fling a browser at a dead port: gvmd can be up while
+            # gsad (the web UI on :9392) is still down / coming up.  Probe
+            # gsad first — the same guard the readiness poller uses — and
+            # give an actionable message instead of opening a broken page.
+            from utils.runner import greenbone_web_up
+            if not greenbone_web_up():
+                self._app.terminal.write(
+                    "  [!] Greenbone web UI is not answering on :9392 yet — "
+                    "not opening a dead page.  Make sure gsad is up "
+                    "(sudo gvm-start), then check  ss -tlnp | grep 9392.",
+                    "warn")
+                return
             import webbrowser
             try:
                 webbrowser.open(URL)

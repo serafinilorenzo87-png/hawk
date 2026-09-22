@@ -33,6 +33,13 @@ def _method(src, name):
     return src[i:j]
 
 
+def _class(src, name):
+    i = src.index(f"class {name}")
+    nl = chr(10) + "class "
+    j = src.find(nl, i + 1)
+    return src[i:] if j == -1 else src[i:j]
+
+
 class GreenboneStartTests(unittest.TestCase):
     def test_start_button_does_not_call_installer(self):
         body = _method(_src("gui/dialogs_core.py"), "_start_xterm")
@@ -78,9 +85,11 @@ class GreenboneRunOpensWebTests(unittest.TestCase):
     """RUN, when GVM is up, opens the Greenbone web dashboard — the
     operator drives scans from the web UI, not the GMP scan path."""
 
-    def test_run_routes_to_web_when_running(self):
+    def test_run_routes_to_web_when_web_ui_up(self):
+        # The ready branch is now gated on the WEB UI (gsad), so the
+        # variable name reflects that (web_up), not the old gvmd `running`.
         src = _src("gui/dialogs_core.py")
-        self.assertIn("_open_web_and_panel(parent) if running", src)
+        self.assertIn("_open_web_and_panel(parent) if web_up", src)
         self.assertIn("def _open_web_and_panel", src)
 
     def test_web_open_does_not_launch_gmp_scan(self):
@@ -160,6 +169,41 @@ class GreenboneStartVerifyTests(unittest.TestCase):
         self.assertIn("greenbone_web_up", body)        # probe first
         self.assertIn("_start_xterm", body)            # still starts when down
         self.assertIn("else:", body)                   # start is guarded
+
+
+class GreenboneWebGateTests(unittest.TestCase):
+    """RUN's ready branch and the Access Panel's OPEN BROWSER must hinge on
+    the WEB UI (gsad on :9392), not the Manager (gvmd).
+
+    Bug (observed live): with gvmd up but gsad down, is_running() (a gvmd
+    gvm-cli probe) reported "running", so RUN opened the Access Panel and a
+    browser on a dead :9392, and the panel's OPEN BROWSER button re-opened
+    the same dead page unconditionally.  Both paths now probe
+    greenbone_web_up() (a direct gsad :9392 check) first.
+    """
+
+    def test_g1_ready_branch_gated_on_web_ui_not_gvmd(self):
+        cls = _class(_src("gui/dialogs_core.py"), "GreenboneDialog")
+        # __init__ decides RUN's route with the gsad probe...
+        self.assertIn("lambda: greenbone_web_up()", cls)
+        self.assertIn("_open_web_and_panel(parent) if web_up", cls)
+        # ...and no longer with the gvmd Manager probe.
+        self.assertNotIn("GreenBoneRunner.is_running()", cls)
+
+    def test_g2_access_panel_open_browser_gated_on_web_ui(self):
+        body = _method(_src("gui/dialogs_core.py"), "_show_access_panel")
+        # greenbone_web_up() is consulted BEFORE webbrowser.open() so a dead
+        # :9392 never gets a browser opened at it.
+        self.assertIn("greenbone_web_up", body)
+        self.assertLess(body.index("greenbone_web_up"),
+                        body.index("webbrowser.open"))
+        # Down path returns without opening + emits an actionable message.
+        gate = body[body.index("def _open_browser"):]
+        self.assertIn("if not greenbone_web_up()", gate)
+        self.assertIn("return", gate[:gate.index("webbrowser.open")])
+        self.assertIn(":9392", gate)
+        self.assertIn("gsad", gate)
+        self.assertIn('"warn"', gate)
 
 
 if __name__ == "__main__":
