@@ -1522,14 +1522,14 @@ class TargetBar(ctk.CTkFrame):
     # ═══════════════════════════════════════════════════════════════
     #
     # These are hype buttons that live on the NetHealth row, right
-    # side.  They do NOT launch real functionality yet — v2.0.0 of
-    # HAWK will ship the features.  Click feedback is a small dialog
+    # side.  They do NOT launch real functionality yet — a future
+    # HAWK release will ship the features.  Click feedback is a small dialog
     # with a short pitch of what's coming.
     #
     # Visual spec (user-requested):
     #   * Dimmed border + text so they look unfinished but present
     #   * hand2 cursor + hover border glow so they clearly invite click
-    #   * "only in v.2.0.0" neon-cyan label under the main text
+    #   * "coming soon" neon-cyan label under the main text
     #   * Slow-pulsing dot (~3s cycle) on the left as a teaser cue
     #   * Hover tooltip with the full feature pitch
     #   * Click → _show_coming_soon_dialog with tagline + description
@@ -2049,7 +2049,7 @@ class TargetBar(ctk.CTkFrame):
                                    tagline: str,
                                    description: str) -> None:
         """Tiny modal that pops up when a teaser button is clicked.
-        Sells the upcoming v2.0.0 feature with a one-liner tagline
+        Sells the upcoming feature with a one-liner tagline
         and a short description."""
         from gui.dialogs import (_make_win, _title, _sub, _note_box,
                                    _btn_row, _btn, _safe_destroy)
@@ -2060,10 +2060,10 @@ class TargetBar(ctk.CTkFrame):
         # text-size bumps (15pt tagline, 13pt body) make every line
         # readable without leaning in.
         win = _make_win(
-            self, f"Coming in v2.0.0 — {title}", 720, 520)
+            self, f"Coming soon — {title}", 720, 520)
         _title(win, f"🔒  {title}")
         _sub(win,
-             "Not available yet — shipping in HAWK v2.0.0.",
+             "Not available yet — shipping in an upcoming HAWK release.",
              COLORS["text_yellow"])
         ctk.CTkLabel(
             win,
@@ -2083,7 +2083,7 @@ class TargetBar(ctk.CTkFrame):
         _note_box(
             win,
             "★ Stay tuned — follow HAWK updates to know when "
-            "v2.0.0 drops.",
+            "it lands.",
             COLORS["text_green"])
         row = _btn_row(win)
         _btn(row, "OK", lambda: _safe_destroy(win),
