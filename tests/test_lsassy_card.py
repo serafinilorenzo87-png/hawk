@@ -90,8 +90,10 @@ _EMPTY_NT = "31d6cfe0d16ae931b73c59d7e0c089c0"    # NT of ""
 
 
 def _p(payload):
-    """Wrap a payload in nxc's `SMB <ip> <port> <host>  ` prefix."""
-    return ("info", f"SMB         10.10.10.10     445    DC01             {payload}")
+    """Wrap a payload in nxc's `LSASSY <ip> <port> <host>  ` prefix - the
+    proto column nxc puts on a MODULE's highlight lines (verified live:
+    lsassy's credential lines read `LSASSY ...`, not `SMB ...`)."""
+    return ("info", f"LSASSY      10.10.10.10     445    DC01             {payload}")
 
 
 # A realistic lsassy run: banner, Pwn3d! marker, one NT hash, one
@@ -218,6 +220,44 @@ class LsassyParserTests(unittest.TestCase):
             desc = findings[0]["description"]
             self.assertIn("lsassy", desc.lower())
             self.assertIn("pipx inject netexec lsassy", desc)
+
+    # Exact output captured live against a 2008R2 DC (nxc -M lsassy):
+    # note the LSASSY proto column, the "Saved N Kerberos ticket(s)"
+    # noise line, and vagrant appearing THREE times (hash + two domain
+    # forms of the same cleartext).
+    _LIVE = [
+        ("info", "SMB         192.168.176.177 445    VAGRANT-2008R2   "
+                 "[*] Windows Server 2008 R2 Standard 7601 SP1 x64 "
+                 "(name:VAGRANT-2008R2) (domain:prova.prova.com)"),
+        ("info", "SMB         192.168.176.177 445    VAGRANT-2008R2   "
+                 r"[+] prova.prova.com\Administrator:Vagrant2026 (Pwn3d!)"),
+        ("info", "LSASSY      192.168.176.177 445    VAGRANT-2008R2   "
+                 "Saved 11 Kerberos ticket(s) to /home/kali/.nxc/modules/lsassy"),
+        ("info", "LSASSY      192.168.176.177 445    VAGRANT-2008R2   "
+                 r"PROVA\vagrant 5229b7f52540641daad3b435b51404ee:"
+                 "e02bc503339d51f71d913c245d35b50b"),
+        ("info", "LSASSY      192.168.176.177 445    VAGRANT-2008R2   "
+                 r"PROVA\vagrant vagrant"),
+        ("info", "LSASSY      192.168.176.177 445    VAGRANT-2008R2   "
+                 r"prova.prova.com\vagrant vagrant"),
+    ]
+
+    def test_live_2008r2_output(self):
+        with self._parser() as (parser, store, findings):
+            parser._parse_lsassy_to_intel(self._TOOL, self._LIVE)
+            # Kerberos-ticket + banner + Pwn3d! lines are NOT creds; the
+            # duplicate cleartext (two domain forms) collapses to one.
+            self.assertEqual(2, len(store.creds))
+            h = next(c for c in store.creds if c.cred_type == "hash")
+            self.assertEqual("NTLM", h.hash_type)
+            self.assertEqual(
+                "5229b7f52540641daad3b435b51404ee:"
+                "e02bc503339d51f71d913c245d35b50b", h.hash_val)
+            self.assertIn("vagrant", h.username.lower())
+            p = next(c for c in store.creds if c.cred_type == "cleartext")
+            self.assertEqual("vagrant", p.password)
+            f = findings[0]
+            self.assertIn("1 NT hash(es) + 1 cleartext", f["title"])
 
     def test_no_secrets_gives_reason_and_runbook(self):
         with self._parser() as (parser, store, findings):

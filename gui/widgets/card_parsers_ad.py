@@ -445,7 +445,12 @@ class CardADParserMixin:
         BS = chr(92)                    # backslash in DOMAIN\user
         _EMPTY_NT = "31d6cfe0d16ae931b73c59d7e0c089c0"   # NT of ""
         _HASHPAIR = re.compile(r"^[a-fA-F0-9]{32}:[a-fA-F0-9]{32}$")
-        _PROTOS = ("SMB", "SMBv2", "LDAP", "WINRM", "WMI", "MSSQL", "RDP")
+        # nxc tags a module's highlight lines with the MODULE name in the
+        # proto column, so lsassy's credential lines read "LSASSY <ip>
+        # <port> <host>  DOMAIN\\user ...", NOT "SMB ...".  Both are
+        # accepted so the prefix strip works whichever nxc uses.
+        _PROTOS = ("LSASSY", "SMB", "SMBv2", "LDAP", "WINRM", "WMI",
+                   "MSSQL", "RDP")
 
         def _payload(line):
             # nxc prints  PROTO  IP  PORT  HOST  <payload>.  Peel the
@@ -479,6 +484,21 @@ class CardADParserMixin:
                 hashes.append((dom, user, lm, nt))
             elif secret[:1] not in "[(":
                 plains.append((dom, user, secret))
+
+        # lsassy prints the SAME secret under several domain forms
+        # (PROVA\vagrant AND prova.prova.com\vagrant) - dedup on
+        # (user, secret) so the operator gets one store row + honest
+        # counts, keeping the first (NetBIOS) domain form.
+        def _dedup(rows, key):
+            seen, out = set(), []
+            for r in rows:
+                k = key(r)
+                if k not in seen:
+                    seen.add(k)
+                    out.append(r)
+            return out
+        hashes = _dedup(hashes, lambda r: (r[1].lower(), r[3].lower()))
+        plains = _dedup(plains, lambda r: (r[1].lower(), r[2]))
 
         # ── No secrets: emit ONE actionable finding with the real reason
         if not (hashes or plains):
