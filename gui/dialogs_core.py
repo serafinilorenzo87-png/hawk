@@ -2013,7 +2013,7 @@ class GreenboneDialog:
                       COLORS["text_green"])
         _note_box(win,
                   "After START:\n"
-                  "  • Wait ~30s for services to finish coming up.\n"
+                  "  • Wait up to ~3 min for services to finish coming up.\n"
                   "  • A browser window should open on https://127.0.0.1:9392\n"
                   "  • If it doesn't: open Firefox/Chrome on Kali and paste\n"
                   "    the URL manually (see Access Panel after START).\n"
@@ -2028,7 +2028,27 @@ class GreenboneDialog:
 
         def _start_and_open():
             _safe_destroy(win)
-            self._start_xterm()
+            # Idempotent pre-flight: if gsad is already listening on :9392,
+            # do NOT relaunch gvm-start (that is what produced the double
+            # start + transient bind-failed noise) — go straight to opening
+            # the browser.  open_greenbone_when_ready below sees the port up
+            # and opens immediately.
+            _app0 = getattr(self, "_app", None) or getattr(parent, "app", None)
+            try:
+                from utils.runner import greenbone_web_up
+                _already_up = greenbone_web_up()
+            except Exception:
+                _already_up = False
+            if _already_up:
+                try:
+                    if _app0 and hasattr(_app0, "terminal"):
+                        _app0.terminal.write(
+                            "  [*] Greenbone already up on :9392 — opening "
+                            "browser directly (skipping gvm-start).", "info")
+                except Exception:
+                    pass
+            else:
+                self._start_xterm()
             # Open the browser only once gvmd's web UI actually answers
             # over HTTPS — fixed-delay timers (8s, 15s) raced gvm-start:
             # the page loaded while ospd-openvas was still reloading NVTs

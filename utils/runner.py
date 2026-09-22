@@ -1933,6 +1933,49 @@ _GB_POLL_THREAD = None
 _GB_OPENED = False
 
 
+def _gb_probe_target(url):
+    from urllib.parse import urlsplit
+    p = urlsplit(url)
+    host = p.hostname or "127.0.0.1"
+    port = p.port or (443 if p.scheme == "https" else 80)
+    return host, port
+
+
+def _gb_tcp_open(host, port, timeout=2.0):
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _gb_https_answers(host, port, timeout=3.0):
+    # gvmd serves a self-signed cert - we only want a TLS handshake plus
+    # any HTTP response line, not certificate validation.
+    import socket, ssl
+    try:
+        ctx = ssl._create_unverified_context()
+        with socket.create_connection((host, port), timeout=timeout) as raw:
+            with ctx.wrap_socket(raw, server_hostname=host) as s:
+                req = f"GET / HTTP/1.0\r\nHost: {host}\r\n\r\n"
+                s.sendall(req.encode())
+                return s.recv(64).startswith(b"HTTP/")
+    except Exception:
+        return False
+
+
+def greenbone_web_up(url: str = "https://127.0.0.1:9392"):
+    """One-shot probe - True iff the Greenbone web UI answers on `url` now.
+
+    Used for the idempotent START pre-flight (skip a redundant gvm-start
+    when gsad is already listening on :9392) and reused by the readiness
+    poller's timeout guard so a dead port never gets a browser opened at
+    it."""
+    host, port = _gb_probe_target(url)
+    return _gb_https_answers(host, port) or _gb_tcp_open(host, port)
+
+
 def open_greenbone_when_ready(url: str = "https://127.0.0.1:9392",
                               timeout: float = 180.0,
                               poll_interval: float = 2.0,
@@ -1958,11 +2001,8 @@ def open_greenbone_when_ready(url: str = "https://127.0.0.1:9392",
     """
     global _GB_POLL_THREAD, _GB_OPENED
 
-    import socket, ssl, webbrowser, threading, time
-    from urllib.parse import urlsplit
-    p = urlsplit(url)
-    host = p.hostname or "127.0.0.1"
-    port = p.port or (443 if p.scheme == "https" else 80)
+    import webbrowser, threading, time
+    host, port = _gb_probe_target(url)
 
     def _say(msg):
         if on_status:
@@ -1982,25 +2022,10 @@ def open_greenbone_when_ready(url: str = "https://127.0.0.1:9392",
             return
 
     def _tcp_open():
-        try:
-            with socket.create_connection((host, port), timeout=2):
-                return True
-        except OSError:
-            return False
+        return _gb_tcp_open(host, port)
 
     def _https_answers():
-        # gvmd uses a self-signed cert.  We don't care about validation —
-        # we only want a TLS handshake + HTTP response (any status).
-        try:
-            ctx = ssl._create_unverified_context()
-            with socket.create_connection((host, port), timeout=3) as raw:
-                with ctx.wrap_socket(raw, server_hostname=host) as s:
-                    s.sendall(
-                        f"GET / HTTP/1.0\r\nHost: {host}\r\n\r\n".encode())
-                    data = s.recv(64)
-                    return data.startswith(b"HTTP/")
-        except Exception:
-            return False
+        return _gb_https_answers(host, port)
 
     def _mark_opened():
         global _GB_OPENED
@@ -2029,11 +2054,22 @@ def open_greenbone_when_ready(url: str = "https://127.0.0.1:9392",
                     except Exception: pass
                     return
             time.sleep(poll_interval)
-        _say("Greenbone readiness timeout — opening browser anyway "
-             "(reload the page if it errors).")
-        _mark_opened()
-        try: webbrowser.open(url)
-        except Exception: pass
+        # Timeout reached.  Open the browser ONLY if the endpoint
+        # answers right now - the old fixed fallback flung a browser at
+        # a dead port (classic cause: the sudo password was never
+        # entered in the xterm, so gsad never came up).  On a dead port
+        # emit an actionable message and leave the singleton UNSET so a
+        # later START can retry.
+        if _https_answers() or _tcp_open():
+            _say("Greenbone readiness timeout but :9392 is answering - "
+                 "opening browser (reload the page if it errors).")
+            _mark_opened()
+            try: webbrowser.open(url)
+            except Exception: pass
+        else:
+            _say("Greenbone did not come up on :9392 within the "
+                 "timeout - check the xterm (sudo password not entered, "
+                 "or gvm-start failed).  No browser opened.")
 
     with _GB_LOCK:
         _GB_POLL_THREAD = threading.Thread(
@@ -2082,12 +2118,30 @@ class GreenBoneInstaller:
         # gvm-setup, so no multi-GB feed re-download; this is what the
         # dialog's START button uses when gvm-check-setup already passed.
         script = (
-            "echo '=== HAWK: Starting Greenbone/GVM ===' && "
-            "sudo gvm-start && "
-            "echo '' && "
-            "echo '=== GVM services started. "
-            "Web UI: https://127.0.0.1:9392 ===' && "
-            "echo '=== Return to HAWK - the browser opens when ready. ===' && "
+            "echo '=== HAWK: Starting Greenbone/GVM ==='\n"
+            "echo '[*] Enter your sudo password here if prompted.'\n"
+            "sudo gvm-start\n"
+            "echo ''\n"
+            "# Verify gsad is actually listening on :9392 instead of\n"
+            "# printing a fixed success line: gvm-start can return 0 while\n"
+            "# gsad is still binding, or do nothing at all if the sudo\n"
+            "# password was never entered above.\n"
+            "ok=0\n"
+            "for i in $(seq 1 10); do\n"
+            "  if ss -tln 2>/dev/null | grep -q ':9392' || "
+            "systemctl is-active --quiet gsad 2>/dev/null; then ok=1; break; fi\n"
+            "  sleep 1\n"
+            "done\n"
+            'if [ "$ok" = 1 ]; then\n'
+            "  echo '=== OK: gsad is listening on :9392. "
+            "Web UI: https://127.0.0.1:9392 ==='\n"
+            "  echo '=== Return to HAWK - the browser opens when ready. ==='\n"
+            "else\n"
+            "  echo '=== FAILED: gsad is NOT listening on :9392. ==='\n"
+            "  echo '    Check the messages above - probable sudo password "
+            "not entered, or gvm-start failed.'\n"
+            "  echo '    Retry:  sudo gvm-start   then   ss -tlnp | grep 9392'\n"
+            "fi\n"
             "read -p 'Press ENTER to close...'"
         )
         return _open_terminal("HAWK — Starting Greenbone/GVM", script)

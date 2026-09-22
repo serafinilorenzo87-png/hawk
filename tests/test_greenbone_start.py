@@ -90,5 +90,77 @@ class GreenboneRunOpensWebTests(unittest.TestCase):
         self.assertNotIn("_run_greenbone", body)
 
 
+class GreenboneReadinessPollTests(unittest.TestCase):
+    """open_greenbone_when_ready must not fling a browser at a dead port.
+
+    Regression (observed live): the timeout fallback called
+    webbrowser.open() unconditionally, so a cold-sudo START (password never
+    entered in the xterm -> gsad never came up) still opened a browser on a
+    port that never answered.  It must now open only when the port answers.
+    """
+
+    def _run(self, tcp, https, timeout=0.12, poll=0.01):
+        from unittest import mock
+        import utils.runner as r
+        r._reset_greenbone_open_state()
+        opened, msgs = [], []
+        with mock.patch.object(r, "_gb_tcp_open", return_value=tcp), \
+             mock.patch.object(r, "_gb_https_answers", return_value=https), \
+             mock.patch("webbrowser.open",
+                        side_effect=lambda u: opened.append(u)):
+            r.open_greenbone_when_ready(timeout=timeout, poll_interval=poll,
+                                        on_status=msgs.append)
+            t = r._GB_POLL_THREAD
+            if t:
+                t.join(5)
+        return opened, msgs
+
+    def test_no_browser_when_port_stays_down(self):
+        opened, msgs = self._run(tcp=False, https=False)
+        self.assertEqual(opened, [])                       # no dead-port tab
+        self.assertTrue(
+            any("9392" in m and "xterm" in m for m in msgs),
+            f"expected an actionable message, got {msgs}")
+
+    def test_opens_browser_when_web_answers(self):
+        opened, _ = self._run(tcp=True, https=True)
+        self.assertEqual(opened, ["https://127.0.0.1:9392"])
+
+    def test_opens_at_timeout_only_if_port_answers(self):
+        # tcp stays down so the loop never probes https; the sole https
+        # check is the post-timeout guard -> True -> open via fallback.
+        opened, msgs = self._run(tcp=False, https=True)
+        self.assertEqual(opened, ["https://127.0.0.1:9392"])
+        self.assertTrue(any("answering" in m for m in msgs))
+
+    def test_greenbone_web_up_probe(self):
+        from unittest import mock
+        import utils.runner as r
+        with mock.patch.object(r, "_gb_https_answers", return_value=False), \
+             mock.patch.object(r, "_gb_tcp_open", return_value=False):
+            self.assertFalse(r.greenbone_web_up())
+        with mock.patch.object(r, "_gb_https_answers", return_value=True):
+            self.assertTrue(r.greenbone_web_up())
+
+
+class GreenboneStartVerifyTests(unittest.TestCase):
+    """START must (a) verify gsad actually came up instead of printing a
+    fixed 'services started', and (b) skip a redundant gvm-start when the
+    web UI is already listening."""
+
+    def test_start_script_verifies_gsad_listening(self):
+        body = _method(_src("utils/runner.py"), "start_in_xterm")
+        self.assertTrue("ss -tln" in body or "is-active" in body)
+        self.assertIn(":9392", body)
+        self.assertIn("FAILED", body)                  # honest failure branch
+        self.assertIn("sudo password", body.lower())   # explicit prompt notice
+
+    def test_start_preflight_skips_gvm_start_when_up(self):
+        body = _method(_src("gui/dialogs_core.py"), "_start_and_open")
+        self.assertIn("greenbone_web_up", body)        # probe first
+        self.assertIn("_start_xterm", body)            # still starts when down
+        self.assertIn("else:", body)                   # start is guarded
+
+
 if __name__ == "__main__":
     unittest.main()
