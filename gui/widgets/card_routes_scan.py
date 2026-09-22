@@ -503,6 +503,11 @@ class CardScanRoutesMixin:
             self.app.terminal.write(
                 "  [+] Burp Suite launched (detached — HAWK does not track "
                 "or stop it; close it from its own window).", "success")
+            # Flip the card dot to "done" (cyan).  Burp runs detached and
+            # HAWK neither tracks nor can stop it, so cyan "launched" is the
+            # correct terminal state — not grey (never ran) and not yellow
+            # (running/stoppable).  Same pattern as _route_greenbone.
+            self._set_tool_status(tool.id, "done")
         except Exception as e:
             self.app.terminal.write(
                 f"  [!] Could not launch Burp Suite: {e}", "error")
@@ -555,10 +560,19 @@ class CardScanRoutesMixin:
         )
         script = (banner + db_up
                   + "msfconsole; read -p 'Press ENTER to close...'")
-        _open_terminal("HAWK — Metasploit Console", script)
-        self.app.terminal.write(
-            "  [+] Metasploit launched in xterm (DB auto-started).",
-            "success")
+        launched = _open_terminal("HAWK — Metasploit Console", script)
+        if launched:
+            self.app.terminal.write(
+                "  [+] Metasploit launched in xterm (DB auto-started).",
+                "success")
+            # Flip the card dot to "done" (cyan): msfconsole runs in a
+            # detached xterm that HAWK does not track or stop, so cyan
+            # "launched" is the correct terminal state (mirrors Burp).
+            self._set_tool_status(tool.id, "done")
+        else:
+            self.app.terminal.write(
+                "  [!] No terminal emulator available to launch Metasploit.",
+                "error")
 
     def _route_greenbone(self, tool):
         from gui.dialogs import GreenboneDialog

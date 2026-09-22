@@ -56,6 +56,13 @@ class BurpDetachedLaunchTests(unittest.TestCase):
         self.assertNotIn("_run_tool(", body)
         self.assertNotIn("ToolRunner(", body)
 
+    def test_burp_route_flips_card_status_done(self):
+        # After a successful detached launch the card dot must go cyan
+        # ("done"); it used to stay grey because the route set no status.
+        body = _method(_src("gui/widgets/card_routes_scan.py"),
+                       "_route_burpsuite")
+        self.assertIn('_set_tool_status(tool.id, "done")', body)
+
 
 if __name__ == "__main__":
     unittest.main()

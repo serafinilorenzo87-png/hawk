@@ -52,6 +52,14 @@ class MsfdbAutostartTests(unittest.TestCase):
         self.assertIn("msfdb start", body)          # start it when down
         self.assertIn("msfconsole", body)
 
+    def test_launcher_flips_card_status_done_on_launch(self):
+        # The dot must go cyan once the xterm actually launched (guarded on
+        # the _open_terminal result); it used to stay grey forever.
+        body = _method(_src("gui/widgets/card_routes_scan.py"),
+                       "_route_metasploit_launcher")
+        self.assertIn("launched = _open_terminal(", body)
+        self.assertIn('_set_tool_status(tool.id, "done")', body)
+
 
 class BgCaptureOrphanSafetyTests(unittest.TestCase):
     def test_bg_capture_has_group_and_watchdog(self):
