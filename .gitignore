@@ -55,6 +55,9 @@ records.csv
 # ── Local tooling / agent config (never push) ───────────────
 .claude/
 
+# ── Local-only internal notes (private to the maintainer — never push) ──
+docs/internal/
+
 # ── OS / editor noise ───────────────────────────────────────
 .DS_Store
 Thumbs.db
