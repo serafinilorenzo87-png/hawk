@@ -165,10 +165,12 @@ class ProducerContractTests(unittest.TestCase):
 
     def test_ad_dumps_are_never_verified(self):
         # Uncracked hashes, a machine account nobody logged in with, a
-        # decrypted GPP cpassword nobody has sprayed yet, and an ESC1
-        # UnPAC'd NT hash HAWK recovered but never NTLM-logged-in with.
+        # decrypted GPP cpassword nobody has sprayed yet, an ESC1 UnPAC'd
+        # NT hash HAWK recovered but never NTLM-logged-in with, and the
+        # in-memory LSASS secrets (lsassy NT hash + cleartext) — all loot,
+        # none proven by an authentication.
         vals = self._verified_literals("gui/widgets/card_parsers_ad.py")
-        self.assertEqual(10, len(vals))
+        self.assertEqual(12, len(vals))
         self.assertNotIn(True, vals)
 
     def test_peas_scrapes_are_never_verified(self):

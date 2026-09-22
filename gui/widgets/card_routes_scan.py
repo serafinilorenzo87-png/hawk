@@ -400,6 +400,10 @@ class CardScanRoutesMixin:
             "certipy_quick", "certipy_find", "certipy_req",
             "rbcd_attack", "findDelegation",
             "impacket_secretsdump",
+            # lsassy uses {user}/{password} (nxc) + optional NTLM hash for
+            # pass-the-hash — the shared AD auth dialog builds the command
+            # (binary=="nxc" swaps -p for -H on PtH; see _build_cmd).
+            "lsassy",
             "addcomputer", "adidnsdump",
         }
         if tool.id in _AD_TEMPLATE_AUTH_IDS:

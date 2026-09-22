@@ -2320,6 +2320,32 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                 "-hashes :<NT>            — pass-the-hash (or use NTLM hash field)",
             ],
         },
+        "lsassy": {
+            "purpose": (
+                "NetExec lsassy module — dumps LSASS memory on a host "
+                "you OWN and recovers the logon secrets of everyone "
+                "signed in: NT hashes + any cleartext passwords cached "
+                "by WDigest/SSP.  In-memory counterpart to SecretsDump's "
+                "at-rest SAM/LSA/NTDS dump — the fast way to pivot from "
+                "one owned box to the next set of creds."),
+            "needs":   "LOCAL ADMIN on the target (nxc must print "
+                       "'(Pwn3d!)').  Pass-the-hash works via the NTLM "
+                       "hash field.  Needs the lsassy package inside "
+                       "netexec (pipx inject netexec lsassy).",
+            "output":  "HAWK parses nxc's output → each recovered secret "
+                       "becomes a Credential Store entry (AD RESULTS box): "
+                       "NT hashes tagged NTLM (hashcat -m 1000, CRACK from "
+                       "the row), cleartext passwords stored ready to spray "
+                       "/ PtH.  If netexec has no working 'lsassy' module, "
+                       "HAWK says so + how to install it.",
+            "extras":  [
+                "-o METHOD=nanodump       — stealthier dump (evades some EDR)",
+                "-o METHOD=comsvcs        — comsvcs.dll MiniDump (default)",
+                "--local-auth             — target LOCAL admin (non-domain account)",
+                "-d <DOMAIN>              — domain of the account",
+                "-k                       — use Kerberos auth",
+            ],
+        },
         "ticketer_golden": {
             "purpose": (
                 "Impacket ticketer — forges a Golden Ticket offline.  "

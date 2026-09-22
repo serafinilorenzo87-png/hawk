@@ -415,6 +415,204 @@ class CardADParserMixin:
             "success")
         return True
 
+    def _parse_lsassy_to_intel(self, tool, log: list) -> bool:
+        r"""NetExec `-M lsassy` output -> in-memory LSASS secrets.
+
+        lsassy dumps LSASS on a host you OWN (local admin required) and
+        prints each recovered logon secret through nxc's highlight line
+        (no [*]/[+] marker), e.g.:
+            SMB  10.10.10.10  445  DC01   DOMAIN\user aad3b...:31d6c...
+            SMB  10.10.10.10  445  DC01   DOMAIN\user Summer2024!
+        The first form is an LM:NT hash pair, the second a cleartext
+        password (WDigest/SSP cached).  Every secret lands in the
+        Credential Store the same way SecretsDump's do -- NT hashes
+        pre-tagged NTLM (hashcat -m 1000), cleartext as usable creds --
+        so the operator cracks / sprays from the store.  In-memory
+        counterpart to the at-rest SAM/LSA/NTDS dump.
+
+        Returns True whenever it emits a finding (creds recovered, or a
+        dedicated actionable finding when none were: lsassy module
+        missing, not local admin, LSASS protected).  Only a run with no
+        recognisable lsassy output at all falls back to the generic
+        parser.
+        """
+        import re
+        from utils.session import Credential
+        from utils.run_id import new_run_id, TOOL_RUN_CATEGORY
+
+        target = self._get_target() or "target"
+        NL = chr(10)
+        BS = chr(92)                    # backslash in DOMAIN\user
+        _EMPTY_NT = "31d6cfe0d16ae931b73c59d7e0c089c0"   # NT of ""
+        _HASHPAIR = re.compile(r"^[a-fA-F0-9]{32}:[a-fA-F0-9]{32}$")
+        _PROTOS = ("SMB", "SMBv2", "LDAP", "WINRM", "WMI", "MSSQL", "RDP")
+
+        def _payload(line):
+            # nxc prints  PROTO  IP  PORT  HOST  <payload>.  Peel the
+            # 4-column prefix off so we can read the highlight payload;
+            # split(None, 4) keeps the payload's own spaces intact.
+            parts = line.split(None, 4)
+            if (len(parts) == 5 and parts[0] in _PROTOS
+                    and parts[2].isdigit()):
+                return parts[4]
+            return line
+
+        clean = [self._strip_ansi(raw).rstrip() for _, raw in log]
+
+        hashes = []     # (domain, user, lm, nt)
+        plains = []     # (domain, user, password)
+        for line in clean:
+            payload = _payload(line).strip()
+            if not payload or payload[:1] in "[(*+-":
+                continue                      # nxc status/marker line
+            first, sep, rest = payload.partition(" ")
+            if not sep or BS not in first:
+                continue                      # not a DOMAIN\user secret
+            dom, _, user = first.partition(BS)
+            if not user:
+                continue
+            secret = rest.strip()
+            if not secret:
+                continue
+            if _HASHPAIR.match(secret):
+                lm, nt = secret.split(":")
+                hashes.append((dom, user, lm, nt))
+            elif secret[:1] not in "[(":
+                plains.append((dom, user, secret))
+
+        # ── No secrets: emit ONE actionable finding with the real reason
+        if not (hashes or plains):
+            low = NL.join(clean).lower()
+            module_missing = ("lsassy" in low and (
+                "no module named" in low or "module not found" in low
+                or "modulenotfounderror" in low or "unable to load" in low
+                or "cannot import" in low or "importerror" in low
+                or "requires the lsassy" in low or "pip install lsassy" in low
+                or "no module" in low))
+            if module_missing:
+                parts = [
+                    f"lsassy recovered nothing on {target}: netexec has no "
+                    f"working 'lsassy' module (the lsassy Python package is "
+                    f"missing or failed to import).",
+                    "",
+                    "Fix, then re-run this card:",
+                    "  pipx inject netexec lsassy      # nxc installed via pipx",
+                    "  sudo pip install lsassy         # system-wide netexec",
+                    "  nxc smb <target> -L | grep -i lsassy   # confirm it lists",
+                ]
+            else:
+                parts = [
+                    f"lsassy ran against {target} but recovered no LSASS "
+                    f"secrets.  Most common reasons, in order:",
+                    "",
+                    "  1. Not LOCAL ADMIN on the target - nxc must print "
+                    "'(Pwn3d!)'.  Re-check the creds / try --local-auth.",
+                    "  2. LSASS is protected (RunAsPPL / Credential Guard / "
+                    "EDR) - try another method:  -o METHOD=nanodump",
+                    "  3. No interactive logon secrets are cached in LSASS on "
+                    "this host right now.",
+                    "",
+                    "At-rest fallback: IMPACKET SecretsDump (SAM+LSA on the "
+                    "host), or DCSync if you hold replication rights.",
+                ]
+            tail = [ln for ln in clean if ln.strip()][-8:]
+            if tail:
+                parts += ["", "Last output lines:"] + [f"  {ln}" for ln in tail]
+            desc = NL.join(parts)
+            self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
+                title=f"LSASSY - no secrets recovered on {target}",
+                description=desc, severity="info", source=tool.name,
+                replace=True))
+            self.app.terminal.write(
+                f"  [*] LSASSY - no secrets parsed from {target}; see Target "
+                f"Intel for the reason + runbook.", "warn")
+            return True
+
+        # ── Push every recovered secret into the Credential Store ───────
+        rid = new_run_id()
+        added = 0
+        stored_hashes, stored_plains = [], []
+        if hasattr(self.app, "cred_store"):
+          with self.app.cred_store.batch():
+            for dom, user, lm, nt in hashes:
+                if (nt or "").lower() == _EMPTY_NT:
+                    continue              # blank/disabled account - skip
+                full_user = f"{dom}{BS}{user}" if dom else user
+                note = NL.join([
+                    f"NT hash from LSASS (lsassy) on {target}.",
+                    f"NT:   {nt}",
+                    f"PtH:  nxc smb {target} -u {user} -H {nt}",
+                    f"Crack: hashcat -m 1000 {nt} rockyou.txt",
+                ])
+                try:
+                    self.app.cred_store.add_credential(Credential(
+                        username=full_user, password="",
+                        cred_type="hash", hash_val=f"{lm}:{nt}",
+                        hash_type="NTLM", services=["SMB", "AD"],
+                        source_phase=self.phase_id, host=target,
+                        notes=note, linked_run_id=rid,
+                        category=TOOL_RUN_CATEGORY, verified=False))
+                    added += 1
+                    stored_hashes.append((full_user, nt))
+                except Exception as e:
+                    self.app.terminal.write(
+                        f"  [!] cred store add (lsassy NT) failed: {e}", "warn")
+            for dom, user, pw in plains:
+                full_user = f"{dom}{BS}{user}" if dom else user
+                note = NL.join([
+                    f"Cleartext password recovered from LSASS (lsassy) on "
+                    f"{target}.",
+                    "Immediately usable for login / lateral movement.",
+                    f"Verify:  nxc smb {target} -u {user} -p '{pw}'",
+                ])
+                try:
+                    self.app.cred_store.add_credential(Credential(
+                        username=full_user, password=pw,
+                        cred_type="cleartext", hash_val="",
+                        hash_type="", services=["SMB", "AD"],
+                        source_phase=self.phase_id, host=target,
+                        notes=note, linked_run_id=rid,
+                        category=TOOL_RUN_CATEGORY, verified=False))
+                    added += 1
+                    stored_plains.append((full_user, pw))
+                except Exception as e:
+                    self.app.terminal.write(
+                        f"  [!] cred store add (lsassy plain) failed: {e}", "warn")
+
+        # ── Summary finding ─────────────────────────────────────────────
+        n_hash = len(stored_hashes)
+        n_plain = len(stored_plains)
+        severity = "critical" if n_plain else "high"
+        parts = [
+            f"lsassy dumped LSASS on {target} (local admin confirmed).",
+            "",
+            f"  NT hashes:            {n_hash}",
+            f"  Cleartext passwords:  {n_plain}",
+            "",
+            f"-> All {added} secret{'s' if added != 1 else ''} added to the "
+            f"Credential Store (AD RESULTS).  NT hashes are hashcat -m 1000 "
+            f"ready; cleartext passwords are usable as-is (spray / PtH now).",
+        ]
+        if stored_plains:
+            parts += ["", "Cleartext (highest value):"]
+            for u, pw in stored_plains:
+                parts.append(f"  * {u}   {pw}")
+        if stored_hashes:
+            parts += ["", f"NT hashes ({n_hash}):"]
+            for u, nt in stored_hashes:
+                parts.append(f"  * {u}   {nt}")
+        title = (f"LSASSY - {n_hash} NT hash(es) + {n_plain} cleartext "
+                 f"on {target}")
+        desc = NL.join(parts)
+        self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
+            title=title, description=desc, severity=severity,
+            source=tool.name, linked_run_id=rid, replace=True))
+        self.app.terminal.write(
+            f"  [+] LSASSY - {added} secret(s) added to Credential Store "
+            f"(NT hashes hashcat -m 1000; cleartext usable as-is).",
+            "success")
+        return True
+
     def _parse_ticketer_to_intel(self, tool, log: list) -> bool:
         """impacket-ticketer output — a forged Golden/Silver ticket.
 

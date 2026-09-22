@@ -2066,6 +2066,10 @@ class CardRuntimeMixin:
                 "adidnsdump":        self._parse_adidnsdump_to_intel,
                 "ldapdomaindump":    self._parse_ldapdomaindump_to_intel,
                 "nxc_ldap":          self._parse_nxc_ldap_to_intel,
+                # lsassy dumps LSASS in-memory via nxc -M lsassy; the
+                # parser pushes recovered NT hashes + cleartext into the
+                # Credential Store the same way secretsdump does.
+                "lsassy":            self._parse_lsassy_to_intel,
                 "findDelegation":    self._parse_findelegation_to_intel,
                 # ticketer forges a Golden Ticket — full domain-wide
                 # persistence, so it gets a dedicated CRITICAL parser
