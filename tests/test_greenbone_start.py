@@ -190,6 +190,18 @@ class GreenboneWebGateTests(unittest.TestCase):
         # ...and no longer with the gvmd Manager probe.
         self.assertNotIn("GreenBoneRunner.is_running()", cls)
 
+    def test_g2_access_panel_button_populates_app(self):
+        # The ACCESS PANEL card button builds the dialog via __new__
+        # (skipping __init__), so it MUST set _app — otherwise the panel's
+        # terminal.write() calls (incl. G2's web-UI-down warning) raise
+        # AttributeError and vanish to stderr instead of the HAWK terminal.
+        src = _src("gui/widgets/card_widget.py")
+        i = src.index("def _open_access_panel")
+        j = src.index("access_btn = ctk.CTkButton", i)
+        body = src[i:j]
+        self.assertIn("GreenboneDialog.__new__", body)
+        self.assertIn("dlg._app", body)
+
     def test_g2_access_panel_open_browser_gated_on_web_ui(self):
         body = _method(_src("gui/dialogs_core.py"), "_show_access_panel")
         # greenbone_web_up() is consulted BEFORE webbrowser.open() so a dead

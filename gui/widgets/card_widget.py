@@ -1526,6 +1526,14 @@ class KillChainCard(CardRoutesMixin, CardADRoutesMixin, CardIntelParserMixin, Ca
                 # dialog's _show_access_panel helper.
                 try:
                     dlg = GreenboneDialog.__new__(GreenboneDialog)
+                    # __new__ skips __init__, so populate every attribute
+                    # _show_access_panel touches — above all _app, without
+                    # which the panel's terminal.write() calls (COPY URL,
+                    # OPEN BROWSER's web-UI-down warning, login helpers)
+                    # raise AttributeError and vanish to stderr.
+                    dlg._app  = self.app
+                    dlg._tool = t
+                    dlg._callback_setup_complete = None
                     dlg._callback_run  = lambda *a, **kw: None
                     dlg._callback_skip = lambda *a, **kw: None
                     dlg._show_access_panel(self)
