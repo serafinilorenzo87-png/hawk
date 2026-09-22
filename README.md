@@ -37,6 +37,14 @@ HAWK **wraps** the standard open-source tools (nmap, impacket, nuclei, …): it
 orchestrates the workflow and produces the reporting — it does not reimplement
 the tools themselves.
 
+HAWK is a **kill-chain orchestrator**, not an exploitation framework. Its
+value is in structuring the engagement: turning attack surface into actionable
+findings, and driving the credential and Active Directory lifecycle
+(dump → Credential Store → crack → lateral movement) through to the
+report. Gaining the initial foothold — the exploit itself, or social
+engineering — is left to the wrapped tools and to the operator. HAWK is
+strongest in enumeration, web testing, and post-exploitation / AD.
+
 ## Run
 
 Copy the folder into Kali, for example:
