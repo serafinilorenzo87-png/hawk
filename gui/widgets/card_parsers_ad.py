@@ -539,8 +539,11 @@ class CardADParserMixin:
             if tail:
                 parts += ["", "Last output lines:"] + [f"  {ln}" for ln in tail]
             desc = NL.join(parts)
+            # STABLE title (no counts / outcome) + replace=True so a later
+            # successful run OVERWRITES this "no secrets" card instead of
+            # stacking a second, contradictory LSASSY finding.
             self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
-                title=f"LSASSY - no secrets recovered on {target}",
+                title=f"LSASSY (LSASS dump) - {target}",
                 description=desc, severity="info", source=tool.name,
                 replace=True))
             self.app.terminal.write(
@@ -621,8 +624,10 @@ class CardADParserMixin:
             parts += ["", f"NT hashes ({n_hash}):"]
             for u, nt in stored_hashes:
                 parts.append(f"  * {u}   {nt}")
-        title = (f"LSASSY - {n_hash} NT hash(es) + {n_plain} cleartext "
-                 f"on {target}")
+        # STABLE title (counts live in the description) + replace=True so
+        # re-running LSASSY refreshes the SAME finding instead of stacking
+        # a new one each run (and supersedes a prior "no secrets" card).
+        title = f"LSASSY (LSASS dump) - {target}"
         desc = NL.join(parts)
         self.app.after(0, lambda: self.app.target_intel.add_auto_finding(
             title=title, description=desc, severity=severity,

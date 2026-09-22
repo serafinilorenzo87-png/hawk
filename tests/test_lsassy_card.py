@@ -163,10 +163,20 @@ class LsassyParserTests(unittest.TestCase):
         parser = _Parser()
         store = _Store()
         findings = []
+
+        def _add_finding(**k):
+            # Mirror target_intel: replace=True overwrites the finding with
+            # the SAME title instead of stacking a new one.
+            if k.get("replace"):
+                for i, f in enumerate(findings):
+                    if f.get("title") == k.get("title"):
+                        findings[i] = k
+                        return
+            findings.append(k)
+
         parser.app = types.SimpleNamespace(
             cred_store=store,
-            target_intel=types.SimpleNamespace(
-                add_auto_finding=lambda **k: findings.append(k)),
+            target_intel=types.SimpleNamespace(add_auto_finding=_add_finding),
             terminal=types.SimpleNamespace(write=lambda *a, **k: None),
             after=lambda _delay, fn: fn())
         yield parser, store, findings
@@ -201,14 +211,30 @@ class LsassyParserTests(unittest.TestCase):
             parser._parse_lsassy_to_intel(self._TOOL, _LOG_CREDS)
             self.assertEqual(1, len(findings))
             f = findings[0]
+            # STABLE title (target only, no counts) so re-runs overwrite it.
             self.assertIn("LSASSY", f["title"])
             self.assertIn("10.10.10.10", f["title"])
-            # Cleartext present -> critical; the actual secret is shown.
+            self.assertNotIn("NT hash", f["title"])
+            # Counts + secrets live in the description.
             self.assertEqual("critical", f["severity"])
+            self.assertRegex(f["description"], r"NT hashes:\s*1")
+            self.assertRegex(f["description"], r"Cleartext passwords:\s*1")
             self.assertIn("Summer2024!", f["description"])
             self.assertIn(_NT, f["description"])
             self.assertTrue(f.get("replace"))
             self.assertTrue(f.get("linked_run_id"))
+
+    def test_rerun_overwrites_prior_lsassy_finding(self):
+        # A "no secrets" run followed by a successful run must leave ONE
+        # LSASSY finding (the latest), not two contradictory cards.
+        with self._parser() as (parser, store, findings):
+            parser._parse_lsassy_to_intel(self._TOOL, _LOG_NOT_ADMIN)
+            self.assertEqual(1, len(findings))
+            self.assertEqual("info", findings[0]["severity"])
+            parser._parse_lsassy_to_intel(self._TOOL, self._LIVE)
+            lsassy = [f for f in findings if "LSASSY" in f.get("title", "")]
+            self.assertEqual(1, len(lsassy))          # overwritten, not stacked
+            self.assertEqual("critical", lsassy[0]["severity"])
 
     def test_module_missing_is_actionable_no_creds(self):
         with self._parser() as (parser, store, findings):
@@ -257,7 +283,10 @@ class LsassyParserTests(unittest.TestCase):
             p = next(c for c in store.creds if c.cred_type == "cleartext")
             self.assertEqual("vagrant", p.password)
             f = findings[0]
-            self.assertIn("1 NT hash(es) + 1 cleartext", f["title"])
+            self.assertIn("LSASSY", f["title"])
+            self.assertNotIn("NT hash", f["title"])          # stable title
+            self.assertRegex(f["description"], r"NT hashes:\s*1")
+            self.assertRegex(f["description"], r"Cleartext passwords:\s*1")
 
     def test_no_secrets_gives_reason_and_runbook(self):
         with self._parser() as (parser, store, findings):
