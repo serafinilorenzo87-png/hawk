@@ -111,7 +111,7 @@ class A02DirectBuilderTests(unittest.TestCase):
             "_shq(f'{u}@{pivot}')",                        # local forward
             "_shq(f'{u}@{target}')",                        # SOCKS / sshuttle
             "f\"-dc-ip {_shq(dc) if dc else '<dc-ip>'}",    # certipy auth
-            "_shq(f'{_OUTPUTS_DIR}/ntds-{target}')",        # secretsdump path
+            "_shq(_ntds_out)",                              # secretsdump path (contained)
             "-dc-ip {_shq(target)} -no-pass \"",            # GetNPUsers
             "_shq(f'{domain}/')",                           # GetNPUsers domain
             "_shq(f'{d}/{u}')",                             # AS-REP go

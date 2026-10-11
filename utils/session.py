@@ -20,7 +20,8 @@ import re
 import shutil
 import uuid
 from datetime import datetime
-from utils.config import SESSIONS_DIR, is_within_base, require_within_base
+from utils.config import (SESSIONS_DIR, is_within_base, is_valid_target,
+                          require_within_base)
 
 
 # ─── Hash type detector ───────────────────────────────────────────────────────
@@ -1167,7 +1168,17 @@ class Session:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)
         self.file_path      = path
-        self.target_ip      = data.get("target_ip", self.target_ip)
+        _loaded_target = data.get("target_ip", self.target_ip)
+        # Session files are untrusted input (threat model: a hand-edited or
+        # tampered session).  Re-validate the loaded target_ip — but only
+        # when non-empty, since "" is legitimate for a freshly created
+        # session — so a crafted value carrying path separators can never
+        # reach an output-filename builder downstream.
+        if _loaded_target and not is_valid_target(_loaded_target):
+            print(f"[HAWK] session load: dropping malformed target_ip "
+                  f"{_loaded_target!r} (not an IPv4/hostname)")
+            _loaded_target = ""
+        self.target_ip      = _loaded_target
         self.target_domain  = data.get("target_domain", "")
         self.platform       = data.get("platform", "")
         self.detected_os    = data.get("detected_os", "")

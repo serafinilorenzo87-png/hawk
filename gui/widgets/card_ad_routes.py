@@ -5066,9 +5066,12 @@ class CardADRoutesMixin:
         # defaults; the operator can still hand-edit / add chips
         # afterwards.
         if tool.id == "impacket_secretsdump":
-            from utils.config import OUTPUTS_DIR as _OUTPUTS_DIR
+            from utils.config import (OUTPUTS_DIR as _OUTPUTS_DIR,
+                                      require_within_base)
+            _ntds_out = require_within_base(
+                f"{_OUTPUTS_DIR}/ntds-{target}", "secretsdump ntds output")
             _DCSYNC_EXTRAS = (
-                f"-just-dc -outputfile {_shq(f'{_OUTPUTS_DIR}/ntds-{target}')}")
+                f"-just-dc -outputfile {_shq(_ntds_out)}")
             _TARGET_DUMP_EXTRAS = ""
 
             def _apply_mode(*_):
@@ -6187,8 +6190,11 @@ class CardADRoutesMixin:
                         "+ password.", "warn")
                     return
                 import os as _os
-                from utils.config import OUTPUTS_DIR as _OUT
-                outp = _os.path.join(_OUT, f"asrep-{target}.txt")
+                from utils.config import (OUTPUTS_DIR as _OUT,
+                                          require_within_base)
+                outp = require_within_base(
+                    _os.path.join(_OUT, f"asrep-{target}.txt"),
+                    "AS-REP output")
                 self._run_raw(tool, (
                     f"impacket-GetNPUsers {_shq(f'{domain}/{u}:{p}')} "
                     f"-dc-ip {_shq(target)} -request -format hashcat "
@@ -6333,8 +6339,9 @@ class CardADRoutesMixin:
         _row("Username", user_var)
         _row("Domain",   domain_var)
 
-        from utils.config import OUTPUTS_DIR as _OUTDIR
-        _outpath = _OUTDIR + f"/asrep-{target}.txt"
+        from utils.config import OUTPUTS_DIR as _OUTDIR, require_within_base
+        _outpath = require_within_base(
+            _OUTDIR + f"/asrep-{target}.txt", "AS-REP output")
         _note_box(
             win,
             f"Output file:  {_outpath}\n"

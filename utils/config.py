@@ -666,6 +666,29 @@ def is_within_base(path: str) -> bool:
     return real == _BASE_DIR_REAL or real.startswith(_BASE_DIR_REAL + os.sep)
 
 
+def is_valid_target(value: str) -> bool:
+    """True if ``value`` is a dotted-quad IPv4 (each octet 0-255) or a DNS
+    hostname.  The canonical target shape: alphanumerics, dots and hyphens
+    only — no path separators and no shell metacharacters — so a validated
+    target is safe both as an argv token and as a filename component.
+
+    Lives here, outside the GUI layer, so the target bar (entry validation)
+    and ``Session.load`` (which rejects a tampered ``target_ip`` in an
+    untrusted session file) enforce the exact same rule.
+    """
+    if not value:
+        return False
+    import re
+    # Anchor with \Z, not $: in Python `$` also matches just before a
+    # trailing newline, so "1.2.3.4\n" / "host\n" would wrongly validate.
+    m = re.match(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\Z", value)
+    if m:
+        return all(0 <= int(o) <= 255 for o in m.groups())
+    host = (r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?"
+            r"(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*\Z")
+    return bool(re.match(host, value))
+
+
 def is_allowed_external_write(path: str) -> bool:
     """True for the small allowlist of explicit system integration files."""
     if not path:
