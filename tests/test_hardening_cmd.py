@@ -111,6 +111,38 @@ class MsfLaunchHardeningTests(unittest.TestCase):
         self.assertIn("invalid LPORT", self.src)
 
 
+class MarkdownInjectionTests(unittest.TestCase):
+    """B-R01: render_markdown escapes HTML entities and fence breakouts."""
+
+    def setUp(self):
+        self.src = _src("modules/report/render.py")
+
+    def test_md_safe_exists(self):
+        self.assertIn("def _md_safe(", self.src)
+
+    def test_md_fence_line_exists(self):
+        self.assertIn("def _md_fence_line(", self.src)
+
+    def test_finding_title_escaped(self):
+        self.assertIn("_md_safe(it['title'])", self.src)
+
+    def test_tool_name_escaped(self):
+        self.assertIn("_md_safe(o['tool'])", self.src)
+
+    def test_output_lines_fence_safe(self):
+        self.assertIn("_md_fence_line(ln)", self.src)
+
+    def test_md_safe_escapes_html(self):
+        from modules.report.render import _md_safe
+        self.assertEqual(_md_safe("<script>"), "&lt;script&gt;")
+        self.assertEqual(_md_safe("a&b"), "a&amp;b")
+
+    def test_md_fence_line_neutralizes_backtick_fence(self):
+        from modules.report.render import _md_fence_line
+        result = _md_fence_line("```injected")
+        self.assertNotIn("```", result)
+
+
 class ReportFilePermsTests(unittest.TestCase):
     """D-01: report deliverables (containing recovered creds) are chmod 0o600."""
 
