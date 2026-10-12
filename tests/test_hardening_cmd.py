@@ -111,6 +111,23 @@ class MsfLaunchHardeningTests(unittest.TestCase):
         self.assertIn("invalid LPORT", self.src)
 
 
+class ReportFilePermsTests(unittest.TestCase):
+    """D-01: report deliverables (containing recovered creds) are chmod 0o600."""
+
+    def setUp(self):
+        self.src = _src("modules/report/engine.py")
+
+    def test_text_report_restricted(self):
+        idx = self.src.index('open(path, "w"')
+        chunk = self.src[idx:idx + 200]
+        self.assertIn("os.chmod(path, 0o600)", chunk)
+
+    def test_pdf_report_restricted(self):
+        idx = self.src.index('open(path, "wb"')
+        chunk = self.src[idx:idx + 200]
+        self.assertIn("os.chmod(path, 0o600)", chunk)
+
+
 class TempDirHardeningTests(unittest.TestCase):
     """G-01: fallback temp dir is created 0o700 and verified (owner, not
     symlink) before use.  Fail-closed to TMP_DIR on any check failure."""
