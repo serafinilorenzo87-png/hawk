@@ -336,6 +336,90 @@ def _is_pre_dotnet4_windows(fp):
     return None
 
 
+_WINPEAS_EXE_VARIANTS = [
+    {
+        "id": "any",
+        "name": "winPEASany.exe",
+        "runtime": ".NET 4+",
+        "arch": "any",
+        "obfuscated": False,
+        "desc": ("Any-CPU build — runs on both x86 and x64 hosts at "
+                 "the cost of a slightly larger binary.  Best when "
+                 "the target architecture is unknown."),
+        "url": ("https://github.com/peass-ng/PEASS-ng/releases/"
+                "latest/download/winPEASany.exe"),
+        "local_name": "winPEASany.exe",
+        "script_name": "winPEASany.exe",
+    },
+    {
+        "id": "any_ofs",
+        "name": "winPEASany.exe (obfuscated)",
+        "runtime": ".NET 4+",
+        "arch": "any",
+        "obfuscated": True,
+        "desc": ("Obfuscated any-CPU build — same compatibility as "
+                 "winPEASany.exe but with renamed methods/strings to "
+                 "evade signature-based AV/EDR detections."),
+        "url": ("https://github.com/peass-ng/PEASS-ng/releases/"
+                "latest/download/winPEASany_ofs.exe"),
+        "local_name": "winPEASany_ofs.exe",
+        "script_name": "winPEASany_ofs.exe",
+    },
+    {
+        "id": "x64",
+        "name": "winPEASx64.exe",
+        "runtime": ".NET 4+",
+        "arch": "x64",
+        "obfuscated": False,
+        "desc": ("Native x64 build — smallest and fastest on 64-bit "
+                 "hosts.  Will not run on 32-bit Windows."),
+        "url": ("https://github.com/peass-ng/PEASS-ng/releases/"
+                "latest/download/winPEASx64.exe"),
+        "local_name": "winPEASx64.exe",
+        "script_name": "winPEASx64.exe",
+    },
+    {
+        "id": "x64_ofs",
+        "name": "winPEASx64.exe (obfuscated)",
+        "runtime": ".NET 4+",
+        "arch": "x64",
+        "obfuscated": True,
+        "desc": ("Obfuscated x64 build — native x64 performance with "
+                 "AV/EDR evasion via renamed internals."),
+        "url": ("https://github.com/peass-ng/PEASS-ng/releases/"
+                "latest/download/winPEASx64_ofs.exe"),
+        "local_name": "winPEASx64_ofs.exe",
+        "script_name": "winPEASx64_ofs.exe",
+    },
+    {
+        "id": "x86",
+        "name": "winPEASx86.exe",
+        "runtime": ".NET 4+",
+        "arch": "x86",
+        "obfuscated": False,
+        "desc": ("Native x86 build — use on confirmed 32-bit targets "
+                 "for the smallest binary size."),
+        "url": ("https://github.com/peass-ng/PEASS-ng/releases/"
+                "latest/download/winPEASx86.exe"),
+        "local_name": "winPEASx86.exe",
+        "script_name": "winPEASx86.exe",
+    },
+    {
+        "id": "x86_ofs",
+        "name": "winPEASx86.exe (obfuscated)",
+        "runtime": ".NET 4+",
+        "arch": "x86",
+        "obfuscated": True,
+        "desc": ("Obfuscated x86 build — x86 native with AV/EDR "
+                 "evasion."),
+        "url": ("https://github.com/peass-ng/PEASS-ng/releases/"
+                "latest/download/winPEASx86_ofs.exe"),
+        "local_name": "winPEASx86_ofs.exe",
+        "script_name": "winPEASx86_ofs.exe",
+    },
+]
+
+
 def _recommend_winpeas_exe_variant(fp, auto_findings) -> tuple[
         "str | None", str, bool]:
     """Pick the best winPEAS variant for the current target.
