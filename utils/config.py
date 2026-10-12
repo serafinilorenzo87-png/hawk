@@ -489,6 +489,7 @@ SERVICE_PORT_MAP = {
 
 # ─── PATHS ────────────────────────────────────────────────────────────────────
 import os
+import stat
 import tempfile
 BASE_DIR     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
@@ -624,9 +625,20 @@ def resolve_tool_tmpdir() -> str:
     else:
         return TMP_DIR              # contained default (already created)
     try:
-        os.makedirs(external_tmp, exist_ok=True)
+        os.makedirs(external_tmp, mode=0o700, exist_ok=True)
     except OSError:
-        pass
+        return TMP_DIR
+    if hasattr(os, "getuid"):
+        try:
+            st = os.lstat(external_tmp)
+            if stat.S_ISLNK(st.st_mode):
+                return TMP_DIR
+            if st.st_uid != os.getuid():
+                return TMP_DIR
+            if stat.S_IMODE(st.st_mode) != 0o700:
+                os.chmod(external_tmp, 0o700)
+        except OSError:
+            return TMP_DIR
     if hostile and not _TMPDIR_RELAX_WARNED:
         _TMPDIR_RELAX_WARNED = True
         print(f"[hawk] BASE_DIR is on a temp-hostile filesystem "

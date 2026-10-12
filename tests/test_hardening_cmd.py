@@ -111,5 +111,29 @@ class MsfLaunchHardeningTests(unittest.TestCase):
         self.assertIn("invalid LPORT", self.src)
 
 
+class TempDirHardeningTests(unittest.TestCase):
+    """G-01: fallback temp dir is created 0o700 and verified (owner, not
+    symlink) before use.  Fail-closed to TMP_DIR on any check failure."""
+
+    def setUp(self):
+        self.src = _src("utils/config.py")
+
+    def test_creates_with_restricted_mode(self):
+        self.assertIn("mode=0o700", self.src)
+
+    def test_rejects_symlink(self):
+        self.assertIn("S_ISLNK", self.src)
+
+    def test_checks_ownership(self):
+        self.assertIn("st.st_uid != os.getuid()", self.src)
+
+    def test_tightens_existing_perms(self):
+        self.assertIn("S_IMODE(st.st_mode) != 0o700", self.src)
+        self.assertIn("os.chmod(external_tmp, 0o700)", self.src)
+
+    def test_imports_stat(self):
+        self.assertIn("import stat", self.src)
+
+
 if __name__ == "__main__":
     unittest.main()
