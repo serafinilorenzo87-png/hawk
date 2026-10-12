@@ -1922,7 +1922,7 @@ def render_finding_description(entry: dict, *,
 
     if entry.get("auth_bypass_probes"):
         lines.append("─" * 50)
-        lines.append("AUTH BYPASS PROBES — click the 🤖 button below "
+        lines.append("AUTH BYPASS PROBES — click the [BOT] button below "
                      "to run them all:")
         for p in entry["auth_bypass_probes"]:
             lines.append(
