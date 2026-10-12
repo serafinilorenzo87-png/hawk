@@ -3047,6 +3047,15 @@ class CardADRoutesMixin:
             # semver-looking tags.  Explicit "did we get a version"
             # check surfaces API failures (rate limit, DNS, block)
             # instead of silently skipping the download.
+            # Integrity (E-01, CWE-494), model (b): verify each downloaded
+            # artifact against the release's OWN chisel_<ver>_checksums.txt
+            # (GoReleaser).  This catches transport corruption / a tampered
+            # mirror / truncation — it does NOT defend an upstream release
+            # compromise (an attacker who swaps the binary can swap its
+            # checksum line too); for that, pin a vetted version + SHA-256
+            # (model a).  FAIL-CLOSED: refuse to install (no gunzip, no
+            # chmod +x) if the checksums file is unavailable or a hash
+            # mismatches.
             dl_cmd = (
                 f"echo '[*] Resolving latest chisel version via GitHub "
                 f"API...'; "
@@ -3064,17 +3073,34 @@ class CardADRoutesMixin:
                 f"exit 1; "
                 f"fi; "
                 f"echo \"[+] Latest chisel version: $VER\"; "
-                f"for arch in 386 amd64; do "
-                f"echo \"[*] Fetching chisel_${{VER#v}}_linux_$arch.gz ...\"; "
-                f"curl -sSL -o {PAYLOADS_DIR}/chisel_linux_$arch.gz "
+                f"cd \"{PAYLOADS_DIR}\" || exit 1; "
+                f"echo '[*] Fetching release checksums for verification...'; "
+                f"curl -sSL -o chisel_checksums.txt "
                 f"\"https://github.com/jpillora/chisel/releases/"
-                f"download/${{VER}}/chisel_${{VER#v}}_linux_$arch.gz\" && "
-                f"gunzip -f {PAYLOADS_DIR}/chisel_linux_$arch.gz && "
-                f"chmod +x {PAYLOADS_DIR}/chisel_linux_$arch && "
-                f"echo \"[+] chisel_linux_$arch ready\"; "
+                f"download/${{VER}}/chisel_${{VER#v}}_checksums.txt\" "
+                f"|| {{ echo '[!] Could not fetch checksums.txt — refusing "
+                f"to install unverified chisel binaries.'; exit 1; }}; "
+                f"for arch in 386 amd64; do "
+                f"gz=\"chisel_${{VER#v}}_linux_$arch.gz\"; "
+                f"echo \"[*] Fetching $gz ...\"; "
+                f"curl -sSL -o \"$gz\" "
+                f"\"https://github.com/jpillora/chisel/releases/"
+                f"download/${{VER}}/$gz\" "
+                f"|| {{ echo \"[!] download failed for $gz\"; continue; }}; "
+                f"if grep -E \"[[:space:]]$gz\\$\" chisel_checksums.txt "
+                f"| sha256sum -c - ; then "
+                f"gunzip -f \"$gz\" "
+                f"&& mv -f \"chisel_${{VER#v}}_linux_$arch\" "
+                f"\"chisel_linux_$arch\" "
+                f"&& chmod +x \"chisel_linux_$arch\" "
+                f"&& echo \"[+] chisel_linux_$arch verified + ready\"; "
+                f"else "
+                f"echo \"[!] SHA-256 verification FAILED for $gz — "
+                f"refusing (deleting).\"; rm -f \"$gz\"; "
+                f"fi; "
                 f"done; echo ''; "
-                f"ls -la {PAYLOADS_DIR}/chisel_linux_* 2>/dev/null || "
-                f"echo '[!] No chisel binaries in {PAYLOADS_DIR}/.'")
+                f"ls -la chisel_linux_* 2>/dev/null || "
+                f"echo '[!] No verified chisel binaries in {PAYLOADS_DIR}/.'")
             script = (
                 f"echo '═══  HAWK — Downloading chisel binaries  ═══'; "
                 f"{dl_cmd}; "
