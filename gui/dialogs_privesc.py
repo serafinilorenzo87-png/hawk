@@ -2563,6 +2563,26 @@ class PostExploitGuideDialog:
             anchor="w").pack(fill="x", padx=4, pady=(6, 8))
 
 
+def _sha256_file(path, _chunk=65536):
+    """Hex SHA-256 of the file at `path`, read in fixed-size chunks.
+
+    Pure helper (no GUI) so the DOWNLOAD button's integrity line is
+    unit-testable headless.  Per E-01 (CWE-494) the potato binaries run
+    target-side (Windows privesc, same profile as PEAS/pspy), so the
+    integrity check scales with the place of execution: this digest is
+    informational transparency shown post-download -- the same spirit as
+    the `&& sha256sum` already on the framework tools in post_exploit.py,
+    never a fail-closed gate.  (a) version-pin + a pinned SHA-256 stays an
+    opt-in hardening for a later pass.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(_chunk), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 # ── Potato variant catalogue ──────────────────────────────────────────
 # show_potato_picker_dialog() renders one radio row per entry and reads a
 # fixed set of keys off each dict — keep every variant shaped the same:
@@ -2938,11 +2958,22 @@ def show_potato_picker_dialog(parent, app):
                     capture_output=True, text=True, timeout=120)
                 if r.returncode == 0 and _os.path.isfile(out_path):
                     size = _os.path.getsize(out_path)
+                    # E-01 (CWE-494): the .exe runs target-side, so show
+                    # its SHA-256 as informational transparency (like the
+                    # `&& sha256sum` on the post_exploit.py tools) -- not a
+                    # fail-closed gate, not a pinned hash.
+                    try:
+                        digest = _sha256_file(out_path)
+                    except Exception:
+                        digest = None
                     def _ui_ok():
                         try:
                             app.terminal.write(
                                 f"  [+] Downloaded: {out_path} "
                                 f"({size:,} bytes)", "success")
+                            if digest:
+                                app.terminal.write(
+                                    f"      SHA-256: {digest}", "info")
                         except Exception:
                             pass
                     try:
