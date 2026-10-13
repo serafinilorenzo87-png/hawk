@@ -33,7 +33,7 @@ def _parse_args():
 def main():
     args = _parse_args()
     if args.version:
-        print(f"HAWK v{APP_VERSION}"); sys.exit(0)
+        print(f"HAWK v{APP_VERSION} - Created by Lorenzo Serafini"); sys.exit(0)
     ctk.set_appearance_mode("dark")
     ctk.set_default_color_theme("green")
     from gui.app import HawkApp

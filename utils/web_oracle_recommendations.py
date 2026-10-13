@@ -6,7 +6,7 @@
 # A copy of the License is provided in the LICENSE file at the root
 # of this distribution, or at http://www.apache.org/licenses/LICENSE-2.0
 #
-# Attribution "Created by Lorenzo Serafini must be preserved in all
+# Attribution "Created by Lorenzo Serafini" must be preserved in all
 # redistributed and Derivative Works — see NOTICE for details.
 
 """

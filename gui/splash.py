@@ -165,7 +165,7 @@ class SplashScreen(ctk.CTkToplevel):
         # Version line
         ctk.CTkLabel(
             border,
-            text=f"  v{APP_VERSION} — Open Source — Kali Linux",
+            text=f"  v{APP_VERSION} — Open Source — Kali Linux — Created by Lorenzo Serafini",
             font=ctk.CTkFont(family="Courier New", size=8),
             text_color=COLORS["text_muted"],
         ).pack(padx=24, pady=(0, 8), anchor="w")
