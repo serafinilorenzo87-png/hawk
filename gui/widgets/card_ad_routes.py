@@ -1229,19 +1229,19 @@ class CardADRoutesMixin:
             if method == "evil_winrm":
                 if h:
                     nt_only = h.split(":")[-1] if ":" in h else h
-                    cmd = (f"{bin_} -i {target} -u {_shq(u)} "
+                    cmd = (f"{bin_} -i {_shq(target)} -u {_shq(u)} "
                            f"-H {_shq(nt_only)}")
                 else:
                     pw = _v(p, "password")
-                    cmd = (f"{bin_} -i {target} -u {_shq(u)} "
+                    cmd = (f"{bin_} -i {_shq(target)} -u {_shq(u)} "
                            f"-p {_shq(pw)}")
             elif h:
                 nt_fmt = h if ":" in h else f":{h}"
-                cmd = (f"{bin_} {_shq(user_part)}@{target} "
+                cmd = (f"{bin_} {_shq(user_part)}@{_shq(target)} "
                        f"-hashes {_shq(nt_fmt)} -no-pass")
             else:
                 pw = _v(p, "password")
-                cmd = f"{bin_} {_shq(user_part)}:{_shq(pw)}@{target}"
+                cmd = f"{bin_} {_shq(user_part)}:{_shq(pw)}@{_shq(target)}"
 
             # Method-specific flags — always inserted right after the
             # binary name (before user_part@target) so impacket parses
@@ -2180,7 +2180,7 @@ class CardADRoutesMixin:
             d  = domain_var.get().strip()
             parts = [
                 "xfreerdp3",
-                f"/v:{target}",
+                f"/v:{_shq(target)}",
                 f"/u:{_shq(u)}",
             ]
             if d:
@@ -2260,7 +2260,7 @@ class CardADRoutesMixin:
 
             # Run in xterm so connection errors are visible
             script = (
-                f"echo '═══  HAWK — RDP → {target}  ═══'; "
+                f"echo '═══  HAWK — RDP → '{_shq(target)}'  ═══'; "
                 f"echo ''; "
                 f"{cmd}; "
                 f"echo ''; "
@@ -3047,6 +3047,15 @@ class CardADRoutesMixin:
             # semver-looking tags.  Explicit "did we get a version"
             # check surfaces API failures (rate limit, DNS, block)
             # instead of silently skipping the download.
+            # Integrity (E-01, CWE-494), model (b): verify each downloaded
+            # artifact against the release's OWN chisel_<ver>_checksums.txt
+            # (GoReleaser).  This catches transport corruption / a tampered
+            # mirror / truncation — it does NOT defend an upstream release
+            # compromise (an attacker who swaps the binary can swap its
+            # checksum line too); for that, pin a vetted version + SHA-256
+            # (model a).  FAIL-CLOSED: refuse to install (no gunzip, no
+            # chmod +x) if the checksums file is unavailable or a hash
+            # mismatches.
             dl_cmd = (
                 f"echo '[*] Resolving latest chisel version via GitHub "
                 f"API...'; "
@@ -3064,17 +3073,34 @@ class CardADRoutesMixin:
                 f"exit 1; "
                 f"fi; "
                 f"echo \"[+] Latest chisel version: $VER\"; "
-                f"for arch in 386 amd64; do "
-                f"echo \"[*] Fetching chisel_${{VER#v}}_linux_$arch.gz ...\"; "
-                f"curl -sSL -o {PAYLOADS_DIR}/chisel_linux_$arch.gz "
+                f"cd \"{PAYLOADS_DIR}\" || exit 1; "
+                f"echo '[*] Fetching release checksums for verification...'; "
+                f"curl -sSL -o chisel_checksums.txt "
                 f"\"https://github.com/jpillora/chisel/releases/"
-                f"download/${{VER}}/chisel_${{VER#v}}_linux_$arch.gz\" && "
-                f"gunzip -f {PAYLOADS_DIR}/chisel_linux_$arch.gz && "
-                f"chmod +x {PAYLOADS_DIR}/chisel_linux_$arch && "
-                f"echo \"[+] chisel_linux_$arch ready\"; "
+                f"download/${{VER}}/chisel_${{VER#v}}_checksums.txt\" "
+                f"|| {{ echo '[!] Could not fetch checksums.txt — refusing "
+                f"to install unverified chisel binaries.'; exit 1; }}; "
+                f"for arch in 386 amd64; do "
+                f"gz=\"chisel_${{VER#v}}_linux_$arch.gz\"; "
+                f"echo \"[*] Fetching $gz ...\"; "
+                f"curl -sSL -o \"$gz\" "
+                f"\"https://github.com/jpillora/chisel/releases/"
+                f"download/${{VER}}/$gz\" "
+                f"|| {{ echo \"[!] download failed for $gz\"; continue; }}; "
+                f"if grep -E \"[[:space:]]$gz\\$\" chisel_checksums.txt "
+                f"| sha256sum -c - ; then "
+                f"gunzip -f \"$gz\" "
+                f"&& mv -f \"chisel_${{VER#v}}_linux_$arch\" "
+                f"\"chisel_linux_$arch\" "
+                f"&& chmod +x \"chisel_linux_$arch\" "
+                f"&& echo \"[+] chisel_linux_$arch verified + ready\"; "
+                f"else "
+                f"echo \"[!] SHA-256 verification FAILED for $gz — "
+                f"refusing (deleting).\"; rm -f \"$gz\"; "
+                f"fi; "
                 f"done; echo ''; "
-                f"ls -la {PAYLOADS_DIR}/chisel_linux_* 2>/dev/null || "
-                f"echo '[!] No chisel binaries in {PAYLOADS_DIR}/.'")
+                f"ls -la chisel_linux_* 2>/dev/null || "
+                f"echo '[!] No verified chisel binaries in {PAYLOADS_DIR}/.'")
             script = (
                 f"echo '═══  HAWK — Downloading chisel binaries  ═══'; "
                 f"{dl_cmd}; "
@@ -3313,7 +3339,7 @@ class CardADRoutesMixin:
             rh = rhost_var.get().strip() or "<RHOST>"
             rp = rport_var.get().strip() or "80"
             cmd = (f"ssh -L {lp}:{rh}:{rp} -f -N {ssh_compat} "
-                   f"{u}@{pivot}")
+                   f"{_shq(f'{u}@{pivot}')}")
             preview_box.configure(state="normal")
             preview_box.delete("1.0", "end")
             preview_box.insert("1.0", cmd)
@@ -3349,10 +3375,10 @@ class CardADRoutesMixin:
                             "warn")
                     return
             cmd = (f"ssh -L {lp}:{rh}:{rp} -f -N {ssh_compat} "
-                   f"{u}@{pivot}")
+                   f"{_shq(f'{u}@{pivot}')}")
             script = (
                 f"echo '═══  HAWK — SSH Local Forward  ═══'; "
-                f"echo 'Kali:127.0.0.1:{lp}  →  {pivot}  →  {rh}:{rp}'; "
+                f"echo 'Kali:127.0.0.1:{lp}  →  '{_shq(pivot)}'  →  '{_shq(rh)}':{rp}'; "
                 f"echo 'After auth, ssh forks to background — xterm "
                 f"exits.'; "
                 f"echo 'Test with: curl http://127.0.0.1:{lp}/'; "
@@ -3610,7 +3636,7 @@ class CardADRoutesMixin:
             u = user_var.get().strip() or "<SSH_USER>"
             p = port_var.get().strip() or "1080"
             cmd = (f"ssh -D {p} -f -N {ssh_compat} "
-                   f"{u}@{target}")
+                   f"{_shq(f'{u}@{target}')}")
             preview_box.configure(state="normal")
             preview_box.delete("1.0", "end")
             preview_box.insert("1.0", cmd)
@@ -3637,11 +3663,11 @@ class CardADRoutesMixin:
                         "warn")
                 return
             cmd = (f"ssh -D {p} -f -N {ssh_compat} "
-                   f"{u}@{target}")
+                   f"{_shq(f'{u}@{target}')}")
             script = (
                 f"echo '═══  HAWK — SSH Dynamic (SOCKS5)  ═══'; "
                 f"echo 'Opening SOCKS5 proxy on Kali 127.0.0.1:{p} "
-                f"via {u}@{target}'; "
+                f"via '{_shq(f'{u}@{target}')}; "
                 f"echo 'After auth, ssh forks to background — this "
                 f"xterm will exit.'; "
                 f"echo 'Test with: curl --socks5 127.0.0.1:{p} "
@@ -3940,7 +3966,7 @@ class CardADRoutesMixin:
         def _refresh(*_):
             u = user_var.get().strip() or "<SSH_USER>"
             cmd = (f"sudo sshuttle -e \"ssh {ssh_compat}\" "
-                   f"-r {u}@{target} 0/0 --dns")
+                   f"-r {_shq(f'{u}@{target}')} 0/0 --dns")
             preview_box.configure(state="normal")
             preview_box.delete("1.0", "end")
             preview_box.insert("1.0", cmd)
@@ -3959,13 +3985,13 @@ class CardADRoutesMixin:
                         "launching sshuttle.", "warn")
                 return
             cmd = (f"sudo sshuttle -e \"ssh {ssh_compat}\" "
-                   f"-r {u}@{target} 0/0 --dns")
+                   f"-r {_shq(f'{u}@{target}')} 0/0 --dns")
             script = (
                 f"echo '═══  HAWK — SSHUTTLE  ═══'; "
-                f"echo 'Tunneling ALL Kali traffic through "
-                f"{u}@{target}'; "
+                f"echo 'Tunneling ALL Kali traffic through '"
+                f"{_shq(f'{u}@{target}')}; "
                 f"echo 'Prompts: sudo password (Kali), then SSH "
-                f"password for {u}@{target}'; "
+                f"password for '{_shq(f'{u}@{target}')}; "
                 f"echo 'CTRL+C stops the tunnel and restores routing.'; "
                 f"echo ''; "
                 f"{cmd}; "
@@ -4825,7 +4851,7 @@ class CardADRoutesMixin:
             d   = domain_var.get().strip()
             parts = [f"certipy auth "
                      f"-pfx {_shq(pfx) if pfx else '<pfx>'} "
-                     f"-dc-ip {dc or '<dc-ip>'} -no-save"]
+                     f"-dc-ip {_shq(dc) if dc else '<dc-ip>'} -no-save"]
             if u:
                 parts.append(f"-username {_shq(u)}")
             if d:
@@ -5066,9 +5092,12 @@ class CardADRoutesMixin:
         # defaults; the operator can still hand-edit / add chips
         # afterwards.
         if tool.id == "impacket_secretsdump":
-            from utils.config import OUTPUTS_DIR as _OUTPUTS_DIR
+            from utils.config import (OUTPUTS_DIR as _OUTPUTS_DIR,
+                                      require_within_base)
+            _ntds_out = require_within_base(
+                f"{_OUTPUTS_DIR}/ntds-{target}", "secretsdump ntds output")
             _DCSYNC_EXTRAS = (
-                f"-just-dc -outputfile {_OUTPUTS_DIR}/ntds-{target}")
+                f"-just-dc -outputfile {_shq(_ntds_out)}")
             _TARGET_DUMP_EXTRAS = ""
 
             def _apply_mode(*_):
@@ -5434,16 +5463,17 @@ class CardADRoutesMixin:
             if h and not p:
                 # Convert NT-only → :NT for impacket-style tools
                 nt_fmt = h if ":" in h else f":{h}"
+                # The hash is a VALUE; quote it, not the option switch.
                 if tool.binary == "bloodhound-python":
                     # bloodhound-python -u USER --hashes :NT -d DOM
                     cmd = cmd.replace("-p {password}",
-                                      f"--hashes {nt_fmt}")
+                                      f"--hashes {_shq(nt_fmt)}")
                 elif tool.binary.startswith("certipy"):
                     cmd = cmd.replace("-p {password}",
-                                      f"-hashes {nt_fmt}")
+                                      f"-hashes {_shq(nt_fmt)}")
                 elif tool.binary == "nxc":
                     cmd = cmd.replace("-p {password}",
-                                      f"-H {nt_fmt}")
+                                      f"-H {_shq(nt_fmt)}")
                 elif tool.binary.startswith("impacket-"):
                     # Impacket style: `user:pass@host` → hashes go via
                     # -hashes flag, -no-pass, and pass is emptied.
@@ -5452,24 +5482,50 @@ class CardADRoutesMixin:
                                       f"{{domain}}/{{user}}")
                     # Append the hash options to the end; impacket
                     # tools accept them universally.
-                    cmd = cmd.rstrip() + f" -hashes {nt_fmt} -no-pass"
+                    cmd = cmd.rstrip() + f" -hashes {_shq(nt_fmt)} -no-pass"
                 else:
                     # Fallback: paste as-is in {password}
-                    cmd = cmd.replace("{password}", nt_fmt)
+                    cmd = cmd.replace("{password}", _shq(nt_fmt))
 
-            # Standard substitutions.
-            # `{outputs}` resolves to <HAWK>/outputs/ — an absolute
-            # path inside the HAWK tree where every AD-pentesting
-            # tool writes its artefacts (ntds dump, kerberoast hashes,
-            # asreproast hashes, ldapdump folder, certipy esc1.pfx).
-            # Previously these went to ~/hawk/ which scattered files
-            # outside the HAWK directory the user cloned/runs from.
+            # Identity substitution (CWE-78 hardening).  u/p/h/d are
+            # attacker-influenced: they are pre-filled from the Credential
+            # Store / parsed session (GPP cpassword, sAMAccountName,
+            # domain, computer names a hostile target authors) and this
+            # command runs under shell=True.  They must reach the shell as
+            # single literal tokens.
+            #
+            # Templates EMBED the placeholders inside larger tokens
+            # (CORP\user, dom/user:pass, user@dom, dom/user:pass@host) and
+            # a couple pre-wrap the token in literal single quotes.
+            # Quoting a middle slice does not protect (a literal '\' or a
+            # pre-existing quote breaks out), so we quote the WHOLE token
+            # — the credential_store_widget pattern — after dropping any
+            # template-level wrapping quotes to avoid double-quoting.  For
+            # every normal value shlex.quote is a no-op, so the built
+            # command is byte-identical to before (see test_ad_cmd_quoting).
+            #
+            # `{outputs}` resolves to <HAWK>/outputs/ — a HAWK-owned path,
+            # left unquoted (not attacker-controlled; path containment is
+            # Area C, out of this batch's scope).
             from utils.config import OUTPUTS_DIR
+            cmd = cmd.replace("'{domain}/{user}:{password}'",
+                              "{domain}/{user}:{password}")
+            if u:
+                cmd = cmd.replace("{domain}/{user}:{password}@{target}",
+                                  _shq(f"{d}/{u}:{p}@{target}"))
+                cmd = cmd.replace("{domain}/{user}@{target}",
+                                  _shq(f"{d}/{u}@{target}"))
+                cmd = cmd.replace("{domain}/{user}:{password}",
+                                  _shq(f"{d}/{u}:{p}"))
+                cmd = cmd.replace("{domain}/{user}",
+                                  _shq(f"{d}/{u}"))
+                cmd = cmd.replace("{domain}\\{user}", _shq(f"{d}\\{u}"))
+                cmd = cmd.replace("{user}@{domain}", _shq(f"{u}@{d}"))
             cmd = (cmd
-                   .replace("{target}",   target)
-                   .replace("{user}",     u or "<user>")
-                   .replace("{password}", p or "")
-                   .replace("{domain}",   d or "<domain>")
+                   .replace("{target}",   _shq(target))
+                   .replace("{user}",     _shq(u) if u else "<user>")
+                   .replace("{password}", _shq(p) if p else "")
+                   .replace("{domain}",   _shq(d) if d else "<domain>")
                    .replace("{outputs}",  OUTPUTS_DIR))
 
             # Substitute dynamic <PLACEHOLDER> values from the extra
@@ -5477,10 +5533,15 @@ class CardADRoutesMixin:
             # replaces the ones the user actually filled — empty fields
             # leave the <PLACEHOLDER> in place so the safety guard in
             # _run_raw still blocks the command with a clear error.
+            # These too are attacker-influenced (CA name, template, SID,
+            # computer names read from Target Intel) → quote whole-token.
+            # rbcd pre-wraps '<X>$' in single quotes; strip those first so
+            # the value's own quoting is the only layer.
             for ph, var in placeholder_vars.items():
                 val = (var.get() or "").strip()
                 if val:
-                    cmd = cmd.replace(f"<{ph}>", val)
+                    cmd = cmd.replace(f"'<{ph}>$'", _shq(f"{val}$"))
+                    cmd = cmd.replace(f"<{ph}>", _shq(val))
 
             # Append free-form extra args (from the Extra args entry +
             # any chips the user clicked).  Stripped and deduplicated
@@ -6155,11 +6216,14 @@ class CardADRoutesMixin:
                         "+ password.", "warn")
                     return
                 import os as _os
-                from utils.config import OUTPUTS_DIR as _OUT
-                outp = _os.path.join(_OUT, f"asrep-{target}.txt")
+                from utils.config import (OUTPUTS_DIR as _OUT,
+                                          require_within_base)
+                outp = require_within_base(
+                    _os.path.join(_OUT, f"asrep-{target}.txt"),
+                    "AS-REP output")
                 self._run_raw(tool, (
-                    f"impacket-GetNPUsers {domain}/{u}:{_shq(p)} "
-                    f"-dc-ip {target} -request -format hashcat "
+                    f"impacket-GetNPUsers {_shq(f'{domain}/{u}:{p}')} "
+                    f"-dc-ip {_shq(target)} -request -format hashcat "
                     f"-outputfile {_shq(outp)}"))
                 return
 
@@ -6178,8 +6242,8 @@ class CardADRoutesMixin:
                 # _run_raw owns the "section + $ cmd" banner — don't
                 # duplicate it here or the terminal shows the same
                 # line twice.
-                cmd = (f"impacket-GetNPUsers -dc-ip {target} -no-pass "
-                       f"-usersfile {_shq(wl_path)} {domain}/")
+                cmd = (f"impacket-GetNPUsers -dc-ip {_shq(target)} -no-pass "
+                       f"-usersfile {_shq(wl_path)} {_shq(f'{domain}/')}")
                 self._run_raw(tool, cmd)
 
             if lines > 100_000:
@@ -6301,8 +6365,9 @@ class CardADRoutesMixin:
         _row("Username", user_var)
         _row("Domain",   domain_var)
 
-        from utils.config import OUTPUTS_DIR as _OUTDIR
-        _outpath = _OUTDIR + f"/asrep-{target}.txt"
+        from utils.config import OUTPUTS_DIR as _OUTDIR, require_within_base
+        _outpath = require_within_base(
+            _OUTDIR + f"/asrep-{target}.txt", "AS-REP output")
         _note_box(
             win,
             f"Output file:  {_outpath}\n"
@@ -6316,9 +6381,9 @@ class CardADRoutesMixin:
             if not u:
                 return
             _safe_destroy(win)
-            cmd = (f"impacket-GetNPUsers {d}/{u} -no-pass -request "
-                   f"-format hashcat -dc-ip {target} "
-                   f"-outputfile {_outpath}")
+            cmd = (f"impacket-GetNPUsers {_shq(f'{d}/{u}')} -no-pass -request "
+                   f"-format hashcat -dc-ip {_shq(target)} "
+                   f"-outputfile {_shq(_outpath)}")
             self.app.terminal.section(
                 f"AS-REP ROAST — {u}@{d}")
             self.app.terminal.write(f"  $ {cmd}", "cmd")

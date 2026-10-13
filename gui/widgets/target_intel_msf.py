@@ -721,6 +721,29 @@ class TargetIntelMsfMixin:
         _refresh_preview()
 
         def _launch():
+            # Hardening (A-03): these field values become msfconsole
+            # resource-script directives.  A Tk Entry is single-line so a
+            # newline cannot normally be typed, but reject CR/LF defensively
+            # (and a malformed LPORT) so a pasted / pre-filled multi-line
+            # value can never inject an extra rc directive.
+            _v_rhosts = fields['RHOSTS'].get()
+            _v_payload = fields['Payload'].get() if not is_payload_free else ""
+            _v_lhost = fields['LHOST'].get() if not is_payload_free else ""
+            _v_lport = fields['LPORT'].get() if not is_payload_free else ""
+            for _label, _val in (("RHOSTS", _v_rhosts), ("Payload", _v_payload),
+                                 ("LHOST", _v_lhost), ("LPORT", _v_lport),
+                                 ("extra args", extra_var.get())):
+                if "\n" in _val or "\r" in _val:
+                    self.app.terminal.write(
+                        f"[!] Metasploit launch cancelled — {_label} "
+                        f"contains a newline.", "warn")
+                    return
+            if _v_lport.strip() and not (_v_lport.strip().isdigit()
+                                         and 1 <= int(_v_lport.strip()) <= 65535):
+                self.app.terminal.write(
+                    f"[!] Metasploit launch cancelled — invalid LPORT "
+                    f"'{_v_lport}'.", "warn")
+                return
             commands = [f"use {fields['Exploit'].get()}"]
             if not is_payload_free and fields['Payload'].get().strip():
                 commands.append(f"set PAYLOAD {fields['Payload'].get().strip()}")

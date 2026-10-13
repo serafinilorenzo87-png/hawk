@@ -17,7 +17,7 @@ Top area: IP input, platform selector, session controls.
 import os
 import re
 import customtkinter as ctk
-from utils.config import COLORS, WINDOW, SZ
+from utils.config import COLORS, WINDOW, SZ, is_valid_target
 from utils.session import (
     SESSION_SORT_MODES,
     SORT_LAST_MODIFIED,
@@ -3338,15 +3338,11 @@ class TargetBar(ctk.CTkFrame):
 
     @staticmethod
     def _validate_ip(value: str) -> bool:
-        if not value:
-            return False
-        # Strict IP validation (each octet 0-255)
-        ip_match = re.match(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$", value)
-        if ip_match:
-            return all(0 <= int(o) <= 255 for o in ip_match.groups())
-        # Hostname validation
-        host_pattern = r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$"
-        return bool(re.match(host_pattern, value))
+        # Canonical target shape now lives in utils.config.is_valid_target
+        # (IPv4 octets 0-255, or a DNS hostname — no path separators, no
+        # shell metacharacters) so Session.load can enforce the same rule
+        # on an untrusted session file without importing from the GUI layer.
+        return is_valid_target(value)
 
     def get_target(self) -> str:
         return self._ip_entry.get().strip()

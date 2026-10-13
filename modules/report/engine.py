@@ -131,6 +131,7 @@ def generate(session, formats=REPORT_FORMATS, *, branding=None,
             newline = "" if fmt == "csv" else None
             with open(path, "w", newline=newline, encoding="utf-8") as f:
                 f.write(content)
+            os.chmod(path, 0o600)
             paths[fmt] = path
         except Exception as e:
             # One format down, the rest stand — result_summary then tells
@@ -149,6 +150,7 @@ def generate(session, formats=REPORT_FORMATS, *, branding=None,
                 path = _dst("pdf")
                 with open(path, "wb") as f:
                     f.write(pdf_bytes)
+                os.chmod(path, 0o600)
                 paths["pdf"] = path
             except Exception as e:
                 print(f"[HAWK] report: PDF write failed: {e}",

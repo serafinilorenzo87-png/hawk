@@ -489,6 +489,7 @@ SERVICE_PORT_MAP = {
 
 # ─── PATHS ────────────────────────────────────────────────────────────────────
 import os
+import stat
 import tempfile
 BASE_DIR     = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SESSIONS_DIR = os.path.join(BASE_DIR, "sessions")
@@ -624,9 +625,20 @@ def resolve_tool_tmpdir() -> str:
     else:
         return TMP_DIR              # contained default (already created)
     try:
-        os.makedirs(external_tmp, exist_ok=True)
+        os.makedirs(external_tmp, mode=0o700, exist_ok=True)
     except OSError:
-        pass
+        return TMP_DIR
+    if hasattr(os, "getuid"):
+        try:
+            st = os.lstat(external_tmp)
+            if stat.S_ISLNK(st.st_mode):
+                return TMP_DIR
+            if st.st_uid != os.getuid():
+                return TMP_DIR
+            if stat.S_IMODE(st.st_mode) != 0o700:
+                os.chmod(external_tmp, 0o700)
+        except OSError:
+            return TMP_DIR
     if hostile and not _TMPDIR_RELAX_WARNED:
         _TMPDIR_RELAX_WARNED = True
         print(f"[hawk] BASE_DIR is on a temp-hostile filesystem "
@@ -664,6 +676,29 @@ def is_within_base(path: str) -> bool:
         return False
     real = os.path.realpath(os.path.abspath(path))
     return real == _BASE_DIR_REAL or real.startswith(_BASE_DIR_REAL + os.sep)
+
+
+def is_valid_target(value: str) -> bool:
+    """True if ``value`` is a dotted-quad IPv4 (each octet 0-255) or a DNS
+    hostname.  The canonical target shape: alphanumerics, dots and hyphens
+    only — no path separators and no shell metacharacters — so a validated
+    target is safe both as an argv token and as a filename component.
+
+    Lives here, outside the GUI layer, so the target bar (entry validation)
+    and ``Session.load`` (which rejects a tampered ``target_ip`` in an
+    untrusted session file) enforce the exact same rule.
+    """
+    if not value:
+        return False
+    import re
+    # Anchor with \Z, not $: in Python `$` also matches just before a
+    # trailing newline, so "1.2.3.4\n" / "host\n" would wrongly validate.
+    m = re.match(r"^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\Z", value)
+    if m:
+        return all(0 <= int(o) <= 255 for o in m.groups())
+    host = (r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?"
+            r"(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*\Z")
+    return bool(re.match(host, value))
 
 
 def is_allowed_external_write(path: str) -> bool:

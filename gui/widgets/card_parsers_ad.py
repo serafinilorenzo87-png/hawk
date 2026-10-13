@@ -1325,8 +1325,11 @@ class CardADParserMixin:
                 outpath = os.path.expanduser(m.group(1))
                 break
         if not outpath:
-            from utils.config import OUTPUTS_DIR as _OUTDIR
-            outpath = os.path.join(_OUTDIR, f"asrep-{target}.txt")
+            from utils.config import (OUTPUTS_DIR as _OUTDIR,
+                                      require_within_base)
+            outpath = require_within_base(
+                os.path.join(_OUTDIR, f"asrep-{target}.txt"),
+                "AS-REP output")
         if os.path.isfile(outpath):
             try:
                 with open(outpath, "r", encoding="utf-8",

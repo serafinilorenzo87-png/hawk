@@ -245,6 +245,18 @@ def _md_escape_cell(v) -> str:
     return str(v).replace("|", "\\|").replace("\n", " ")
 
 
+def _md_safe(v) -> str:
+    s = "" if v is None else str(v)
+    return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _md_fence_line(line) -> str:
+    s = str(line)
+    if s.lstrip().startswith("```"):
+        return s.replace("```", "`` `")
+    return _md_safe(s)
+
+
 def _md_block(block) -> list:
     t, d = block.type, block.data
     if t == "keyvalue":
@@ -266,41 +278,43 @@ def _md_block(block) -> list:
     if t == "findings":
         lines = []
         for it in d.get("items", []):
-            lines += [f"#### Finding {it['n']}: {it['title']}", "",
-                      f"**Severity**: {it['severity']}  ",
-                      f"**Source**: {it['source'] or '-'}  "]
+            lines += [f"#### Finding {it['n']}: {_md_safe(it['title'])}", "",
+                      f"**Severity**: {_md_safe(it['severity'])}  ",
+                      f"**Source**: {_md_safe(it['source'] or '-')}  "]
             if it.get("overridden"):
                 lines.append(f"**Severity overridden** (objective: "
-                             f"{it['original_severity']})  ")
+                             f"{_md_safe(it['original_severity'])})  ")
             for fr in it.get("fields", []):
-                lines.append(f"**{fr[0]}**: `{fr[1]}`  ")
+                lines.append(f"**{_md_safe(fr[0])}**: `{_md_safe(fr[1])}`  ")
             lines.append("")
             if it.get("description"):
-                lines += ["```", it["description"], "```", ""]
+                lines += ["```", _md_fence_line(it["description"]), "```", ""]
             if it.get("impact"):
-                lines += [f"**Impact**: {it['impact']}", ""]
+                lines += [f"**Impact**: {_md_safe(it['impact'])}", ""]
             if it.get("remediation"):
-                lines += [f"**Remediation**: {it['remediation']}", ""]
+                lines += [f"**Remediation**: {_md_safe(it['remediation'])}", ""]
             if it.get("operator_note"):
-                lines += [f"**Note**: {it['operator_note']}", ""]
+                lines += [f"**Note**: {_md_safe(it['operator_note'])}", ""]
         return lines
     if t == "phases":
         lines = []
         for ph in d.get("items", []):
-            marker = f"{ph['icon']} · " if ph.get("icon") else ""
-            lines += [f"### {marker}{ph['label']}", "",
-                      f"**Status**: `{ph['status']}`", ""]
+            marker = f"{_md_safe(ph['icon'])} · " if ph.get("icon") else ""
+            lines += [f"### {marker}{_md_safe(ph['label'])}", "",
+                      f"**Status**: `{_md_safe(ph['status'])}`", ""]
             if ph.get("findings"):
                 for f in ph["findings"]:
-                    lines.append(f"- **[{f['severity']}]** {f['title']}")
+                    lines.append(f"- **[{_md_safe(f['severity'])}]** "
+                                 f"{_md_safe(f['title'])}")
                 lines.append("")
             else:
                 lines += ["_No findings recorded._", ""]
             for o in ph.get("outputs", []):
                 lines += [f"<details>",
-                          f"<summary><b>{o['tool']}</b> — {o['ts']}</summary>",
+                          f"<summary><b>{_md_safe(o['tool'])}</b> — "
+                          f"{_md_safe(o['ts'])}</summary>",
                           "", "```"]
-                lines += o.get("lines", [])
+                lines += [_md_fence_line(ln) for ln in o.get("lines", [])]
                 lines += ["```", "", "</details>", ""]
         return lines
     return []

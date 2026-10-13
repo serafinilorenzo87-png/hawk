@@ -4172,7 +4172,7 @@ class TargetIntelRenderMixin:
                 def _aiops_run_handler(fnd=finding):
                     self._aiops_run_bypass_probes(fnd)
                 ctk.CTkButton(
-                    btn_row, text="🤖 RUN AUTH BYPASS PROBES",
+                    btn_row, text="[BOT] RUN AUTH BYPASS PROBES",
                     width=240, height=24, font=_f("sm", True),
                     fg_color="transparent",
                     hover_color=COLORS["bg_card_hover"],
