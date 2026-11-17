@@ -58,8 +58,18 @@ def main():
         stored = _load_stored_key()
         from gui.api_key_dialog import ApiKeyDialog
         app.withdraw()
-        app.after(100, lambda: ApiKeyDialog(
-            app, on_done=lambda k: _start(), existing_key=stored))
+
+        def _api_dialog():
+            ApiKeyDialog(app, on_done=lambda k: _start(), existing_key=stored)
+
+        # First launch only: offer the one-time nmap/masscan caps setup
+        # before the API key dialog. On every later launch this is a no-op
+        # and startup is unchanged.
+        from gui.first_run_dialog import is_first_run, FirstRunDialog
+        if is_first_run():
+            app.after(100, lambda: FirstRunDialog(app, on_done=_api_dialog))
+        else:
+            app.after(100, _api_dialog)
         app.mainloop()
 
 if __name__ == "__main__":
