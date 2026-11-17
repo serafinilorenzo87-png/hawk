@@ -5,8 +5,21 @@ need on your Kali VM.
 
 ## Python packages
 
+Install HAWK's Python dependencies in a virtualenv (isolated from the system
+Python; Kali 2025 blocks a direct `pip` via PEP 668). `python3-tk` and
+`python3-venv` are system packages — see **Common system tools** below.
+
 ```bash
 cd ~/hawkc
+python3 -m venv venv
+./venv/bin/python3 -m pip install -r requirements.txt
+```
+
+Run with `./venv/bin/python3 hawk.py`.
+
+Quick, non-isolated alternative (installs into the system Python):
+
+```bash
 python3 -m pip install -r requirements.txt --break-system-packages
 ```
 
@@ -15,6 +28,7 @@ python3 -m pip install -r requirements.txt --break-system-packages
 ```bash
 sudo apt update
 sudo apt install -y \
+  python3-tk python3-venv \
   xclip xterm qterminal nmap masscan \
   smbclient enum4linux netexec \
   nikto gobuster ffuf wafw00f whatweb sqlmap \

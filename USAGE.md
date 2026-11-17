@@ -7,8 +7,11 @@
 
 ```bash
 cd ~/hawkc
-python3 hawk.py
+./venv/bin/python3 hawk.py
 ```
+
+> First time? Do the one-time setup under **Requirements** below
+> (virtualenv + `python3-tk`) before the first launch.
 
 ---
 
@@ -172,9 +175,10 @@ sudo runuser -u _gvm -- gvmd --user=admin --new-password=admin123
 
 ## Requirements
 
-Install everything:
+Install the system tools and the Tk/venv prerequisites:
 ```bash
 sudo apt update && sudo apt install -y \
+  python3-tk python3-venv \
   xclip xterm nmap masscan \
   smbclient enum4linux netexec onesixtyone \
   nikto gobuster ffuf wafw00f whatweb sqlmap \
@@ -183,8 +187,40 @@ sudo apt update && sudo apt install -y \
   gvm snmp python3-setuptools pipx \
   bloodhound.py ldapdomaindump
 sudo gunzip /usr/share/wordlists/rockyou.txt.gz 2>/dev/null || true
-python3 -m pip install -r requirements.txt --break-system-packages
 pipx ensurepath
+```
+
+### Python environment (recommended: venv)
+
+`python3-tk` is the Tk runtime the GUI needs. It is a **system** package (apt),
+not a pip one: `pip install tkinter` does not exist. A fresh venv inherits
+tkinter from the system Python, so installing `python3-tk` once (above) is
+enough.
+
+Install HAWK's Python dependencies in a virtualenv, isolated from Kali's system
+Python — several offensive tools (impacket, netexec, mitmproxy) run on the
+system interpreter, and Kali 2025 blocks a direct `pip` (PEP 668):
+
+```bash
+cd ~/hawkc
+python3 -m venv venv
+./venv/bin/python3 -m pip install -r requirements.txt
+```
+
+Run HAWK with the venv's interpreter:
+
+```bash
+./venv/bin/python3 hawk.py
+```
+
+(Or `source venv/bin/activate` once, then just `python3 hawk.py`.)
+
+**Alternative (quick, not isolated):** install straight into the system Python.
+Simpler, but it touches Kali's shared packages and can upgrade libraries other
+tools rely on:
+
+```bash
+python3 -m pip install -r requirements.txt --break-system-packages
 ```
 
 Allow nmap and masscan to use raw sockets without sudo. Prefer Linux

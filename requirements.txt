@@ -1,3 +1,8 @@
+# HAWK Python dependencies.
+# System prerequisites (NOT pip) — install once with apt:
+#   sudo apt install python3-tk python3-venv
+# tkinter is a system package; `pip install tkinter` does not exist.
+# Recommended: install these inside a virtualenv (see USAGE.md / README.md).
 customtkinter>=5.2.0
 python-dotenv>=1.0.0
 requests>=2.31.0
