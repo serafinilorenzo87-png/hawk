@@ -47,13 +47,15 @@ strongest in enumeration, web testing, and post-exploitation / AD.
 
 ## Run
 
-Copy the folder into Kali, then do the one-time setup (virtualenv + Tk runtime)
-described under **Python dependencies** below, and run HAWK with the venv's
-interpreter:
+Copy the folder into Kali, do the one-time setup (Tk runtime + virtualenv — see
+**Python dependencies** below for why), and launch with the venv's interpreter:
 
 ```bash
 cp -r hawkc ~/hawkc
 cd ~/hawkc
+sudo apt install -y python3-tk python3-venv
+python3 -m venv venv
+./venv/bin/python3 -m pip install -r requirements.txt
 ./venv/bin/python3 hawk.py
 ```
 
@@ -109,7 +111,8 @@ browser.
 
 ## Notes
 
-- Run from the `hawkc` directory with `python3 hawk.py`.
+- Run from the `hawkc` directory with `./venv/bin/python3 hawk.py` (see
+  **Python dependencies** for the one-time setup).
 - Do not commit runtime data from `sessions/`, `outputs/`, `dicts/`, `tmp/`,
   `cache/`, `logs/`, or `configs/`.
 - API keys are stored locally under `sessions/.apikeys.json` with restrictive
