@@ -6,7 +6,7 @@
 ## Quick Start
 
 ```bash
-cd ~/hawkc
+cd ~/hawk
 ./venv/bin/python3 hawk.py
 ```
 
@@ -202,7 +202,7 @@ Python — several offensive tools (impacket, netexec, mitmproxy) run on the
 system interpreter, and Kali 2025 blocks a direct `pip` (PEP 668):
 
 ```bash
-cd ~/hawkc
+cd ~/hawk
 python3 -m venv venv
 ./venv/bin/python3 -m pip install -r requirements.txt
 ```

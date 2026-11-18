@@ -10,7 +10,7 @@ Python; Kali 2025 blocks a direct `pip` via PEP 668). `python3-tk` and
 `python3-venv` are system packages — see **Common system tools** below.
 
 ```bash
-cd ~/hawkc
+cd ~/hawk
 python3 -m venv venv
 ./venv/bin/python3 -m pip install -r requirements.txt
 ```
