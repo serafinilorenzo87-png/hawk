@@ -736,6 +736,25 @@ class CardRuntimeMixin:
             }
             manual_hints["kerbrute_userenum"] = manual_hints["kerbrute"]
 
+            # Executable one-shot install commands for the manual tools, so
+            # "RUN INSTALL" actually installs (like the apt tools) instead of
+            # only opening a shell with hints. Lands the official binary in
+            # /usr/local/bin — a system path, on everyone's PATH.
+            manual_install_cmds = {
+                "rustscan": (
+                    "sudo apt install -y cargo && cargo install rustscan && "
+                    "sudo install -m755 \"$HOME/.cargo/bin/rustscan\" "
+                    "/usr/local/bin/rustscan"
+                ),
+                "kerbrute": (
+                    "wget -q https://github.com/ropnop/kerbrute/releases/latest"
+                    "/download/kerbrute_linux_amd64 -O /tmp/kerbrute && "
+                    "sudo install -m 0755 /tmp/kerbrute /usr/local/bin/kerbrute"
+                ),
+            }
+            manual_install_cmds["kerbrute_userenum"] = \
+                manual_install_cmds["kerbrute"]
+
             win = _make_win(self, f"Install {tool.name}", 640, 460)
             ctk.CTkLabel(win, text=f"⚠  {tool.name} Not Installed",
                          font=_f("xl", True),
@@ -815,8 +834,34 @@ class CardRuntimeMixin:
                     f"again — HAWK rechecks the binary on every click.",
                     "info")
 
+            def _run_install():
+                cmd = manual_install_cmds.get(tool.id)
+                if not cmd:
+                    return
+                _safe_destroy(win)
+                script = (
+                    f"echo '=== Installing {tool.name} ==='; "
+                    f"echo '$ {cmd}'; echo ''; "
+                    f"{cmd}; RC=$?; echo ''; "
+                    f"if [ $RC -eq 0 ]; then "
+                    f"echo '=== OK — {tool.name} installed to /usr/local/bin ==='; "
+                    f"else echo \"=== FAILED (exit $RC) — read the error above, "
+                    f"or follow the manual steps ===\"; fi; "
+                    f"read -p 'Press ENTER to close...'"
+                )
+                _open_terminal(f"HAWK — Install {tool.name}", script)
+                self.app.terminal.write(
+                    f"  [*] Installing {tool.name} in a terminal "
+                    f"(official binary -> /usr/local/bin).\n"
+                    f"  [*] When it finishes, click {tool.name} again — HAWK "
+                    f"re-checks the binary on every click.", "info")
+
             row = _btn_row(win)
-            _btn(row, "OPEN SHELL", _open_shell, primary=True, w=160)
+            if tool.id in manual_install_cmds:
+                _btn(row, "RUN INSTALL", _run_install, primary=True, w=150)
+                _btn(row, "OPEN SHELL", _open_shell, w=150)
+            else:
+                _btn(row, "OPEN SHELL", _open_shell, primary=True, w=160)
             _btn(row, "CLOSE", lambda: _safe_destroy(win))
             return
 
