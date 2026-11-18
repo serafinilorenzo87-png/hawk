@@ -54,13 +54,46 @@ def main():
     app = HawkApp()
 
     def _start():
+        def _shown():
+            app.show()
+            _schedule_health_check()
         if args.nosplash:
-            app.show(); app.mainloop()
+            _shown(); app.mainloop()
         else:
             app.withdraw()
             from gui.splash import SplashScreen
-            SplashScreen(app, on_done=lambda: [app.show(), app.mainloop()])
+            SplashScreen(app, on_done=lambda: [_shown(), app.mainloop()])
             app.mainloop()
+
+    def _schedule_health_check():
+        # A few seconds after the UI is up, smoke-test the known-problem tools
+        # in a background thread (no startup delay). If one is installed but
+        # broken, pop the health dialog on the UI thread. No-op when all clear.
+        import threading
+        def _work():
+            try:
+                from utils.tool_health import check as _hc
+                broken = _hc()
+            except Exception:
+                broken = []
+            if not broken:
+                return
+            def _show():
+                try:
+                    from gui.tool_health_dialog import ToolHealthDialog
+                    ToolHealthDialog(app, broken)
+                except Exception:
+                    pass
+            try:
+                app.after(0, _show)
+            except Exception:
+                pass
+        try:
+            app.after(
+                3000,
+                lambda: threading.Thread(target=_work, daemon=True).start())
+        except Exception:
+            pass
 
     if args.no_api_dialog:
         from utils.cve_lookup import _load_stored_key, get_client
