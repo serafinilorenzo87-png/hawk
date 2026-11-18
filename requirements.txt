@@ -11,3 +11,7 @@ networkx>=3.1
 # Pure-Python templating for the HTML report engine (modules.report).
 # No native dependencies — keeps the "copy the folder and run" pillar.
 jinja2>=3.1.0
+# The DB-profile loader reads its service fingerprint profiles from YAML.
+# Pure-Python, no native deps. Without it HAWK falls back to built-in Python
+# dicts and prints a "PyYAML not installed" warning at startup.
+pyyaml>=6.0

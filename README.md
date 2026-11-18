@@ -53,6 +53,7 @@ Clone the repo onto Kali, do the one-time setup (Tk runtime + virtualenv — see
 ```bash
 git clone https://github.com/serafinilorenzo87-png/hawk.git
 cd hawk
+sudo apt update
 sudo apt install -y python3-tk python3-venv
 python3 -m venv venv
 ./venv/bin/python3 -m pip install -r requirements.txt
@@ -82,13 +83,15 @@ interpreter, and Kali 2025 blocks a direct `pip` (PEP 668). Tk itself is a
 not exist; a venv inherits tkinter from the system Python.
 
 ```bash
+sudo apt update
 sudo apt install -y python3-tk python3-venv
 python3 -m venv venv
 ./venv/bin/python3 -m pip install -r requirements.txt
 ```
 
 Then run with `./venv/bin/python3 hawk.py` (or `source venv/bin/activate` once,
-then `python3 hawk.py`). A simpler but non-isolated alternative that installs
+then `python3 hawk.py`). `python3 -m venv venv` prints nothing when it succeeds —
+that is expected. A simpler but non-isolated alternative that installs
 into the system Python (`--break-system-packages`) is documented in
 [`USAGE.md`](USAGE.md).
 
