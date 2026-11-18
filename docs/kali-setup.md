@@ -1,7 +1,12 @@
 # Kali 2025 Setup Notes
 
-HAWK has no installer for now. Review the commands below and run only what you
+HAWK installs most tools on demand from the cards (RUN / INSTALL) and offers the
+one-time nmap capabilities setup on first run. The commands below are the base
+environment plus the system tools — listed so you can review and run what you
 need on your Kali VM.
+
+A couple of tools are not in the Kali repos — `rustscan` and `kerbrute` — so
+HAWK's cards install them for you (RUN INSTALL), or you can do it by hand.
 
 ## Python packages
 
@@ -30,7 +35,7 @@ sudo apt update
 sudo apt install -y \
   python3-tk python3-venv \
   xclip xterm qterminal nmap masscan \
-  smbclient enum4linux netexec \
+  smbclient enum4linux netexec onesixtyone \
   nikto gobuster ffuf wafw00f whatweb sqlmap \
   hydra john hashcat seclists wordlists \
   metasploit-framework exploitdb evil-winrm \

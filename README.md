@@ -109,8 +109,11 @@ browser.
 - The Kali/system tools HAWK drives (nmap, impacket, nuclei, hydra, netexec,
   responder, bloodhound, certipy, ligolo-ng, chisel, …) come from the Kali
   repositories and are documented in [`docs/kali-setup.md`](docs/kali-setup.md).
-  There is no installer script: setup commands are meant to be reviewed and run
-  manually.
+  HAWK installs most of these on demand from the cards (RUN / INSTALL), and the
+  first-run dialog offers the one-time nmap capabilities setup; the base
+  environment (venv + system packages) is set up from the documented steps below
+  and in [`USAGE.md`](USAGE.md). The commands stay visible, so you can review
+  them before they run.
 
 ## Notes
 
