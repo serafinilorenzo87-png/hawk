@@ -20,7 +20,7 @@ APP_NAME       = "HAWK"
 APP_FULL_NAME  = "Hostile Assessment War-Kit"
 APP_VERSION    = "1.0.0"
 APP_AUTHOR     = "HAWK Project — Open Source"
-APP_GITHUB     = "https://github.com/yourusername/hawk"
+APP_GITHUB     = "https://github.com/serafinilorenzo87-png/hawk"
 APP_DISCLAIMER = "Authorized use only · Educational & CTF purposes"
 
 # Version of the HAWK ↔ plugin contract this build implements.

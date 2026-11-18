@@ -16,9 +16,23 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from utils.config import APP_VERSION
 
 def _check_deps():
-    try: import customtkinter
+    # tkinter is a SYSTEM package (python3-tk), not a pip one, and customtkinter
+    # imports it at import time — so a missing tkinter surfaces as an ImportError
+    # on `import customtkinter`. Check tkinter first, otherwise the message blames
+    # customtkinter (a pip install that won't fix anything) for a missing apt pkg.
+    try:
+        import tkinter  # noqa: F401
+    except Exception:
+        print("\n[!] tkinter (Tk runtime) is missing — install the SYSTEM "
+              "package:\n    sudo apt install python3-tk\n"
+              "    (tkinter is NOT a pip package; customtkinter needs it.)\n")
+        sys.exit(1)
+    try:
+        import customtkinter  # noqa: F401
     except ImportError:
-        print("\n[!] customtkinter not installed. Run: pip install customtkinter\n")
+        print("\n[!] customtkinter not installed. Run:\n"
+              "    python3 -m pip install -r requirements.txt   "
+              "(ideally inside a venv)\n")
         sys.exit(1)
 _check_deps()
 import customtkinter as ctk

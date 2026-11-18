@@ -692,7 +692,16 @@ class CardRuntimeMixin:
             elif isinstance(raw, str) and raw:
                 strategies = [("install", raw)]
             else:
-                strategies = [("install", f"sudo apt install -y {tool.binary}")]
+                # A few tools' apt package name differs from the binary, or they
+                # need a post-install step. The generic `apt install -y {binary}`
+                # is wrong for them: greenbone's binary is gvm-cli but the apt
+                # package is gvm, and it needs gvm-setup afterwards.
+                _CUSTOM_INSTALL = {
+                    "greenbone": ("sudo apt update && sudo apt install -y gvm "
+                                  "&& sudo gvm-setup"),
+                }
+                strategies = [("install", _CUSTOM_INSTALL.get(
+                    tool.id, f"sudo apt install -y {tool.binary}"))]
         # Compatibility for rest of the method — keep the legacy variable.
         hint = " || ".join(f"({c})" for _, c in strategies)
 
@@ -1763,7 +1772,18 @@ class CardRuntimeMixin:
             # after timeout (124 from `timeout`, or 1 from nc EOF).
             is_nmap = tool.binary in ("nmap", "masscan", "rustscan")
             is_banner_grab = tool.id == "ssh_banner"
-            if returncode == 0 or (is_nmap and returncode == 1) or is_banner_grab:
+            # nikto exits non-zero (usually 1) even on a fully successful scan —
+            # it ignores the exit-0-on-success convention. Treat it as done when
+            # the output shows the scan actually finished, so a good run isn't
+            # flagged red. A real early failure (parse error, hard refusal) has
+            # little output and no end marker, so it still falls through to the
+            # error branch and the troubleshooting summary above.
+            is_nikto_ok = (
+                tool.binary == "nikto" and returncode != 0
+                and any(("host(s) tested" in ln or "End Time:" in ln)
+                        for _, ln in (log or [])))
+            if (returncode == 0 or (is_nmap and returncode == 1)
+                    or is_banner_grab or is_nikto_ok):
                 self._set_tool_status(tool.id, "done")
                 self.app.terminal.write(
                     f"  [+] {tool.name} completed.", "success")
