@@ -31,19 +31,21 @@ import socket
 # we extend the PATH once and pass it to every Popen call.  This way ANY
 # command HAWK runs will automatically find binaries in pentester locations.
 #
-# The cache is built lazily on first use and reused for the entire session.
-
-_hawk_env_cache = None
+# The PATH is recomputed on every call (cheap: a handful of isdir checks), so
+# a tool installed while HAWK is running — cargo/go/pipx dropping a binary into
+# ~/.cargo/bin, ~/go/bin or ~/.local/bin — is picked up without a restart. It
+# used to be frozen on first use: a just-installed tool then stayed invisible to
+# execution (the card showed it present via a fresh is_available() check, but
+# the run reused the stale PATH and failed) until HAWK was relaunched.
 
 def _hawk_env():
     """Return a copy of os.environ with PATH extended to include all
     pentester-relevant directories from modules.base._EXTRA_BIN_DIRS,
     plus common bare-file download locations (~/kerbrute, ~/chisel, …).
-    Directories that don't exist on disk are silently skipped."""
-    global _hawk_env_cache
-    if _hawk_env_cache is not None:
-        return _hawk_env_cache
+    Directories that don't exist on disk are silently skipped.
 
+    Recomputed on every call so a tool installed mid-session is seen without
+    restarting HAWK."""
     env = os.environ.copy()
     current_path = env.get("PATH", "")
 
@@ -76,8 +78,6 @@ def _hawk_env():
     # TMP_DIR by default; a real local temp only when BASE_DIR is on a
     # shared/network filesystem whose temp I/O hangs tools (nuclei).
     env["TMPDIR"] = resolve_tool_tmpdir()
-
-    _hawk_env_cache = env
     return env
 
 def is_port_free(port: int) -> bool:
