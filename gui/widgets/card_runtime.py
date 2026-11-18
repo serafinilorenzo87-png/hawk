@@ -740,7 +740,8 @@ class CardRuntimeMixin:
             ctk.CTkLabel(win, text=f"⚠  {tool.name} Not Installed",
                          font=_f("xl", True),
                          text_color=COLORS["text_yellow"]).pack(pady=(14,6))
-            _note_box(win, manual_hints[tool.id], COLORS["text_yellow"])
+            _note_box(win, manual_hints[tool.id], COLORS["text_yellow"],
+                      selectable=True)
 
             def _open_shell():
                 _safe_destroy(win)
