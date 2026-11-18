@@ -148,7 +148,81 @@ class CardHydraRoutesMixin:
         if self.app.session_manager.current:
             detected_os = self.app.session_manager.current.detected_os or ""
 
+        # SMB guardrail: hydra's SMB module is SMBv1-era and bails with
+        # "invalid reply" on modern Windows (SMB2/3), and a brute against a DC
+        # risks AD account lockout. When the target fingerprints as Windows,
+        # warn and offer netexec / password-spray first. Only fires when we
+        # actually know it is Windows — no false alarms on an unknown OS.
+        if tool.id == "hydra_smb" and "windows" in detected_os.lower():
+            self._show_hydra_smb_guardrail(
+                tool, target, port, proto, detected_os)
+            return
+
         self._show_hydra_wordlist_dialog(tool, target, port, proto, detected_os)
+
+    def _show_hydra_smb_guardrail(self, tool, target, port, proto, detected_os):
+        """Pre-run warning for HYDRA SMB against a Windows target.
+
+        hydra's SMB module speaks SMBv1 and fails on modern Windows SMB2/3
+        ("invalid reply from target"), and a brute against a DC can lock out
+        AD accounts. Offer a netexec / password-spray path, or proceed anyway."""
+        from gui.dialogs import (_make_win, _title as _dtitle, _sub, _note_box,
+                                 _btn_row, _btn, _safe_destroy)
+
+        win = _make_win(self, f"{tool.name} — heads up", 660, 540)
+        _dtitle(win, "HYDRA SMB on a Windows target")
+        _sub(win, f"{target} fingerprints as {detected_os.upper()} — "
+                  "read this first")
+
+        _note_box(
+            win,
+            "hydra's SMB module speaks the old SMBv1 dialect. Modern Windows "
+            "(and Domain Controllers) answer in SMB2/3, so hydra usually bails "
+            "with \"invalid reply from target\" and finds nothing — a tool "
+            "limit, not your target.",
+            COLORS["text_yellow"])
+        _note_box(
+            win,
+            "Worse: a password BRUTE against SMB on a DC can trip the AD "
+            "account-lockout policy and lock out real users (and it is loud). "
+            "On AD prefer a controlled PASSWORD SPRAY — one or two common "
+            "passwords across many users, under the lockout threshold.",
+            COLORS["text_red"])
+
+        spray = (f"nxc smb {target} "
+                 f"-u /usr/share/seclists/Usernames/top-usernames-shortlist.txt "
+                 f"-p 'Autumn2024!' --continue-on-success")
+        _note_box(
+            win,
+            "Recommended — netexec speaks SMB2/3 and sprays politely:\n\n"
+            f"  {spray}\n\n"
+            "(edit the password; spray ONE password across the user list, "
+            "wait between rounds, mind the lockout threshold.)",
+            COLORS["text_green"], selectable=True)
+
+        def _use_nxc():
+            _safe_destroy(win)
+            opened = False
+            try:
+                from utils.runner import open_native_shell
+                opened = open_native_shell(
+                    title="HAWK — netexec SMB spray", initial_cmd=spray,
+                    auto_close=False)
+            except Exception:
+                opened = False
+            if not opened:
+                self.app.terminal.write(
+                    f"  [hawk] open a shell and run:  {spray}", "warn")
+
+        def _proceed():
+            _safe_destroy(win)
+            self._show_hydra_wordlist_dialog(
+                tool, target, port, proto, detected_os)
+
+        row = _btn_row(win)
+        _btn(row, "USE NETEXEC (spray)", _use_nxc, primary=True, w=210)
+        _btn(row, "PROCEED WITH HYDRA", _proceed, w=190)
+        _btn(row, "CANCEL", lambda: _safe_destroy(win))
 
     def _show_hydra_wordlist_dialog(self, tool, target, port, proto, detected_os):
         """Hydra dialog with OS selection and wordlist dropdowns."""
