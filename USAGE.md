@@ -249,6 +249,29 @@ sys.modules[__name__] = _d
 PYSHIM
 ```
 
+**netexec / nxc crashes on startup (Kali 2025 / Python 3.13)**
+
+netexec installed from apt can crash on import — before it reaches any target —
+with a traceback ending in:
+
+```
+AttributeError: 'typing.Union' object has no attribute '__module__'
+```
+
+This is a dependency clash, not a HAWK or target problem: apt's netexec pulls an
+`httpcore` (via dnspython) too old for Kali 2025's Python 3.13. Reinstall netexec
+isolated with pipx so it gets fresh, compatible dependencies:
+
+```bash
+sudo apt remove -y netexec
+pipx install netexec
+pipx ensurepath
+```
+
+It lands in `~/.local/bin` (on HAWK's PATH), so HAWK finds it — click the card
+again, no restart needed. HAWK's startup health check also flags this crash and
+offers the same fix.
+
 ---
 
 ## Troubleshooting
