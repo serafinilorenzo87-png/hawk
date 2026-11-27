@@ -1,5 +1,9 @@
 # HAWK — Hostile Assessment War-Kit
 
+<p align="center">
+  <img src="docs/images/hawk-banner.png" alt="HAWK — Hostile Assessment War-Kit" width="100%">
+</p>
+
 HAWK is a portable, Kali-oriented **penetration-testing GUI**. It organises an
 engagement around a ten-phase kill-chain — from reconnaissance to reporting —
 with a live **Target Intelligence** panel that turns raw tool output into
@@ -44,6 +48,16 @@ findings, and driving the credential and Active Directory lifecycle
 report. Gaining the initial foothold — the exploit itself, or social
 engineering — is left to the wrapped tools and to the operator. HAWK is
 strongest in enumeration, web testing, and post-exploitation / AD.
+
+## Screenshots
+
+The ten-phase kill-chain console — session not started:
+
+![HAWK — main console](docs/images/hawk-main.webp)
+
+Curating Target Intelligence findings before generating the report:
+
+![HAWK — findings curation](docs/images/hawk-findings.webp)
 
 ## Run
 
